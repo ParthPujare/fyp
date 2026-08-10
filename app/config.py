@@ -31,6 +31,15 @@ class ServiceSettings(BaseModel):
     finance_url: str = "http://127.0.0.1:8005"
 
 
+class GuardrailSettings(BaseModel):
+    """Loop guardrail bounds (see plan.md §6)."""
+
+    max_steps: int = Field(default=10, ge=1)
+    tool_budget: int = Field(default=8, ge=1)
+    call_timeout_seconds: float = Field(default=30.0, gt=0)
+    run_timeout_seconds: float = Field(default=120.0, gt=0)
+
+
 class Settings(BaseSettings):
     app_name: str = "fyp-agent-harness"
     env: str = "dev"
@@ -38,6 +47,7 @@ class Settings(BaseSettings):
     jwt: JWTSettings = JWTSettings()
     llm: LLMSettings = LLMSettings()
     services: ServiceSettings = ServiceSettings()
+    guardrails: GuardrailSettings = GuardrailSettings()
 
     model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")
 

@@ -1,4 +1,4 @@
-.PHONY: install test lint run auth gateway crm hr devops finance
+.PHONY: install test lint run demo auth gateway crm hr devops finance
 
 install:
 	uv sync
@@ -11,6 +11,9 @@ lint:
 
 run:
 	bash scripts/run_dev.sh
+
+demo:
+	uv run python scripts/demo_agent.py
 
 auth:
 	uv run uvicorn app.auth.service:app --reload --port 8000

@@ -12,6 +12,8 @@ dependencies = [
     "PyJWT>=2.10",
     "httpx>=0.27",
     "litellm>=1.52",
+    "langgraph>=1.2.10",
+    "langchain-core>=1.5.3",
 ]
 
 [dependency-groups]

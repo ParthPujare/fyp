@@ -96,7 +96,7 @@ Role assignment lives in Casbin (`g, alice@acme.com, marketing_agent`) or assign
 
 ## 4. Proposed Repository Structure
 
-> **Status (2026-08-10):** code lives at the **repo root** (next to `ref_docs/` + `agent_history/`), not inside a `fyp-agent-harness/` subfolder. `✅` = built in Milestone 1 (weeks 1–2); unmarked = planned milestone.
+> **Status (2026-08-10):** code lives at the **repo root** (next to `ref_docs/` + `agent_history/`), not inside a `fyp-agent-harness/` subfolder. `✅` = built; unmarked = planned milestone.
 
 ```
 fyp-agent-harness/            ← this repo (root: FYP/)
@@ -110,9 +110,9 @@ fyp-agent-harness/            ← this repo (root: FYP/)
 │   ├── auth/                 ✅ mock JWT login, role claims, token verify — service on :8000
 │   ├── llm/                  ✅ LiteLLM provider + MockLLM adapter + factory
 │   ├── ops/                  ✅ trace schema + SQLite TraceStore (append-only, SHA-256 chain)
-│   ├── gateway/              ✅ harness shell: JWT-verified role-aware /hello (:8001)
-│   ├── agent/                planned — LangGraph graph, nodes, tools (HTTP to services) [Wk 3–4]
-│   │   └── guardrails.py     planned — step limit, tool-call budget, deny-retry, timeout
+│   ├── gateway/              ✅ JWT-verified /hello + /chat (bounded LangGraph run) (:8001)
+│   ├── agent/                ✅ LangGraph graph + HTTP tools to services; guardrails node
+│   │   └── guardrails.py     ✅ step limit, tool-call budget, deny-retry, timeout (Wk 3–4)
 │   ├── harness/              planned — THE CORE: policy, interception, sanitize, audit [Wk 5–6]
 │   │   ├── policies/         planned — casbin model.conf + policy.csv
 │   │   ├── intercept.py      planned — runtime enforcement wrapper
@@ -317,7 +317,7 @@ Every change written to the audit log.
 | Weeks | Milestone | Deliverable | Status |
 |---|---|---|---|
 | 1–2 | Repo scaffold, env/config, mock JWT login, LiteLLM provider + MockLLM, 4 mock services (FastAPI + seeded SQLite), **trace schema defined** | Services run; role-aware hello; tests green offline | ✅ **DONE 2026-08-10** (session_002) |
-| 3–4 | LangGraph agent + HTTP tools + **guardrails node** (max steps, tool budget, deny-retry, timeout) | Bounded agent loop; deny-storm test passes | |
+| 3–4 | LangGraph agent + HTTP tools + **guardrails node** (max steps, tool budget, deny-retry, timeout) | Bounded agent loop; deny-storm test passes | ✅ **DONE 2026-08-10** (session_003) |
 | 5–6 | **Casbin core** (pulled earlier): model.conf + policy.csv (RBAC + domains), `filter_tools`, `intercept`, audit log | Unauthorized tool physically blocked | |
 | 7–8 | **3-tier + episodic memory**: BaseStore namespaces, `load_memory`/`reflect`/`recall`, frozen snapshot, extract/dedup/budget/eviction | Multi-turn chat with RBAC-scoped recall incl. past-session search | |
 | 9–10 | PII sanitizer + HITL interrupts + dashboard v1 (approvals, users, depts) | Admin approves finance transfer from web panel | |

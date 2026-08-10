@@ -2,7 +2,7 @@
 
 Detailed architecture flow for the Enterprise AI Personal Assistant secured by a zero-trust harness. This document is the implementation blueprint derived from `plan.md`. Every flow below maps to a module in the proposed repository structure and to a test in the attack/verification suites.
 
-> **Implementation status (2026-08-10):** Milestone 1 (weeks 1–2) is built — see `agent_history/session_002_milestone1_foundation.md`. Live: `auth` :8000, `gateway` :8001 (role-aware `/hello` shell), and all four dept services :8002–8005 with seeded SQLite. The trace event schema (§12) + `TraceStore` exist in `app/ops/`. The LangGraph agent, Casbin harness, memory, dashboard, and evals remain planned per `ref_docs/plan.md` §11. Code lives at the repo root next to `ref_docs/` + `agent_history/`.
+> **Implementation status (2026-08-10):** Milestone 1 (weeks 1–2) and Milestone 2 (weeks 3–4) are built. Live: `auth` :8000, `gateway` :8001 (role-aware `/hello` + bounded `/chat`), and all four dept services :8002–8005 with seeded SQLite. `app/agent/` has the LangGraph agent, HTTP tool registry/executor, scope-gate stub, and guardrails node (max steps, tool budget, deny-retry, timeout) with the trace schema (§12) + `TraceStore` wired into every run. Casbin `filter_tools`/`intercept` (weeks 5–6), memory, dashboard, and evals remain planned per `ref_docs/plan.md` §11. Code lives at the repo root next to `ref_docs/` + `agent_history/`.
 
 ---
 
@@ -43,7 +43,7 @@ Detailed architecture flow for the Enterprise AI Personal Assistant secured by a
 | Process | Role | Persistence | Port (dev) | Status (M1) |
 |---|---|---|---|---|
 | `auth` service | Mock JWT issue/verify | none (stateless) | 8000 | ✅ live |
-| `harness` gateway | LangGraph runtime + enforcement | SQLite checkpointer, trace store | 8001 | ⚠️ shell only — `/hello`; graph + enforcement Wk 3–6 |
+| `harness` gateway | LangGraph runtime + enforcement | SQLite checkpointer, trace store | 8001 | ✅ live — `/hello` + `/chat` (bounded agent loop); Casbin enforcement Wk 5–6 |
 | `/crm` service | Marketing dept tools | SQLite | 8002 | ✅ live (seeded) |
 | `/hr` service | HR dept tools | SQLite | 8003 | ✅ live (seeded) |
 | `/devops` service | DevOps dept tools | SQLite | 8004 | ✅ live (seeded) |
