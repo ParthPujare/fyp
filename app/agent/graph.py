@@ -1,27 +1,41 @@
-"""LangGraph agent — the bounded tool-use loop (proposed_architecture.md §11).
+"""LangGraph agent — the bounded tool-use loop with memory nodes (plan.md §5, §11).
 
-Graph: START → agent → execute_tools → (should_continue) → agent | finalize → END.
+Graph: START → load_memory → agent ⇄ execute_tools → finalize → reflect → END.
 
-The `agent` node calls the existing LLMProvider protocol (MockLLM/LiteLLM stay
-as-is — no langchain chat-model wrapper). `execute_tools` applies the scope
-gate and calls the dept services over HTTP. Guardrails bound the loop
-deterministically; every guardrail trigger is traced.
+- `load_memory` (graph start): asks Casbin which memory scopes this caller may READ,
+  distils a frozen snapshot, and injects it as a system message (frozen per session).
+- `agent` calls the LLMProvider protocol (MockLLM/LiteLLM stay as-is).
+- `execute_tools` applies the Casbin intercept, routes memory tools (`recall`) to the
+  RecallService, and calls dept services over HTTP. Guardrails bound the loop.
+- `reflect` (graph end, post-response): appends the episodic transcript, extracts
+  durable facts, enforces each write via Casbin, applies dedup/budget, and suspends
+  central writes through LangGraph `interrupt()` for HITL approval.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from operator import add
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 
 from app.agent.guardrails import GuardrailTracker
 from app.agent.tools import TOOL_REGISTRY, ToolExecutor, ToolResult
+from app.config import MemorySettings
 from app.harness.audit import AuditLog
 from app.harness.enforcer import PolicyEnforcer
 from app.harness.intercept import intercept_tool
 from app.llm.base import LLMProvider
+from app.memory.approvals import ApprovalStore
+from app.memory.edit import MemoryEditor, MemoryMatchError
+from app.memory.episodic import EpisodicStore
+from app.memory.extract import extract_facts
+from app.memory.recall import RecallService
+from app.memory.scopes import SCOPE_CENTRAL, scope_dept, scope_to_namespace, scope_user
+from app.memory.snapshot import build_snapshot
+from app.memory.store import SqliteBaseStore
 from app.ops.schema import TraceEventType
 from app.ops.store import TraceStore
 
@@ -31,7 +45,9 @@ class AgentState(TypedDict, total=False):
     claims: dict[str, Any]
     input: str
     pending_calls: list[dict[str, Any]]
-    tool_calls: Annotated[list[dict[str, Any]], add]
+    tool_calls: list[dict[str, Any]]
+    memory_snapshot: str
+    memory_loaded: bool
     reply: str
     final: bool
     force_end: bool
@@ -48,19 +64,62 @@ class AgentDeps:
     run_id: str
     actor: dict[str, Any]
     tool_schemas: list[dict[str, Any]]
+    store: SqliteBaseStore
+    episodic: EpisodicStore
+    approvals: ApprovalStore
+    recall: RecallService
+    memory: MemorySettings
+    thread_id: str
+    executed_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _summary(state: AgentState, tracker: GuardrailTracker) -> str:
+def _summary(state: AgentState, deps: AgentDeps) -> str:
     """Deterministic final reply when a guardrail ends the loop mid-run."""
-    calls = state.get("tool_calls") or []
+    calls = deps.executed_calls
     detail = "; ".join(
         f"{c['name']} -> {c.get('outcome', '?')}" for c in calls
     ) or "no tool calls completed"
-    trigger = tracker.hits[-1]["type"] if tracker.hits else "limit"
+    trigger = deps.tracker.hits[-1]["type"] if deps.tracker.hits else "limit"
     return f"Loop guardrail hit ({trigger}); partial progress: {detail}"
 
 
-def build_agent_graph(deps: AgentDeps):
+def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
+    def load_memory(state: AgentState) -> dict[str, Any]:
+        claims = state["claims"]
+        actor = deps.actor
+        user_msg = {"role": "user", "content": state.get("input", "")}
+        # Reset per-turn transient control fields (threads persist them otherwise).
+        reset = {"final": False, "force_end": False, "pending_calls": [], "reply": ""}
+        if state.get("memory_loaded"):
+            return {**reset, "messages": [user_msg]}
+
+        read_scopes: list[str] = []
+        candidates = [
+            SCOPE_CENTRAL,
+            scope_dept(str(claims.get("dept", ""))),
+            scope_user(str(claims.get("sub", ""))),
+        ]
+        for scope in candidates:
+            allowed = deps.enforcer.memory_allowed(scope, "read", claims)
+            items = deps.store.items_in(scope_to_namespace(scope)) if allowed else []
+            deps.trace.add_event(
+                deps.run_id,
+                TraceEventType.MEMORY_LOAD,
+                actor,
+                {"scope": scope, "allowed": allowed, "facts": len(items)},
+            )
+            if allowed:
+                read_scopes.append(scope)
+
+        facts_by_scope = {scope: deps.store.items_in(scope_to_namespace(scope)) for scope in read_scopes}
+        snapshot_text = build_snapshot(facts_by_scope, deps.memory.snapshot_max_chars)
+        return {
+            **reset,
+            "messages": [{"role": "system", "content": snapshot_text}, user_msg],
+            "memory_snapshot": snapshot_text,
+            "memory_loaded": True,
+        }
+
     def agent_node(state: AgentState) -> dict[str, Any]:
         tracker = deps.tracker
         tracker.begin_step()
@@ -73,11 +132,11 @@ def build_agent_graph(deps: AgentDeps):
         if tracker.budget_exhausted():
             tracker.hit("budget")
             deps.trace.add_event(deps.run_id, TraceEventType.GUARDRAIL, deps.actor, {"type": "budget"})
-            return {"reply": _summary(state, tracker), "final": True}
+            return {"reply": _summary(state, deps), "final": True}
         if tracker.run_timed_out():
             tracker.hit("timeout")
             deps.trace.add_event(deps.run_id, TraceEventType.GUARDRAIL, deps.actor, {"type": "timeout"})
-            return {"reply": _summary(state, tracker), "final": True}
+            return {"reply": _summary(state, deps), "final": True}
 
         resp = deps.provider.generate(state["messages"], tools=deps.tool_schemas)
         message: dict[str, Any] = {"role": "assistant", "content": resp.text}
@@ -127,7 +186,10 @@ def build_agent_graph(deps: AgentDeps):
                     run_id=deps.run_id,
                 )
                 if result is None:
-                    result = deps.executor.execute(tool, args)
+                    if tool.handler == "recall":
+                        result = deps.recall.recall(str(args.get("query", "")), state["claims"])
+                    else:
+                        result = deps.executor.execute(tool, args)
                 else:
                     deps.tracker.mark_denied(name)
 
@@ -148,6 +210,7 @@ def build_agent_graph(deps: AgentDeps):
             )
             messages.append({"role": "tool", "content": result.summary, "name": name})
             executed.append({"name": name, "args": args, "outcome": outcome, "latency_ms": result.latency_ms})
+            deps.executed_calls.append(executed[-1])
 
             if tracker.budget_exhausted():
                 break
@@ -187,14 +250,118 @@ def build_agent_graph(deps: AgentDeps):
     def finalize(state: AgentState) -> dict[str, Any]:
         if state.get("final"):
             return {}
-        return {"reply": _summary(state, deps.tracker), "final": True}
+        return {"reply": _summary(state, deps), "final": True}
+
+    def reflect(state: AgentState) -> dict[str, Any]:
+        messages = state.get("messages") or []
+        claims = state["claims"]
+        actor = deps.actor
+
+        transcript = "\n".join(
+            f"{m.get('role')}: {m.get('content', '')}"
+            for m in messages
+            if m.get("role") in ("user", "assistant")
+        )
+        if transcript.strip():
+            ep_scope = scope_dept(str(claims.get("dept", "")))
+            deps.episodic.append_transcript(ep_scope, deps.run_id, actor, transcript)
+            deps.trace.add_event(
+                deps.run_id,
+                TraceEventType.MEMORY_WRITE,
+                actor,
+                {"scope": ep_scope, "kind": "episodic", "decision": "allowed"},
+            )
+
+        editor = MemoryEditor(deps.store, deps.memory)
+        for fact in extract_facts(messages, claims):
+            resource = {"type": "memory", "id": fact.scope}
+            if not deps.enforcer.memory_allowed(fact.scope, "write", claims):
+                deps.audit.log(decision="DENY", resource=resource, actor=actor, run_id=deps.run_id, reason="rbac")
+                deps.trace.add_event(
+                    deps.run_id,
+                    TraceEventType.MEMORY_WRITE,
+                    actor,
+                    {"scope": fact.scope, "op": fact.op, "decision": "denied", "reason": "rbac"},
+                )
+                continue
+
+            if fact.scope == SCOPE_CENTRAL:
+                approval_id = deps.approvals.create(
+                    deps.run_id,
+                    deps.thread_id,
+                    resource,
+                    actor,
+                    {"op": fact.op, "text": fact.text, "match": fact.match},
+                )
+                deps.trace.add_event(
+                    deps.run_id,
+                    TraceEventType.MEMORY_WRITE,
+                    actor,
+                    {"scope": fact.scope, "op": fact.op, "decision": "pending", "approval_id": approval_id},
+                )
+                approved = interrupt(
+                    {
+                        "approval_id": approval_id,
+                        "resource": resource,
+                        "actor": actor,
+                        "text": fact.text,
+                        "thread_id": deps.thread_id,
+                    }
+                )
+                if approved:
+                    editor.apply(fact)
+                    deps.audit.log(decision="APPROVED", resource=resource, actor=actor, run_id=deps.run_id, reason="hitl")
+                    deps.trace.add_event(
+                        deps.run_id,
+                        TraceEventType.MEMORY_WRITE,
+                        actor,
+                        {"scope": fact.scope, "op": fact.op, "decision": "approved", "approval_id": approval_id},
+                    )
+                else:
+                    deps.audit.log(decision="REJECTED", resource=resource, actor=actor, run_id=deps.run_id, reason="hitl")
+                    deps.trace.add_event(
+                        deps.run_id,
+                        TraceEventType.MEMORY_WRITE,
+                        actor,
+                        {"scope": fact.scope, "op": fact.op, "decision": "rejected", "approval_id": approval_id},
+                    )
+            else:
+                try:
+                    outcome = editor.apply(fact)
+                except MemoryMatchError as exc:
+                    deps.trace.add_event(
+                        deps.run_id,
+                        TraceEventType.MEMORY_WRITE,
+                        actor,
+                        {"scope": fact.scope, "op": fact.op, "decision": "skipped", "reason": exc.code},
+                    )
+                    continue
+                deps.audit.log(decision="ALLOW", resource=resource, actor=actor, run_id=deps.run_id, reason="rbac")
+                deps.trace.add_event(
+                    deps.run_id,
+                    TraceEventType.MEMORY_WRITE,
+                    actor,
+                    {"scope": fact.scope, "op": outcome.op, "decision": "allowed"},
+                )
+                for evicted in outcome.evicted:
+                    deps.trace.add_event(
+                        deps.run_id,
+                        TraceEventType.MEMORY_WRITE,
+                        actor,
+                        {"scope": fact.scope, "op": "evict", "key": evicted},
+                    )
+        return {}
 
     graph = StateGraph(AgentState)
+    graph.add_node("load_memory", load_memory)
     graph.add_node("agent", agent_node)
     graph.add_node("execute_tools", execute_tools)
     graph.add_node("finalize", finalize)
-    graph.add_edge(START, "agent")
+    graph.add_node("reflect", reflect)
+    graph.add_edge(START, "load_memory")
+    graph.add_edge("load_memory", "agent")
     graph.add_conditional_edges("agent", route_from_agent, {"tools": "execute_tools", "end": "finalize"})
     graph.add_conditional_edges("execute_tools", should_continue, {"agent": "agent", "end": "finalize"})
-    graph.add_edge("finalize", END)
-    return graph.compile()
+    graph.add_edge("finalize", "reflect")
+    graph.add_edge("reflect", END)
+    return graph.compile(checkpointer=checkpointer)

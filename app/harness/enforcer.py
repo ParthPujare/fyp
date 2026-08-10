@@ -19,6 +19,7 @@ from typing import Any
 import casbin
 
 from app.agent.tools import ToolSpec
+from app.memory.scopes import SCOPE_CENTRAL
 
 POLICY_DIR = Path(__file__).resolve().parent / "policies"
 MODEL_PATH = POLICY_DIR / "model.conf"
@@ -51,4 +52,39 @@ class PolicyEnforcer:
             str(claims.get("dept", "")),
             obj,
             act,
+        )
+
+    def memory_allowed(self, scope: str, act: str, claims: dict[str, Any]) -> bool:
+        """Can (role, dept) read/write a memory scope? (plan.md §5.1, §5.10).
+
+        Scopes are tier-gated + self-scoped: a dept scope must be the caller's own
+        dept and a user scope must be the caller's own uid — cross-tier reads and
+        writes are denied even if a wildcard policy row existed.
+
+        Note: obj names use underscores (`memory_central`) because Casbin's
+        `keyMatch2` treats `:` as a route-parameter delimiter — `memory:central`
+        would match `memory:dept`.
+        """
+        sub = str(claims.get("sub", ""))
+        dom = str(claims.get("dept", ""))
+        if scope == SCOPE_CENTRAL:
+            return self.enforce(sub, dom, "memory_central", act)
+        kind, _, value = scope.partition("/")
+        if kind == "dept":
+            if value != dom:
+                return False
+            return self.enforce(sub, dom, "memory_dept", act)
+        if kind == "user":
+            if value != sub:
+                return False
+            return self.enforce(sub, dom, "memory_user", act)
+        return False
+
+    def memory_recall_allowed(self, claims: dict[str, Any]) -> bool:
+        """Gate for the `recall` tool (FTS5 episodic search)."""
+        return self.enforce(
+            str(claims.get("sub", "")),
+            str(claims.get("dept", "")),
+            "memory_recall",
+            "use",
         )

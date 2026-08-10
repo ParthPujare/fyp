@@ -110,12 +110,12 @@ fyp-agent-harness/            ← this repo (root: FYP/)
 │   ├── auth/                 ✅ mock JWT login, role claims, token verify — service on :8000
 │   ├── llm/                  ✅ LiteLLM provider + MockLLM adapter + factory
 │   ├── ops/                  ✅ trace schema + SQLite TraceStore (append-only, SHA-256 chain)
-│   ├── gateway/              ✅ JWT-verified /hello + /chat (bounded LangGraph run) (:8001)
-│   ├── agent/                ✅ LangGraph graph + HTTP tools to services; guardrails node
+│   ├── gateway/              ✅ JWT-verified /hello + /chat (thread-backed) + /approvals/{id}/decide (:8001)
+│   ├── agent/                ✅ LangGraph graph (load_memory/agent/tools/finalize/reflect) + HTTP tools; guardrails node
 │   │   └── guardrails.py     ✅ step limit, tool-call budget, deny-retry, timeout (Wk 3–4)
 │   ├── harness/              ✅ THE CORE: Casbin policies + enforcer + filter_tools + intercept + audit log [Wk 5–6]
-│   │   ├── policies/         ✅ casbin model.conf + policy.csv (RBAC with domains, deny-by-default)
-│   │   ├── enforcer.py       ✅ PolicyEnforcer wrapper — enforce(sub, dom, obj, act); tool_allowed(tool, claims)
+│   │   ├── policies/         ✅ casbin model.conf + policy.csv (RBAC with domains, deny-by-default) + memory rows [Wk 7–8]
+│   │   ├── enforcer.py       ✅ PolicyEnforcer wrapper — enforce(sub, dom, obj, act); tool_allowed; memory_allowed; memory_recall_allowed
 │   │   ├── filter.py         ✅ per-role tool schema filtering (visible set → LLM context)
 │   │   ├── intercept.py      ✅ runtime enforcement wrapper (physical block + audit)
 │   │   ├── audit.py          ✅ structured JSONL logging (ALLOW/DENY/APPROVED/REJECTED)
@@ -123,11 +123,11 @@ fyp-agent-harness/            ← this repo (root: FYP/)
 │   ├── evals/                planned — auto-eval hook + deterministic/ + judge/ suites [Wk 12]
 │   ├── dashboard/            planned — FastAPI + web UI: approvals, users, depts, skills
 │   │                         planned —   editor, memory browser, trace viewer, evals [Wk 9–10]
-│   ├── memory/               planned — 3-tier + episodic stores, load/reflect/recall nodes,
-│   │                         planned —   extract, dedup, budget [Wk 7–8]
+│   ├── memory/               ✅ 3-tier SqliteBaseStore + episodic FTS5 + approvals, load/reflect/recall
+│   │                         ✅   extract, dedup, budget/eviction, snapshot [Wk 7–8]
 │   ├── skills/               planned — folder/markdown skill registry + (stretch) learn_skill [Wk 11]
 │   └── services/             ✅ crm/hr/devops/finance (FastAPI + SQLite + seed) :8002–8005
-└── tests/                    ✅ offline suites: auth, llm, trace, services, smoke — 32 tests
+└── tests/                    ✅ offline suites: auth, llm, trace, services, smoke, memory — 95 tests
 ```
 
 ---
@@ -320,7 +320,7 @@ Every change written to the audit log.
 | 1–2 | Repo scaffold, env/config, mock JWT login, LiteLLM provider + MockLLM, 4 mock services (FastAPI + seeded SQLite), **trace schema defined** | Services run; role-aware hello; tests green offline | ✅ **DONE 2026-08-10** (session_002) |
 | 3–4 | LangGraph agent + HTTP tools + **guardrails node** (max steps, tool budget, deny-retry, timeout) | Bounded agent loop; deny-storm test passes | ✅ **DONE 2026-08-10** (session_003) |
 | 5–6 | **Casbin core** (pulled earlier): model.conf + policy.csv (RBAC + domains), `filter_tools`, `intercept`, audit log | Unauthorized tool physically blocked | ✅ **DONE 2026-08-10** (session_004) |
-| 7–8 | **3-tier + episodic memory**: BaseStore namespaces, `load_memory`/`reflect`/`recall`, frozen snapshot, extract/dedup/budget/eviction | Multi-turn chat with RBAC-scoped recall incl. past-session search | |
+| 7–8 | **3-tier + episodic memory**: BaseStore namespaces, `load_memory`/`reflect`/`recall`, frozen snapshot, extract/dedup/budget/eviction, HITL for central writes, thread-backed chat | Multi-turn chat with RBAC-scoped recall incl. past-session search | ✅ **DONE 2026-08-10** (session_005) |
 | 9–10 | PII sanitizer + HITL interrupts + dashboard v1 (approvals, users, depts) | Admin approves finance transfer from web panel | |
 | 11 | Folder/markdown skills + skill RBAC + **skills editor + memory browser** | Edit a skill → behavior changes on next run | |
 | 12 | **Trace viewer + evals harness** (deterministic + judge), auto-eval hook | Ops tab shows run trees; eval scores per run | |

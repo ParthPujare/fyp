@@ -31,6 +31,7 @@ class ToolSpec:
     path_params: tuple[str, ...] = ()
     query_params: tuple[str, ...] = ()
     body_fields: tuple[str, ...] = ()
+    handler: str = "http"  # "http" | "recall" — routes execution (memory tools have no HTTP endpoint)
 
 
 def _t(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -246,6 +247,21 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {t.name: t for t in [
         args_schema=_t({}, []),
         required_scope="finance:read",
         risk_level="read",
+    ),
+    # ---- Memory (weeks 7-8): FTS5 episodic recall tool ----
+    # Gated by Casbin obj `memory_recall`; routed to the RecallService (not HTTP)
+    # via `handler="recall"` in execute_tools.
+    ToolSpec(
+        name="recall",
+        dept="memory",
+        description="Search past conversations (full-text recall) within your permitted memory scopes.",
+        http_method="GET",
+        path_template="",
+        args_schema=_t({"query": {"type": "string", "description": "topic to search past conversations for"}}, ["query"]),
+        required_scope="memory_recall:use",
+        risk_level="read",
+        query_params=("query",),
+        handler="recall",
     ),
 ]}
 

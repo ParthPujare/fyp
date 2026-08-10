@@ -24,12 +24,25 @@ class LLMSettings(BaseModel):
 class ServiceSettings(BaseModel):
     data_dir: Path = Path("data")
     audit_path: Path = Path("data/audit.jsonl")
+    memory_path: Path = Path("data/memory.sqlite")
+    checkpoint_path: Path = Path("data/checkpoints.sqlite")
     auth_url: str = "http://127.0.0.1:8000"
     gateway_url: str = "http://127.0.0.1:8001"
     crm_url: str = "http://127.0.0.1:8002"
     hr_url: str = "http://127.0.0.1:8003"
     devops_url: str = "http://127.0.0.1:8004"
     finance_url: str = "http://127.0.0.1:8005"
+
+
+class MemorySettings(BaseModel):
+    """3-tier + episodic memory bounds (see ref_docs/plan.md §5.8)."""
+
+    central_bytes: int = Field(default=8192, ge=1)
+    dept_bytes: int = Field(default=16384, ge=1)
+    user_bytes: int = Field(default=4096, ge=1)
+    snapshot_max_chars: int = Field(default=6000, ge=1)
+    recall_top_k: int = Field(default=5, ge=1)
+    episodic_scope: str = "dept"  # "dept" (team recall) — locked decision (session_005)
 
 
 class GuardrailSettings(BaseModel):
@@ -49,6 +62,7 @@ class Settings(BaseSettings):
     llm: LLMSettings = LLMSettings()
     services: ServiceSettings = ServiceSettings()
     guardrails: GuardrailSettings = GuardrailSettings()
+    memory: MemorySettings = MemorySettings()
 
     model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")
 

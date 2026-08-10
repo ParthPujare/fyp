@@ -62,8 +62,8 @@ class TraceStore:
         blob = json.dumps(content, sort_keys=True, default=str).encode("utf-8")
         return hashlib.sha256(prev_hash.encode("utf-8") + blob).hexdigest()
 
-    def start_run(self, actor: dict[str, Any], input_summary: dict[str, Any]) -> str:
-        run_id = str(uuid.uuid4())
+    def start_run(self, actor: dict[str, Any], input_summary: dict[str, Any], run_id: str | None = None) -> str:
+        run_id = run_id or str(uuid.uuid4())
         self.add_event(run_id, TraceEventType.RUN_START, actor, {"input": input_summary})
         return run_id
 

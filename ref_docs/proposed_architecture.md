@@ -2,7 +2,7 @@
 
 Detailed architecture flow for the Enterprise AI Personal Assistant secured by a zero-trust harness. This document is the implementation blueprint derived from `plan.md`. Every flow below maps to a module in the proposed repository structure and to a test in the attack/verification suites.
 
-> **Implementation status (2026-08-10):** Milestones 1–3 (weeks 1–6) are built. Live: `auth` :8000, `gateway` :8001 (role-aware `/hello` + bounded `/chat`), and all four dept services :8002–8005 with seeded SQLite. `app/agent/` has the LangGraph agent, HTTP tool registry/executor, and guardrails node (max steps, tool budget, deny-retry, timeout) with the trace schema (§12) + `TraceStore` wired into every run. `app/harness/` now holds the Casbin core: `policies/{model.conf,policy.csv}`, `PolicyEnforcer`, `filter_tools`, `intercept`, and the JSONL audit log — the `scope_allowed` stub is gone. Memory (weeks 7–8), PII sanitizer + HITL + dashboard (weeks 9–10), skills (week 11), and evals (week 12) remain planned per `ref_docs/plan.md` §11. Code lives at the repo root next to `ref_docs/` + `agent_history/`.
+> **Implementation status (2026-08-10):** Milestones 1–4 (weeks 1–8) are built. Live: `auth` :8000, `gateway` :8001 (role-aware `/hello`, thread-backed `/chat`, `/approvals/{id}/decide`), and all four dept services :8002–8005 with seeded SQLite. `app/agent/` has the LangGraph agent (graph now `load_memory → agent ⇄ execute_tools → finalize → reflect`), HTTP tool registry/executor (incl. the memory `recall` tool), and guardrails node with the trace schema (§12) + `TraceStore` wired into every run. `app/harness/` holds the Casbin core: `policies/{model.conf,policy.csv}`, `PolicyEnforcer` (incl. `memory_allowed`/`memory_recall_allowed`), `filter_tools`, `intercept`, and the JSONL audit log — the `scope_allowed` stub is gone. `app/memory/` (weeks 7–8) is built: `SqliteBaseStore` (3 tiers: central / dept / user) as a persistent LangGraph `BaseStore`, rule-based fact extraction + dedup + per-tier budget/eviction, FTS5 episodic recall (scope-gated), frozen snapshot per session, LangGraph checkpointer for threads, and HITL `interrupt()` + SQLite `ApprovalStore` for central writes. PII sanitizer + dashboard (weeks 9–10), skills (week 11), and evals (week 12) remain planned per `ref_docs/plan.md` §11. Code lives at the repo root next to `ref_docs/` + `agent_history/`.
 
 ---
 
@@ -43,7 +43,7 @@ Detailed architecture flow for the Enterprise AI Personal Assistant secured by a
 | Process | Role | Persistence | Port (dev) | Status (M1) |
 |---|---|---|---|---|
 | `auth` service | Mock JWT issue/verify | none (stateless) | 8000 | ✅ live |
-| `harness` gateway | LangGraph runtime + enforcement | SQLite checkpointer, trace store | 8001 | ✅ live — `/hello` + `/chat` (bounded agent loop); Casbin enforcement Wk 5–6 |
+| `harness` gateway | LangGraph runtime + enforcement | SQLite checkpointer, trace store | 8001 | ✅ live — `/hello`, thread-backed `/chat`, `/approvals/{id}/decide` |
 | `/crm` service | Marketing dept tools | SQLite | 8002 | ✅ live (seeded) |
 | `/hr` service | HR dept tools | SQLite | 8003 | ✅ live (seeded) |
 | `/devops` service | DevOps dept tools | SQLite | 8004 | ✅ live (seeded) |
@@ -225,10 +225,11 @@ PER-RUN:
 ```
 load_memory (graph start):
   read_scopes = [s for s in {central, dept/<own>, user/<sub>}
-                 if enforcer.enforce(sub, dom, f"memory:{s}", "read")]
-  facts = for each allowed scope: BaseStore.get_namespace(s)
+                 if enforcer.memory_allowed(s, "read", claims)]   # self-scoped
+  facts = for each allowed scope: BaseStore.items_in(namespace(s))
   snapshot = distil(facts)          # rule-based, frozen for this session
   system_prompt += snapshot block   # Marketing never sees HR/other-user memory
+  (thread-backed: snapshot is loaded once per thread and reused)
 
 recall (on-demand tool, same check):
   q = user's search intent
@@ -237,23 +238,37 @@ recall (on-demand tool, same check):
   return top-k hits (sanitized per §9)
 ```
 
+> **Implementation note (weeks 7–8):** Casbin obj names use underscores —
+> `memory_central` / `memory_dept` / `memory_user` — because `keyMatch2`
+> treats `:` as a route-parameter delimiter (a `memory:central` obj would
+> match `memory:dept`). Scope strings (`central`, `dept/<name>`, `user/<uid>`)
+> are the human-readable form used in audit resources + the episodic table.
+> The `recall` tool is gated by Casbin (`memory_recall:use`); inside it only
+> searches the caller's readable scopes (see `app/memory/recall.py`).
+
 ### 7.2 Write path — `reflect` (graph end, post-response)
 
 ```
 for each extracted candidate fact f (rule/heuristic extractor):
     scope = classify(f)                    # central / dept/<own> / user/<sub>
-    if not enforcer.enforce(sub, dom, f"memory:{scope}", "write"):
-        audit.log(DENY, obj=f"memory:{scope}", act="write")
+    if not enforcer.memory_allowed(scope, "write", claims):
+        audit.log(DENY, resource=f, act="write")
         continue                            # no memory change
     f' = dedup(f, scope)                    # exact / unique-substring; add|replace|remove
     if scope == central:
-        HITL suspend → admin approve? commit : discard   # §8
+        HITL suspend → admin approve? commit : discard   # §8 (approval store)
     else:
         commit to BaseStore namespace + audit.log(ALLOW)
 ```
 
 ### 7.3 Episodic storage
-Every completed session's transcript is appended to the tier-scoped FTS5 table (`central`, `dept/<name>`, `user/<uid>`) at graph end. Reads/writes to episodic rows go through the *same* Casbin checks — there is no separate memory policy path.
+Every completed session's transcript is appended to a tier-scoped FTS5 table at
+graph end. Reads/writes to episodic rows go through the *same* Casbin checks —
+there is no separate memory policy path.
+
+> **Implementation note (weeks 7–8):** transcripts are appended to the **dept
+> tier** (`dept/<name>`, decision made 2026-08-10) and searched via the `recall`
+> tool restricted to the caller's readable scopes.
 
 ---
 

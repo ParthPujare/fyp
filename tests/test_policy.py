@@ -78,12 +78,12 @@ def test_admin_wildcard_allows_every_tool(enforcer):
 def test_filter_tools_visibility_per_role(enforcer):
     all_names = {t.name for t in TOOL_REGISTRY.values()}
     assert {t.name for t in filter_tools(TOOL_REGISTRY.values(), enforcer, ALICE)} == {
-        n for n in all_names if n.startswith("crm_")
+        n for n in all_names if n.startswith("crm_") or n == "recall"
     }
     # BOB lacks hr:delete, so hr_delete_employee is filtered out too.
     assert {t.name for t in filter_tools(TOOL_REGISTRY.values(), enforcer, BOB)} == {
         n for n in all_names if n.startswith("hr_") and n != "hr_delete_employee"
-    }
+    } | {"recall"}
     assert {t.name for t in filter_tools(TOOL_REGISTRY.values(), enforcer, ADMIN)} == all_names
 
 
@@ -96,8 +96,8 @@ def test_filter_tools_schemas_reach_llm(executor, trace_store, enforcer, audit_l
     runner(ALICE, "hi")
     assert provider.last_tools is not None
     visible = {s["function"]["name"] for s in provider.last_tools}
-    assert all(n.startswith("crm_") for n in visible)
-    assert len(visible) == 4  # the four crm tools
+    assert all(n.startswith("crm_") or n == "recall" for n in visible)
+    assert len(visible) == 5  # the four crm tools + recall
 
     runner(ADMIN, "hi")
     assert len(provider.last_tools) == len(TOOL_REGISTRY)

@@ -15,6 +15,7 @@ dependencies = [
     "langgraph>=1.2.10",
     "langchain-core>=1.5.3",
     "casbin>=1.43.0",
+    "langgraph-checkpoint-sqlite>=3.1.1",
 ]
 
 [dependency-groups]

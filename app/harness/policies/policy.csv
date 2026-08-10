@@ -25,6 +25,40 @@ p, finance_agent, finance, finance, transfer
 p, devops_agent, devops, devops, read
 p, devops_agent, devops, devops, create
 
+# ---- Memory (weeks 7-8): 3-tier read/write + recall tool gate ----
+# Central: readable by all roles; writable only by admin (admin has p, admin, admin, *, *).
+# Dept/user scopes are self-scoped by the enforcer (own dept / own uid).
+# NOTE: obj names use underscores — Casbin's keyMatch2 treats ":" as a route-param
+# delimiter, so "memory:central" would match "memory:dept".
+p, marketing_agent, marketing, memory_central, read
+p, hr_agent, hr, memory_central, read
+p, finance_agent, finance, memory_central, read
+p, devops_agent, devops, memory_central, read
+
+p, marketing_agent, marketing, memory_dept, read
+p, marketing_agent, marketing, memory_dept, write
+p, hr_agent, hr, memory_dept, read
+p, hr_agent, hr, memory_dept, write
+p, finance_agent, finance, memory_dept, read
+p, finance_agent, finance, memory_dept, write
+p, devops_agent, devops, memory_dept, read
+p, devops_agent, devops, memory_dept, write
+
+p, marketing_agent, marketing, memory_user, read
+p, marketing_agent, marketing, memory_user, write
+p, hr_agent, hr, memory_user, read
+p, hr_agent, hr, memory_user, write
+p, finance_agent, finance, memory_user, read
+p, finance_agent, finance, memory_user, write
+p, devops_agent, devops, memory_user, read
+p, devops_agent, devops, memory_user, write
+
+# recall tool gate (FTS5 episodic search within permitted scopes)
+p, marketing_agent, marketing, memory_recall, use
+p, hr_agent, hr, memory_recall, use
+p, finance_agent, finance, memory_recall, use
+p, devops_agent, devops, memory_recall, use
+
 # ---- Role assignment (user -> role -> domain) ----
 g, alice@acme.com, marketing_agent, marketing
 g, bob@acme.com, hr_agent, hr

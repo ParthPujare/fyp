@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi import FastAPI
+from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agent.runner import run_agent
 from app.agent.tools import ToolExecutor
@@ -53,10 +54,19 @@ def make_runner(
     settings: Settings | None = None,
     enforcer: PolicyEnforcer | None = None,
     audit: AuditLog | None = None,
+    checkpointer: Any = None,
+    store: Any = None,
+    episodic: Any = None,
+    approvals: Any = None,
+    recall: Any = None,
 ):
-    """Run agent against in-process services."""
+    """Run agent against in-process services. A checkpointer is provided by
+    default (in-memory, offline) so threads + HITL interrupts work in tests."""
 
-    def _run(claims: dict[str, Any], message: str):
+    if checkpointer is None:
+        checkpointer = InMemorySaver()
+
+    def _run(claims: dict[str, Any], message: str, thread_id: str | None = None):
         return run_agent(
             claims,
             message,
@@ -66,6 +76,12 @@ def make_runner(
             settings=settings,
             enforcer=enforcer,
             audit=audit,
+            checkpointer=checkpointer,
+            store=store,
+            episodic=episodic,
+            approvals=approvals,
+            recall=recall,
+            thread_id=thread_id,
         )
 
     return _run
@@ -97,13 +113,63 @@ def trace_store(tmp_path) -> TraceStore:
 
 
 @pytest.fixture
+def memory_store(tmp_path):
+    from app.memory.store import SqliteBaseStore
+
+    return SqliteBaseStore(tmp_path / "memory.sqlite")
+
+
+@pytest.fixture
+def episodic(tmp_path):
+    from app.memory.episodic import EpisodicStore
+
+    return EpisodicStore(tmp_path / "memory.sqlite")
+
+
+@pytest.fixture
+def approvals(tmp_path):
+    from app.memory.approvals import ApprovalStore
+
+    return ApprovalStore(tmp_path / "memory.sqlite")
+
+
+@pytest.fixture
+def recall_service(episodic, enforcer):
+    from app.memory.recall import RecallService
+
+    return RecallService(episodic, enforcer, get_settings().memory)
+
+
+@pytest.fixture
 def executor(dept_apps) -> ToolExecutor:
     return ToolExecutor(client=make_service_client(dept_apps), settings=get_settings())
 
 
 @pytest.fixture
-def runner_factory(executor, trace_store, enforcer, audit_log):
-    def _make(provider: LLMProvider, settings: Settings | None = None):
+def runner_factory(executor, trace_store, enforcer, audit_log, tmp_path):
+    from app.memory.approvals import ApprovalStore
+    from app.memory.episodic import EpisodicStore
+    from app.memory.recall import RecallService
+    from app.memory.store import SqliteBaseStore
+
+    _memory_path = tmp_path / "memory.sqlite"
+    _store = SqliteBaseStore(_memory_path)
+    _episodic = EpisodicStore(_memory_path)
+    _approvals = ApprovalStore(_memory_path)
+
+    def _make(
+        provider: LLMProvider,
+        settings: Settings | None = None,
+        checkpointer: Any = None,
+        store: Any = None,
+        episodic: Any = None,
+        approvals: Any = None,
+        recall: Any = None,
+    ):
+        store = store if store is not None else _store
+        episodic = episodic if episodic is not None else _episodic
+        approvals = approvals if approvals is not None else _approvals
+        recall = recall if recall is not None else RecallService(episodic, enforcer, get_settings().memory)
         return make_runner(
             provider=provider,
             executor=executor,
@@ -111,6 +177,11 @@ def runner_factory(executor, trace_store, enforcer, audit_log):
             settings=settings,
             enforcer=enforcer,
             audit=audit_log,
+            checkpointer=checkpointer,
+            store=store,
+            episodic=episodic,
+            approvals=approvals,
+            recall=recall,
         )
 
     return _make

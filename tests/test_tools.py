@@ -20,6 +20,8 @@ def test_registry_has_expected_tools():
 
 def test_registry_maps_to_service_routes():
     for tool in TOOL_REGISTRY.values():
+        if tool.handler != "http":  # memory tools have no HTTP endpoint
+            continue
         app = APPS[tool.dept]
         path = tool.path_template.replace("{id}", "{row_id}")
         found = any(
