@@ -27,6 +27,7 @@ from app.config import MemorySettings
 from app.harness.audit import AuditLog
 from app.harness.enforcer import PolicyEnforcer
 from app.harness.intercept import intercept_tool
+from app.harness.sanitize import MASK, sanitize_tool_result
 from app.llm.base import LLMProvider
 from app.memory.approvals import ApprovalStore
 from app.memory.edit import MemoryEditor, MemoryMatchError
@@ -157,6 +158,47 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
         messages: list[dict[str, Any]] = []
         executed: list[dict[str, Any]] = []
 
+        def _critical_gate(
+            tool: Any, args: dict[str, Any], state: AgentState
+        ) -> ToolResult | None:
+            """HITL gate for risk=critical tools (plan.md §6, §8): suspend via
+            interrupt() and execute only after admin approval."""
+            actor = deps.actor
+            resource = {"type": "tool", "id": tool.name}
+            approval_id = deps.approvals.create(
+                deps.run_id,
+                deps.thread_id,
+                resource,
+                actor,
+                {"tool": tool.name, "args": args},
+            )
+            deps.trace.add_event(
+                deps.run_id,
+                TraceEventType.GUARDRAIL,
+                actor,
+                {"type": "hitl_suspend", "approval_id": approval_id, "tool": tool.name},
+            )
+            approved = interrupt(
+                {
+                    "approval_id": approval_id,
+                    "resource": resource,
+                    "actor": actor,
+                    "tool": tool.name,
+                    "args": args,
+                    "thread_id": deps.thread_id,
+                }
+            )
+            if approved:
+                deps.audit.log(decision="APPROVED", resource=resource, actor=actor, run_id=deps.run_id, reason="hitl")
+                return None
+            deps.audit.log(decision="REJECTED", resource=resource, actor=actor, run_id=deps.run_id, reason="hitl")
+            return ToolResult(
+                ok=False,
+                denied=True,
+                reason="hitl",
+                content=f"{tool.name} was rejected by an admin and will not run.",
+            )
+
         for call in state.get("pending_calls") or []:
             tracker.record_tool_call()
             name = call["name"]
@@ -185,11 +227,17 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                     audit=deps.audit,
                     run_id=deps.run_id,
                 )
+                if result is None and tool.risk_level == "critical":
+                    result = _critical_gate(tool, args, state)
                 if result is None:
                     if tool.handler == "recall":
                         result = deps.recall.recall(str(args.get("query", "")), state["claims"])
                     else:
-                        result = deps.executor.execute(tool, args)
+                        result = sanitize_tool_result(
+                            deps.executor.execute(tool, args),
+                            state["claims"],
+                            deps.enforcer,
+                        )
                 else:
                     deps.tracker.mark_denied(name)
 
@@ -206,10 +254,19 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                     "outcome": outcome,
                     "latency_ms": result.latency_ms,
                     "reason": result.reason,
+                    "sanitized": MASK in result.content,
                 },
             )
             messages.append({"role": "tool", "content": result.summary, "name": name})
-            executed.append({"name": name, "args": args, "outcome": outcome, "latency_ms": result.latency_ms})
+            executed.append(
+                {
+                    "name": name,
+                    "args": args,
+                    "outcome": outcome,
+                    "latency_ms": result.latency_ms,
+                    "content": result.summary,
+                }
+            )
             deps.executed_calls.append(executed[-1])
 
             if tracker.budget_exhausted():

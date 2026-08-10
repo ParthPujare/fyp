@@ -28,6 +28,7 @@ class ServiceSettings(BaseModel):
     checkpoint_path: Path = Path("data/checkpoints.sqlite")
     auth_url: str = "http://127.0.0.1:8000"
     gateway_url: str = "http://127.0.0.1:8001"
+    dashboard_url: str = "http://127.0.0.1:8006"
     crm_url: str = "http://127.0.0.1:8002"
     hr_url: str = "http://127.0.0.1:8003"
     devops_url: str = "http://127.0.0.1:8004"

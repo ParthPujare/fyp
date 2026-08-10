@@ -58,6 +58,27 @@ def test_chat_returns_reply_shape():
         gateway_app.dependency_overrides.clear()
 
 
+def test_approval_decision_requires_admin_token(tmp_path, dept_apps, executor, enforcer, audit_log):
+    """A non-admin JWT is rejected from /approvals/{id}/decide (403), invalid JWT is 401."""
+    from app.memory.approvals import ApprovalStore
+
+    db = tmp_path / "memory.sqlite"
+    approvals = ApprovalStore(db)
+    approval_id = approvals.create("run-x", "t1", {"type": "memory", "id": "central"}, {"sub": "a"}, {"op": "add"})
+
+    gateway = TestClient(gateway_app)
+    gateway_app.dependency_overrides[get_approval_store] = lambda: approvals
+    try:
+        non_admin = login_token("alice@acme.com")
+        resp = gateway.post(f"/approvals/{approval_id}/decide", json={"approve": True, "token": non_admin})
+        assert resp.status_code == 403
+
+        resp = gateway.post(f"/approvals/{approval_id}/decide", json={"approve": True, "token": "not-a-jwt"})
+        assert resp.status_code == 401
+    finally:
+        gateway_app.dependency_overrides.clear()
+
+
 def test_chat_runs_real_agent(dept_apps, executor, trace_store, enforcer, audit_log):
     provider = MockLLM(sequence=[
         {"text": "searching", "tool_calls": [{"name": "crm_search_customer", "args": {"query": "acme"}}]},
@@ -130,15 +151,15 @@ def test_approval_decision_endpoint(tmp_path, dept_apps, executor, enforcer, aud
         assert body["interrupted"] is True and body["approval_id"] is not None
         aid = body["approval_id"]
 
-        dec = gateway.post(f"/approvals/{aid}/decide", json={"approve": True, "admin": "admin@acme.com"})
+        dec = gateway.post(f"/approvals/{aid}/decide", json={"approve": True, "token": token})
         assert dec.status_code == 200
         assert dec.json()["status"] == "approved"
         assert any("vendor audits" in i.value.get("text") for i in store.items_in(("central",)))
 
-        again = gateway.post(f"/approvals/{aid}/decide", json={"approve": False, "admin": "admin@acme.com"})
+        again = gateway.post(f"/approvals/{aid}/decide", json={"approve": False, "token": token})
         assert again.status_code == 409
 
-        missing = gateway.post("/approvals/nope/decide", json={"approve": True, "admin": "admin@acme.com"})
+        missing = gateway.post("/approvals/nope/decide", json={"approve": True, "token": token})
         assert missing.status_code == 404
     finally:
         gateway_app.dependency_overrides.clear()

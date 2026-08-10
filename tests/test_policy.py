@@ -72,6 +72,26 @@ def test_admin_wildcard_allows_every_tool(enforcer):
         assert enforcer.tool_allowed(tool, ADMIN) is True, name
 
 
+# --- pii object rows (sanitizer, Milestone 5) ---
+
+
+def test_pii_email_readable_by_every_role(enforcer):
+    for claims in (ALICE, BOB, CAROL, DAVE, ADMIN):
+        assert enforcer.enforce(claims["sub"], claims["dept"], "pii_email", "read") is True, claims["role"]
+
+
+def test_pii_salary_and_ssn_admin_only(enforcer):
+    for obj in ("pii_salary", "pii_ssn"):
+        for claims in (ALICE, BOB, CAROL, DAVE):
+            assert enforcer.enforce(claims["sub"], claims["dept"], obj, "read") is False, (claims["role"], obj)
+        assert enforcer.enforce(ADMIN["sub"], ADMIN["dept"], obj, "read") is True
+
+
+def test_pii_unknown_field_denied(enforcer):
+    for claims in (ALICE, BOB, CAROL, DAVE):
+        assert enforcer.enforce(claims["sub"], claims["dept"], "pii_address", "read") is False
+
+
 # --- filter_tools (per-role schema filtering) ---
 
 

@@ -5,10 +5,17 @@ import time
 import httpx
 from conftest import make_runner, serve_request
 
+from app.agent.runner import resume_agent, run_agent
 from app.agent.tools import ToolExecutor
 from app.auth.users import USERS
+from app.config import get_settings
 from app.llm.mock import MockLLM
+from app.memory.approvals import ApprovalStore
+from app.memory.episodic import EpisodicStore
+from app.memory.recall import RecallService
+from app.memory.store import SqliteBaseStore
 from app.ops.schema import TraceEventType
+from app.ops.store import TraceStore
 
 
 def claims_for(username: str) -> dict:
@@ -18,6 +25,7 @@ def claims_for(username: str) -> dict:
 
 ALICE = claims_for("alice@acme.com")
 BOB = claims_for("bob@acme.com")
+CAROL = claims_for("carol@acme.com")
 
 
 def test_single_tool_run(runner_factory):
@@ -153,3 +161,133 @@ def test_trace_written_and_integrity_holds(runner_factory, trace_store):
     )
     ok, issues = trace_store.verify_integrity(result.run_id)
     assert ok, issues
+
+
+def _hitl_components(tmp_path, deps, checkpointer):
+    """Build shared stores + a runner/resumer pair for HITL tests (offline)."""
+    db = tmp_path / "memory.sqlite"
+    store = SqliteBaseStore(db)
+    episodic = EpisodicStore(db)
+    approvals = ApprovalStore(db)
+    trace = TraceStore(tmp_path / "trace.sqlite")
+
+    def _recall():
+        return RecallService(episodic, deps["enforcer"], get_settings().memory)
+
+    def runner(claims, message, thread_id="t-hitl"):
+        return run_agent(
+            claims, message, thread_id=thread_id, provider=deps["provider"], executor=deps["executor"],
+            trace=trace, enforcer=deps["enforcer"], audit=deps["audit"], store=store, episodic=episodic,
+            approvals=approvals, recall=_recall(), checkpointer=checkpointer,
+        )
+
+    def resumer(approval_id):
+        return resume_agent(
+            approval_id, provider=deps["provider"], executor=deps["executor"], trace=trace,
+            enforcer=deps["enforcer"], audit=deps["audit"], store=store, episodic=episodic,
+            approvals=approvals, recall=_recall(), checkpointer=checkpointer,
+        )
+
+    return runner, resumer, approvals, store, trace
+
+
+def test_finance_transfer_suspends_and_approve_executes(tmp_path, dept_apps, executor, enforcer, audit_log):
+    """Critical tool (finance_transfer) suspends for HITL; admin approval resumes + executes."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    provider = MockLLM(sequence=[
+        {"text": "transferring", "tool_calls": [{"name": "finance_transfer", "args": {"to_account": "12345", "amount": 500, "memo": "vendor invoice"}}]},
+        {"text": "Transfer complete.", "tool_calls": []},
+    ])
+    runner, resumer, approvals, _, _ = _hitl_components(
+        tmp_path, {"provider": provider, "executor": executor, "enforcer": enforcer, "audit": audit_log},
+        InMemorySaver(),
+    )
+
+    first = runner(CAROL, "move 500 to 12345")
+    assert first.interrupted is True and first.approval_id is not None
+    assert approvals.get(first.approval_id)["status"] == "pending"
+    assert len(approvals.pending_items()) == 1
+
+    approvals.decide(first.approval_id, True, "admin@acme.com")
+    resumed = resumer(first.approval_id)
+    assert resumed.reply == "Transfer complete."
+    assert resumed.tool_calls[-1]["name"] == "finance_transfer"
+    assert resumed.tool_calls[-1]["outcome"] == "allowed"
+    # no stale pending row after resume (dedup on re-run)
+    assert approvals.pending_items() == []
+    assert approvals.get(first.approval_id)["status"] == "approved"
+
+
+def test_finance_transfer_reject_denies_run(tmp_path, dept_apps, executor, enforcer, audit_log):
+    """Rejection resumes the run but the critical tool never executes."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    provider = MockLLM(sequence=[
+        {"text": "transferring", "tool_calls": [{"name": "finance_transfer", "args": {"to_account": "12345", "amount": 500, "memo": "vendor invoice"}}]},
+        {"text": "The admin rejected the transfer.", "tool_calls": []},
+    ])
+    runner, resumer, approvals, _, _ = _hitl_components(
+        tmp_path, {"provider": provider, "executor": executor, "enforcer": enforcer, "audit": audit_log},
+        InMemorySaver(),
+    )
+
+    first = runner(CAROL, "move 500 to 12345")
+    assert first.interrupted is True and first.approval_id is not None
+
+    approvals.decide(first.approval_id, False, "admin@acme.com")
+    resumed = resumer(first.approval_id)
+    assert resumed.tool_calls[-1]["outcome"] == "denied"
+    assert "rejected by an admin" in resumed.tool_calls[-1]["content"]
+    assert approvals.get(first.approval_id)["status"] == "rejected"
+
+
+def test_rejected_critical_tool_not_retried_in_same_run(tmp_path, dept_apps, executor, enforcer, audit_log):
+    """Once a critical tool is rejected, a retry in the same run is denied (no re-suspend)."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    provider = MockLLM(sequence=[
+        {"text": "transferring", "tool_calls": [{"name": "finance_transfer", "args": {"to_account": "1", "amount": 1, "memo": "x"}}]},
+        {"text": "still trying", "tool_calls": [{"name": "finance_transfer", "args": {"to_account": "2", "amount": 2, "memo": "y"}}]},
+        {"text": "done.", "tool_calls": []},
+    ])
+    runner, resumer, approvals, _, _ = _hitl_components(
+        tmp_path, {"provider": provider, "executor": executor, "enforcer": enforcer, "audit": audit_log},
+        InMemorySaver(),
+    )
+
+    first = runner(CAROL, "move money")
+    approvals.decide(first.approval_id, False, "admin@acme.com")
+    resumed = resumer(first.approval_id)
+
+    outcomes = [c["outcome"] for c in resumed.tool_calls]
+    contents = [c["content"] for c in resumed.tool_calls]
+    assert outcomes[0] == "denied"
+    assert "rejected by an admin" in contents[0]
+    # the retry is blocked by deny-storm (deny_retry), not re-suspended
+    assert outcomes[1] == "denied"
+    assert "blocked earlier" in contents[1]
+    assert approvals.pending_items() == []  # only one approval ever created
+
+
+def test_recall_result_masks_ssn_for_non_admin(tmp_path, dept_apps, executor, enforcer, audit_log):
+    """Recall output shown to a non-admin has ssn masked before it reaches the LLM."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from app.memory.scopes import SCOPE_CENTRAL
+
+    provider = MockLLM(sequence=[
+        {"text": "", "tool_calls": [{"name": "recall", "args": {"query": "alice"}}]},
+        {"text": "done.", "tool_calls": []},
+    ])
+    runner, _, _, _, _ = _hitl_components(
+        tmp_path, {"provider": provider, "executor": executor, "enforcer": enforcer, "audit": audit_log},
+        InMemorySaver(),
+    )
+    episodic = EpisodicStore(tmp_path / "memory.sqlite")
+    episodic.append_transcript(SCOPE_CENTRAL, "r-hitl", {"sub": "alice@acme.com"}, "ssn 111-22-3333 email a@b.com")
+
+    result = runner(ALICE, "recall alice")
+    recall_call = next(c for c in result.tool_calls if c["name"] == "recall")
+    assert "111-22-3333" not in recall_call["content"]  # ssn masked for alice
+    assert "a@b.com" in recall_call["content"]  # email visible to every role

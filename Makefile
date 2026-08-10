@@ -1,4 +1,4 @@
-.PHONY: install test lint run demo demo-memory auth gateway crm hr devops finance
+.PHONY: install test lint run demo demo-memory demo-sanitize auth gateway dashboard crm hr devops finance
 
 install:
 	uv sync
@@ -18,11 +18,17 @@ demo:
 demo-memory:
 	uv run python scripts/demo_memory.py
 
+demo-sanitize:
+	uv run python scripts/demo_sanitize_dashboard.py
+
 auth:
 	uv run uvicorn app.auth.service:app --reload --port 8000
 
 gateway:
 	uv run uvicorn app.gateway.app:app --reload --port 8001
+
+dashboard:
+	uv run uvicorn app.dashboard.app:app --reload --port 8006
 
 crm:
 	uv run uvicorn app.services.crm:app --reload --port 8002

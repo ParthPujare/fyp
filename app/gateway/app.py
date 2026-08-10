@@ -101,7 +101,7 @@ class ChatRequest(BaseModel):
 
 class ApprovalDecisionRequest(BaseModel):
     approve: bool
-    admin: str
+    token: str  # admin JWT — the decider is derived from verified claims, never trusted input
 
 
 @app.get("/health")
@@ -154,12 +154,21 @@ def decide_approval(
     resumer: Annotated[Any, Depends(get_resumer)],
     approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
 ) -> dict:
+    """Admin-only HITL decision. The caller must present an admin JWT; the
+    decider identity comes from the verified claims (never from the body)."""
+    try:
+        claims = verify_token(req.token, settings.jwt.secret, settings.jwt.algorithm)
+    except AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    if claims.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="only admins may decide approvals")
+
     entry = approvals.get(approval_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
     if entry["status"] != "pending":
         raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
-    approvals.decide(approval_id, req.approve, req.admin)
+    approvals.decide(approval_id, req.approve, claims["sub"])
     result = resumer(approval_id)
     decided = approvals.get(approval_id)
     return {

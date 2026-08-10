@@ -39,6 +39,22 @@ class EpisodicStore:
     def append_transcript(
         self, scope: str, run_id: str, actor: dict[str, Any], transcript: str
     ) -> str:
+        """Append a session transcript, deduplicated by (scope, run_id).
+
+        A HITL-suspended run is re-executed from the interrupted node on resume,
+        so the `reflect` node runs twice — without dedup the transcript would be
+        appended twice for the same run.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM episodic WHERE scope = ? AND run_id = ? LIMIT 1",
+            (scope, run_id),
+        ).fetchone()
+        if row is not None:
+            existing = self._conn.execute(
+                "SELECT ts FROM episodic WHERE scope = ? AND run_id = ? LIMIT 1",
+                (scope, run_id),
+            ).fetchone()
+            return existing["ts"]
         ts = datetime.now(UTC).isoformat()
         with self._conn:
             self._conn.execute(

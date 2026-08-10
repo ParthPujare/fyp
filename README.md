@@ -3,7 +3,7 @@
 A zero-trust security gateway & harness middleware for an Enterprise AI Personal Assistant.
 Every resource — **tools, memory, skills** — is policy-enforced by role, not by what the LLM happens to decide.
 
-> **Status: Milestone 4 (Weeks 7–8)** — 3-tier + episodic memory on top of the Casbin RBAC core: a persistent `SqliteBaseStore` (3 tiers: central / dept / user), rule-based fact extraction with dedup + per-tier budget, FTS5 **episodic** transcript recall (scope-gated), a frozen memory snapshot injected per session, **thread-backed `/chat`** (LangGraph checkpointer), and **HITL** for central writes (`interrupt()` + SQLite approval store + `/approvals/{id}/decide`). See `ref_docs/plan.md` §11.
+> **Status: Milestone 5 (Weeks 9–10)** — PII sanitizer + critical-tool HITL + admin dashboard v1 on top of the Casbin RBAC core and 3-tier memory: scope-aware **PII masking** on every tool response and recalled transcript (`salary`/`ssn` admin-only, `email` visible), **HITL interrupts** for `risk=critical` tools (finance transfers suspend until an admin approves/rejects), and a **web dashboard** (:8006) to review and decide pending approvals plus browse users/departments. See `ref_docs/plan.md` §11.
 
 ## Repo layout
 
@@ -13,11 +13,12 @@ app/
 ├── llm/        LiteLLMProvider + MockLLM (script + sequence modes) + factory
 ├── ops/        SQLite trace store (append-only, integrity-hashed)
 ├── memory/     SqliteBaseStore + scopes, fact extraction, editor (budget), episodic FTS5 recall, approvals, snapshot
-├── agent/      LangGraph graph (load_memory/agent/tools/finalize/reflect) + HTTP tool registry + guardrails
-├── harness/    Casbin policies (model.conf + policy.csv) + enforcer + filter_tools + intercept + audit log
+├── agent/      LangGraph graph (load_memory/agent/tools/finalize/reflect) + HTTP tool registry + guardrails + critical-tool HITL gate
+├── harness/    Casbin policies (model.conf + policy.csv) + enforcer + filter_tools + intercept + audit log + PII sanitizer
 ├── gateway/    /hello + /chat (threads) + /approvals/{id}/decide (:8001)
+├── dashboard/  FastAPI + static web UI: approvals queue, users, departments (:8006)
 └── services/   crm (:8002) hr (:8003) devops (:8004) finance (:8005) — FastAPI + seeded SQLite
-tests/          offline test suites (auth, llm, trace, services, agent, tools, chat, policy, memory)
+tests/          offline test suites (auth, llm, trace, services, agent, tools, chat, policy, memory, sanitize, dashboard)
 ```
 
 ## Quickstart
@@ -26,22 +27,23 @@ Requires [uv](https://docs.astral.sh/uv/) and Python ≥ 3.12.
 
 ```bash
 uv sync                 # install deps into .venv
-uv run pytest           # 95 tests, fully offline (MockLLM, no API keys)
+uv run pytest           # 127 tests, fully offline (MockLLM, no API keys)
 ```
 
 ## Run everything
 
 ```bash
-make run               # starts auth :8000, gateway :8001, crm/hr/devops/finance :8002-8005
+make run               # starts auth :8000, gateway :8001, dashboard :8006, crm/hr/devops/finance :8002-8005
 ```
 
-Or individually: `make auth gateway crm hr devops finance`.
+Or individually: `make auth gateway dashboard crm hr devops finance`.
 
 ## Watch the agent work (offline demo)
 
 ```bash
 make demo            # Milestone 3: tool calls + RBAC denials + trace + audit
 make demo-memory     # Milestone 4: 3-tier writes, HITL central approval, recall, threads
+make demo-sanitize   # Milestone 5: PII masking, critical-tool HITL, recall PII
 ```
 
 `make demo` runs the real Milestone 3 agent in-process with a scripted MockLLM and prints,
@@ -58,6 +60,11 @@ write suspends for HITL (approve → committed, reject → not), `recall` runs a
 FTS5 search over only the caller's readable scopes, and a 2-turn thread shows
 the frozen snapshot is loaded once and reused.
 
+`make demo-sanitize` exercises Milestone 5: bob sees masked salary/ssn in an HR
+search while admin sees full values; carol's `finance_transfer` (risk=critical)
+suspends for HITL; admin approves one transfer (executed) and rejects another
+(never executed); and a recalled transcript shows its SSN masked.
+
 ## Role-aware hello (Milestone 1 deliverable)
 
 ```bash
@@ -73,14 +80,16 @@ curl -s -X POST localhost:8001/hello \
 # => Hello alice@acme.com! You are a marketing_agent in the marketing department.
 ```
 
-## Chat (Milestone 2 + 3 + 4)
+## Chat (Milestone 2 + 3 + 4 + 5)
 
 `POST /chat` runs one **bounded, traced, policy-enforced** agent turn. Since
 Milestone 4 the endpoint is **thread-backed**: pass `thread_id` (default
 `user:<sub>`) and the conversation persists across turns via the LangGraph
 checkpointer; the frozen memory snapshot is loaded once per thread and reused.
-Central-tier memory writes **suspend** the run for HITL approval; admins decide
-via `POST /approvals/{id}/decide` and the run resumes.
+Central-tier memory writes and **`risk=critical` tools** (e.g. finance transfers)
+**suspend** the run for HITL approval; admins decide via
+`POST /approvals/{id}/decide` (JWT-verified, admin role required) or from the
+dashboard, and the run resumes.
 
 ```bash
 curl -s -X POST localhost:8001/chat \
@@ -105,6 +114,22 @@ curl -s -X POST localhost:8001/chat \
 - **Writes are enforced** — a marketing agent cannot write central (only admin, with
   HITL); dept/user writes are self-scoped by the enforcer; every decision is audited
   (`ALLOW`/`DENY`/`APPROVED`/`REJECTED`).
+
+### PII sanitizer + dashboard (Milestone 5)
+
+- **Sanitize** — every tool response and recalled transcript passes through
+  `app/harness/sanitize.py` before returning to the LLM. Structured payloads are
+  masked by field name, free text by email/SSN regex. Policy matrix
+  (`pii_email`/`pii_salary`/`pii_ssn`): **email visible to all roles; salary and
+  ssn admin-only** (deny-by-default).
+- **Critical-tool HITL** — tools with `risk=critical` (finance transfers) suspend
+  via `interrupt()`; nothing executes until an admin approves, and a rejection
+  returns a denial and is never retried in that run.
+- **Dashboard (:8006)** — static HTML/JS panel over a FastAPI backend. Login
+  proxies the auth service; every `/api/*` endpoint except `/api/login` requires a
+  verified admin JWT. Pending approvals list (sensitive tool args masked), Approve
+  / Reject buttons that resume the exact suspended thread, and read-only
+  Users / Departments tabs.
 
 ### RBAC (Casbin, deny-by-default)
 
@@ -134,15 +159,16 @@ to use a real model (Gemini free tier default).
 - trace: chain building, tamper/truncation detection via SHA-256 integrity chain
 - services: seeded data, CRUD, field validation, PII present for the later sanitize milestone
 - tools: registry ↔ service route mapping, HTTP calls, Casbin gate, call timeout
-- agent: single/multi-step runs, cross-dept denial, deny-storm bounded, budget/max-steps/timeouts, trace written + integrity
-- chat: `/chat` 200/401 + real agent path via dependency override
-- policy: Casbin policy matrix (role × dept × resource), deny-by-default, admin wildcard, `filter_tools` visibility, `intercept` gate + audit, audit determinism
+- agent: single/multi-step runs, cross-dept denial, deny-storm bounded, budget/max-steps/timeouts, critical-tool HITL (suspend → approve/reject, deny-retry), recall PII masking, trace written + integrity
+- chat: `/chat` 200/401 + real agent path via dependency override, `/approvals/{id}/decide` 200/401/403/404/409 (admin JWT)
+- policy: Casbin policy matrix (role × dept × resource), deny-by-default, admin wildcard, `pii_*` matrix, `filter_tools` visibility, `intercept` gate + audit, audit determinism
 - memory: scopes/encoding, SqliteBaseStore CRUD + filter, editor (dedup/replace/remove/budget), fact extraction, episodic FTS5 scope-gating, recall service, Casbin memory matrix, snapshot, snapshot injection, thread persistence, dept/user writes, central-write HITL (approve/reject/deny/resume-guard)
+- sanitize: pii matrix, structured/nested masking, text regex masking, ToolResult summary regeneration, masked values never reach LLM, recall transcript masking
+- dashboard: admin-JWT gates (401/403), pending list masking, decide 404/409 + resume, read-only users/departments
 - smoke: role-aware hello for every role end-to-end
 
 ## Next milestones
 
-1. Weeks 9–10: PII sanitizer + HITL dashboard v1
-2. Weeks 11–12: skills registry + trace viewer + evals
+1. Weeks 11–12: skills registry + trace viewer + evals
 
 See `ref_docs/plan.md` for the full 16-week plan and `ref_docs/proposed_architecture.md` for the implementation blueprint.

@@ -2,7 +2,7 @@
 
 Detailed architecture flow for the Enterprise AI Personal Assistant secured by a zero-trust harness. This document is the implementation blueprint derived from `plan.md`. Every flow below maps to a module in the proposed repository structure and to a test in the attack/verification suites.
 
-> **Implementation status (2026-08-10):** Milestones 1–4 (weeks 1–8) are built. Live: `auth` :8000, `gateway` :8001 (role-aware `/hello`, thread-backed `/chat`, `/approvals/{id}/decide`), and all four dept services :8002–8005 with seeded SQLite. `app/agent/` has the LangGraph agent (graph now `load_memory → agent ⇄ execute_tools → finalize → reflect`), HTTP tool registry/executor (incl. the memory `recall` tool), and guardrails node with the trace schema (§12) + `TraceStore` wired into every run. `app/harness/` holds the Casbin core: `policies/{model.conf,policy.csv}`, `PolicyEnforcer` (incl. `memory_allowed`/`memory_recall_allowed`), `filter_tools`, `intercept`, and the JSONL audit log — the `scope_allowed` stub is gone. `app/memory/` (weeks 7–8) is built: `SqliteBaseStore` (3 tiers: central / dept / user) as a persistent LangGraph `BaseStore`, rule-based fact extraction + dedup + per-tier budget/eviction, FTS5 episodic recall (scope-gated), frozen snapshot per session, LangGraph checkpointer for threads, and HITL `interrupt()` + SQLite `ApprovalStore` for central writes. PII sanitizer + dashboard (weeks 9–10), skills (week 11), and evals (week 12) remain planned per `ref_docs/plan.md` §11. Code lives at the repo root next to `ref_docs/` + `agent_history/`.
+> **Implementation status (2026-08-10):** Milestones 1–5 (weeks 1–10) are built. Live: `auth` :8000, `gateway` :8001 (role-aware `/hello`, thread-backed `/chat`, admin-JWT `/approvals/{id}/decide`), all four dept services :8002–8005 with seeded SQLite, and the **`dashboard`** :8006 (approvals queue, users, departments). `app/agent/` has the LangGraph agent (graph now `load_memory → agent ⇄ execute_tools → finalize → reflect`), HTTP tool registry/executor (incl. the memory `recall` tool), guardrails node with the trace schema (§12) + `TraceStore` wired into every run, and the **critical-tool HITL gate** (risk=critical suspends via `interrupt()`, resumes only after admin approval/rejection). `app/harness/` holds the Casbin core: `policies/{model.conf,policy.csv}` (tool + memory + `pii_*` rows), `PolicyEnforcer` (incl. `memory_allowed`/`memory_recall_allowed`), `filter_tools`, `intercept`, the JSONL audit log — the `scope_allowed` stub is gone — and **`sanitize.py`** (scope-aware PII masking applied to every tool response + recalled transcript). `app/memory/` (weeks 7–8) is built: `SqliteBaseStore` (3 tiers: central / dept / user) as a persistent LangGraph `BaseStore`, rule-based fact extraction + dedup + per-tier budget/eviction, FTS5 episodic recall (scope-gated), frozen snapshot per session, LangGraph checkpointer for threads, and HITL `interrupt()` + SQLite `ApprovalStore` for central writes. Skills (week 11) and evals (week 12) remain planned per `ref_docs/plan.md` §11. Code lives at the repo root next to `ref_docs/` + `agent_history/`.
 
 ---
 
@@ -48,7 +48,7 @@ Detailed architecture flow for the Enterprise AI Personal Assistant secured by a
 | `/hr` service | HR dept tools | SQLite | 8003 | ✅ live (seeded) |
 | `/devops` service | DevOps dept tools | SQLite | 8004 | ✅ live (seeded) |
 | `/finance` service | Finance dept tools | SQLite | 8005 | ✅ live (seeded) |
-| `dashboard` | Admin + ops web UI | same DBs (read) | 8006 | planned (Wk 9–10) |
+| `dashboard` | Admin + ops web UI | same DBs (read) | 8006 | ✅ live (Wk 9–10) |
 | LLM backend | LiteLLM → Gemini / OpenAI / Claude / MockLLM | none | external | provider ready; wired into graph Wk 3–4 |
 
 All dept services are **local FastAPI** processes seeded with realistic data (customers, employees, incidents, ledgers). Tools in the agent call these over HTTP — the same call shape a real internal gateway would use.
@@ -304,6 +304,8 @@ there is no separate memory policy path.
 
 **Not gated:** reads, dept/user memory writes (RBAC is enough).
 
+**Implemented (Wk 9–10):** risk=critical tools suspend via `interrupt()` in `execute_tools` (`_critical_gate` in `app/agent/graph.py`); admin decision via gateway `/approvals/{id}/decide` (JWT-verified, admin role required) or the dashboard reuses `resume_agent` in-process. `ApprovalStore.create` and `EpisodicStore.append_transcript` dedupe on resume (LangGraph re-runs the interrupted node), so no stale pending rows or duplicate transcripts.
+
 ---
 
 ## 9. Sanitization (PII / scope-aware masking)
@@ -318,6 +320,8 @@ sanitize(raw, sub, dom):
 ```
 
 Applied to **every** tool response and **every** recalled memory transcript before it returns to the LLM. A permitted tool's output is masked so the model — and therefore the user — never sees data outside their permission scope.
+
+**Implemented (Wk 9–10, `app/harness/sanitize.py`):** `sanitize_response` (recursive field masking over structured payloads), `sanitize_text` (email/SSN regex masking for free-form transcripts), and `sanitize_tool_result` (regenerates the LLM-visible summary from masked data). Policy obj names use underscores — `pii_email`, `pii_salary`, `pii_ssn` — not `pii:<field>`, because Casbin `keyMatch2` treats `:` as a route-param delimiter. Matrix: email readable by all roles; salary/ssn admin-only (deny-by-default). Wired into `execute_tools` (every HTTP tool result) and `RecallService.recall` (every recalled transcript).
 
 ---
 

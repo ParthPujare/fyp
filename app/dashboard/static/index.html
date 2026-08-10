@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harness Admin Dashboard</title>
+<style>
+  :root { --bg:#0f172a; --panel:#1e293b; --line:#334155; --fg:#e2e8f0; --muted:#94a3b8;
+          --accent:#38bdf8; --ok:#4ade80; --bad:#f87171; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:16px; padding:12px 20px; background:var(--panel);
+           border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; }
+  header nav { display:flex; gap:8px; margin-left:auto; }
+  button { background:var(--accent); color:#062a3a; border:0; border-radius:6px; padding:6px 12px;
+           cursor:pointer; font-weight:600; }
+  button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); }
+  button.ok { background:var(--ok); } button.bad { background:var(--bad); }
+  button:disabled { opacity:.5; cursor:default; }
+  main { max-width:960px; margin:0 auto; padding:20px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px;
+          margin-bottom:12px; }
+  .card h3 { margin:0 0 8px; font-size:14px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .muted { color:var(--muted); } .pill { font-size:12px; border-radius:999px; padding:2px 10px;
+          background:#0b1220; border:1px solid var(--line); }
+  table { width:100%; border-collapse:collapse; } th,td { text-align:left; padding:6px 8px;
+          border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  code { background:#0b1220; border:1px solid var(--line); border-radius:4px; padding:1px 5px;
+         font-size:12px; }
+  input[type=text], input[type=password] { background:#0b1220; border:1px solid var(--line);
+         color:var(--fg); border-radius:6px; padding:7px 10px; }
+  .status { margin-top:8px; font-size:13px; }
+  .hidden { display:none; } .badge { font-size:11px; border-radius:999px; padding:2px 8px; }
+  .badge.pending { background:#fef08a33; color:#fef08a; }
+  .badge.approved { background:#4ade8033; color:#4ade80; }
+  .badge.rejected { background:#f8717133; color:#f87171; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Harness Admin Dashboard</h1>
+  <span class="muted" id="who"></span>
+  <nav>
+    <button class="ghost" data-tab="approvals">Approvals</button>
+    <button class="ghost" data-tab="users">Users</button>
+    <button class="ghost" data-tab="depts">Departments</button>
+    <button class="ghost" id="logout" class="hidden">Log out</button>
+  </nav>
+</header>
+<main>
+  <section id="login-view" class="card">
+    <h3>Admin sign in</h3>
+    <div class="row">
+      <input type="text" id="user" placeholder="admin@acme.com">
+      <input type="password" id="pass" placeholder="password">
+      <button id="signin">Sign in</button>
+    </div>
+    <div class="status muted">Mock login, e.g. admin@acme.com / admin123.</div>
+  </section>
+
+  <section id="content-view" class="hidden">
+    <div id="approvals-view">
+      <h2>Pending approvals</h2>
+      <div id="approvals"></div>
+    </div>
+    <div id="users-view" class="hidden">
+      <h2>Users</h2>
+      <table><thead><tr><th>Username</th><th>Role</th><th>Dept</th><th>Scopes</th></tr></thead>
+        <tbody id="users"></tbody></table>
+    </div>
+    <div id="depts-view" class="hidden">
+      <h2>Departments</h2>
+      <table><thead><tr><th>Name</th><th>Service</th><th>Resources</th><th>Members</th></tr></thead>
+        <tbody id="depts"></tbody></table>
+    </div>
+  </section>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let token = localStorage.getItem("harness_admin_token") || "";
+
+  async function api(path, opts = {}) {
+    const headers = Object.assign({}, opts.headers || {});
+    if (token) headers["Authorization"] = "Bearer " + token;
+    const resp = await fetch(path, Object.assign({}, opts, { headers }));
+    if (resp.status === 401 || resp.status === 403) { setAuthed(false); throw new Error("unauthorized"); }
+    if (!resp.ok) { const body = await resp.text(); throw new Error(body); }
+    return resp.json();
+  }
+
+  function setAuthed(auth) {
+    $("login-view").classList.toggle("hidden", auth);
+    $("content-view").classList.toggle("hidden", !auth);
+    $("logout").classList.toggle("hidden", !auth);
+    if (auth) { $("who").textContent = "signed in as " + (token ? "admin" : ""); show("approvals"); }
+    else token = "";
+  }
+
+  function show(tab) {
+    ["approvals", "users", "depts"].forEach((t) => $(t + "-view").classList.toggle("hidden", t !== tab));
+  }
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+
+  function approvalCard(item) {
+    const actor = item.actor || {}, res = item.resource || {}, payload = item.payload || {};
+    const ctx = document.createElement("div");
+    ctx.className = "card";
+    ctx.innerHTML = `
+      <div class="row">
+        <span class="badge ${item.status}">${esc(item.status)}</span>
+        <span><b>${esc(res.type)}:</b> <code>${esc(res.id || "")}</code></span>
+        <span class="muted">by ${esc(actor.sub || "")} (${esc(actor.role || "")} / ${esc(actor.dept || "")})</span>
+        <span class="pill">thread ${esc(item.thread_id || "")}</span>
+        <span class="pill">${esc((item.created_ts || "").slice(0, 19).replace("T", " "))}</span>
+      </div>
+      <div class="status muted">run_id <code>${esc(item.run_id || "")}</code></div>
+      <pre style="white-space:pre-wrap;color:var(--muted);font-size:12px">${esc(JSON.stringify(payload, null, 2))}</pre>
+      <div class="row">
+        <button class="ok" data-act="approve" data-id="${esc(item.id)}">Approve</button>
+        <button class="bad" data-act="reject" data-id="${esc(item.id)}">Reject</button>
+      </div>
+      <div class="status" data-status=""></div>`;
+    ctx.querySelector("[data-act=approve]").addEventListener("click", () => decide(item.id, true, ctx));
+    ctx.querySelector("[data-act=reject]").addEventListener("click", () => decide(item.id, false, ctx));
+    return ctx;
+  }
+
+  async function decide(id, approve, card) {
+    const btn = card.querySelector("[data-status]");
+    btn.textContent = "deciding...";
+    try {
+      const out = await api("/api/approvals/" + encodeURIComponent(id) + "/decide",
+        { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ approve }) });
+      btn.textContent = out.status + " — reply: " + out.reply;
+      btn.classList.add("muted");
+      card.querySelectorAll("button[data-act]").forEach((b) => (b.disabled = true));
+      setTimeout(loadApprovals, 1200);
+    } catch (e) { btn.textContent = "error: " + e.message; }
+  }
+
+  async function loadApprovals() {
+    $("approvals").textContent = "loading...";
+    try {
+      const items = await api("/api/approvals/pending");
+      $("approvals").innerHTML = "";
+      if (!items.length) { $("approvals").innerHTML = '<p class="muted">No pending approvals.</p>'; return; }
+      items.forEach((item) => $("approvals").appendChild(approvalCard(item)));
+    } catch (e) { $("approvals").textContent = "error: " + e.message; }
+  }
+
+  async function loadUsers() {
+    try { const users = await api("/api/users"); $("users").innerHTML = users.map((u) =>
+      `<tr><td>${esc(u.username)}</td><td>${esc(u.role)}</td><td>${esc(u.dept)}</td>
+       <td>${esc(u.scopes.join(", "))}</td></tr>`).join(""); }
+    catch (e) { $("users").innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
+  }
+
+  async function loadDepts() {
+    try { const depts = await api("/api/departments"); $("depts").innerHTML = depts.map((d) =>
+      `<tr><td>${esc(d.name)}</td><td>${esc(d.service)}</td><td>${esc(d.resources.join(", "))}</td>
+       <td>${esc(d.members.join(", "))}</td></tr>`).join(""); }
+    catch (e) { $("depts").innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
+  }
+
+  document.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
+    show(b.dataset.tab);
+    if (b.dataset.tab === "approvals") loadApprovals();
+    if (b.dataset.tab === "users") loadUsers();
+    if (b.dataset.tab === "depts") loadDepts();
+  }));
+
+  $("signin").addEventListener("click", async () => {
+    try {
+      const out = await fetch("/api/login", { method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username: $("user").value, password: $("pass").value }) });
+      if (!out.ok) throw new Error("invalid credentials");
+      const body = await out.json();
+      token = body.access_token;
+      localStorage.setItem("harness_admin_token", token);
+      setAuthed(true); loadApprovals();
+    } catch (e) { alert(e.message); }
+  });
+
+  $("logout").addEventListener("click", () => { localStorage.removeItem("harness_admin_token");
+    token = ""; setAuthed(false); });
+
+  if (token) { setAuthed(true); loadApprovals(); }
+  else setAuthed(false);
+</script>
+</body>
+</html>

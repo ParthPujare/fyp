@@ -59,6 +59,16 @@ p, hr_agent, hr, memory_recall, use
 p, finance_agent, finance, memory_recall, use
 p, devops_agent, devops, memory_recall, use
 
+# ---- PII (weeks 9-10): field-level masking on tool responses + recalled transcripts ----
+# email is visible to every role; salary/ssn are admin-only (no role row -> deny-by-default;
+# admin wildcard `p, admin, admin, *, *` grants pii:* for admin).
+# NOTE: obj names use underscores — Casbin's keyMatch2 treats ":" as a route-param
+# delimiter, so "pii:salary" would match "pii:email".
+p, marketing_agent, marketing, pii_email, read
+p, hr_agent, hr, pii_email, read
+p, finance_agent, finance, pii_email, read
+p, devops_agent, devops, pii_email, read
+
 # ---- Role assignment (user -> role -> domain) ----
 g, alice@acme.com, marketing_agent, marketing
 g, bob@acme.com, hr_agent, hr

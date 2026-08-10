@@ -12,6 +12,7 @@ from typing import Any
 from app.agent.tools import ToolResult
 from app.config import MemorySettings
 from app.harness.enforcer import PolicyEnforcer
+from app.harness.sanitize import sanitize_text
 from app.memory.episodic import EpisodicStore
 from app.memory.scopes import SCOPE_CENTRAL, scope_dept, scope_user
 
@@ -47,5 +48,7 @@ class RecallService:
                 ok=True,
                 content=f"No recalled conversations matching {query!r} in your permitted scopes.",
             )
-        lines = [f"[{h['scope']}] {h['transcript']}" for h in hits]
+        lines = [
+            f"[{h['scope']}] {sanitize_text(h['transcript'], claims, self._enforcer)}" for h in hits
+        ]
         return ToolResult(ok=True, content="\n".join(lines))

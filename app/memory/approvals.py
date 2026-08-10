@@ -55,6 +55,17 @@ class ApprovalStore:
         actor: dict[str, Any],
         payload: dict[str, Any],
     ) -> str:
+        """Create a pending approval, deduplicating on (run_id, resource, payload).
+
+        LangGraph re-runs the interrupted node on resume (`Command(resume=...)`),
+        so the memory/tool gate executes twice. Returning the existing id for the
+        same logical request prevents a stale duplicate pending row from being
+        created on the second pass — the resumed call then re-interrupts against
+        the already-decided approval and proceeds.
+        """
+        existing = self._find(run_id, resource, payload)
+        if existing is not None:
+            return existing
         approval_id = str(uuid.uuid4())
         with self._conn:
             self._conn.execute(
@@ -72,6 +83,19 @@ class ApprovalStore:
                 ),
             )
         return approval_id
+
+    def _find(
+        self, run_id: str, resource: dict[str, Any], payload: dict[str, Any]
+    ) -> str | None:
+        row = self._conn.execute(
+            "SELECT id FROM approvals WHERE run_id = ? AND resource = ? AND payload = ? LIMIT 1",
+            (
+                run_id,
+                json.dumps(resource, sort_keys=True),
+                json.dumps(payload, sort_keys=True),
+            ),
+        ).fetchone()
+        return row["id"] if row else None
 
     def get(self, approval_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
