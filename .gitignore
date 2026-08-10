@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Project runtime data (sqlite dbs, audit logs)
+data/
+
+# Env / secrets
+.env
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+
+# OS
+.DS_Store

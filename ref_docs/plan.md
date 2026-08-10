@@ -96,31 +96,37 @@ Role assignment lives in Casbin (`g, alice@acme.com, marketing_agent`) or assign
 
 ## 4. Proposed Repository Structure
 
+> **Status (2026-08-10):** code lives at the **repo root** (next to `ref_docs/` + `agent_history/`), not inside a `fyp-agent-harness/` subfolder. `✅` = built in Milestone 1 (weeks 1–2); unmarked = planned milestone.
+
 ```
-fyp-agent-harness/
-├── pyproject.toml
-├── .env.example
-├── README.md
+fyp-agent-harness/            ← this repo (root: FYP/)
+├── pyproject.toml            ✅ uv project (fastapi, uvicorn, pydantic-settings, PyJWT, litellm)
+├── .env.example              ✅ all settings with dev defaults (offline-safe: LLM__PROVIDER=mock)
+├── README.md                 ✅ quickstart: install, run services, hello demo, test
+├── Makefile                  ✅ install / test / lint / run / per-service targets
+├── scripts/run_dev.sh        ✅ launches all 6 processes on :8000–8005
 ├── app/
-│   ├── auth/            # mock JWT login, role claims, token verify
-│   ├── llm/             # LiteLLM provider + MockLLM adapter
-│   ├── agent/           # LangGraph graph, nodes, tools (HTTP to services)
-│   │   └── guardrails.py# step limit, tool-call budget, deny-retry, timeout
-│   ├── harness/         # THE CORE: policy, interception, sanitize, audit
-│   │   ├── policies/    # casbin model.conf + policy.csv
-│   │   ├── intercept.py # runtime enforcement wrapper
-│   │   ├── filter.py    # per-role tool schema filtering
-│   │   ├── sanitize.py  # PII masking
-│   │   └── audit.py     # structured JSONL logging
-│   ├── ops/             # TRACING: SQLite trace store + event schema
-│   ├── evals/           # auto-eval hook + deterministic/ + judge/ suites
-│   ├── dashboard/       # FastAPI + web UI: approvals, users, depts, skills
-│   │                    #   editor, memory browser, trace viewer, evals
-│   ├── memory/          # 3-tier + episodic stores, load/reflect/recall nodes,
-│   │                    #   extract, dedup, budget
-│   ├── skills/          # folder/markdown skill registry + (stretch) learn_skill
-│   └── services/        # /crm  /hr  /devops  /finance (FastAPI + SQLite + seed)
-└── tests/               # enforcement + attack + eval-determinism suites
+│   ├── config.py             ✅ pydantic-settings: jwt, llm, services (env_nested_delimiter="__")
+│   ├── auth/                 ✅ mock JWT login, role claims, token verify — service on :8000
+│   ├── llm/                  ✅ LiteLLM provider + MockLLM adapter + factory
+│   ├── ops/                  ✅ trace schema + SQLite TraceStore (append-only, SHA-256 chain)
+│   ├── gateway/              ✅ harness shell: JWT-verified role-aware /hello (:8001)
+│   ├── agent/                planned — LangGraph graph, nodes, tools (HTTP to services) [Wk 3–4]
+│   │   └── guardrails.py     planned — step limit, tool-call budget, deny-retry, timeout
+│   ├── harness/              planned — THE CORE: policy, interception, sanitize, audit [Wk 5–6]
+│   │   ├── policies/         planned — casbin model.conf + policy.csv
+│   │   ├── intercept.py      planned — runtime enforcement wrapper
+│   │   ├── filter.py         planned — per-role tool schema filtering
+│   │   ├── sanitize.py       planned — PII masking
+│   │   └── audit.py          planned — structured JSONL logging
+│   ├── evals/                planned — auto-eval hook + deterministic/ + judge/ suites [Wk 12]
+│   ├── dashboard/            planned — FastAPI + web UI: approvals, users, depts, skills
+│   │                         planned —   editor, memory browser, trace viewer, evals [Wk 9–10]
+│   ├── memory/               planned — 3-tier + episodic stores, load/reflect/recall nodes,
+│   │                         planned —   extract, dedup, budget [Wk 7–8]
+│   ├── skills/               planned — folder/markdown skill registry + (stretch) learn_skill [Wk 11]
+│   └── services/             ✅ crm/hr/devops/finance (FastAPI + SQLite + seed) :8002–8005
+└── tests/                    ✅ offline suites: auth, llm, trace, services, smoke — 32 tests
 ```
 
 ---
@@ -308,18 +314,18 @@ Every change written to the audit log.
 
 ## 11. Multi-Step Plan — Timeline (16 Weeks)
 
-| Weeks | Milestone | Deliverable |
-|---|---|---|
-| 1–2 | Repo scaffold, env/config, mock JWT login, LiteLLM provider + MockLLM, 4 mock services (FastAPI + seeded SQLite), **trace schema defined** | Services run; role-aware hello; tests green offline |
-| 3–4 | LangGraph agent + HTTP tools + **guardrails node** (max steps, tool budget, deny-retry, timeout) | Bounded agent loop; deny-storm test passes |
-| 5–6 | **Casbin core** (pulled earlier): model.conf + policy.csv (RBAC + domains), `filter_tools`, `intercept`, audit log | Unauthorized tool physically blocked |
-| 7–8 | **3-tier + episodic memory**: BaseStore namespaces, `load_memory`/`reflect`/`recall`, frozen snapshot, extract/dedup/budget/eviction | Multi-turn chat with RBAC-scoped recall incl. past-session search |
-| 9–10 | PII sanitizer + HITL interrupts + dashboard v1 (approvals, users, depts) | Admin approves finance transfer from web panel |
-| 11 | Folder/markdown skills + skill RBAC + **skills editor + memory browser** | Edit a skill → behavior changes on next run |
-| 12 | **Trace viewer + evals harness** (deterministic + judge), auto-eval hook | Ops tab shows run trees; eval scores per run |
-| 13–14 | Attack suites: policy matrix, prompt-injection, cross-dept memory, skill misuse, loop-abuse, HITL-bypass, trace/audit integrity + hardening | Attack demo passes |
-| 15 | Stretch: `learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter | Optional extensions |
-| 16 | Report + README + **recorded demo script** (login as roles → tool use → deny → HITL → memory recall + skill → trace + eval review) | Report + demo |
+| Weeks | Milestone | Deliverable | Status |
+|---|---|---|---|
+| 1–2 | Repo scaffold, env/config, mock JWT login, LiteLLM provider + MockLLM, 4 mock services (FastAPI + seeded SQLite), **trace schema defined** | Services run; role-aware hello; tests green offline | ✅ **DONE 2026-08-10** (session_002) |
+| 3–4 | LangGraph agent + HTTP tools + **guardrails node** (max steps, tool budget, deny-retry, timeout) | Bounded agent loop; deny-storm test passes | |
+| 5–6 | **Casbin core** (pulled earlier): model.conf + policy.csv (RBAC + domains), `filter_tools`, `intercept`, audit log | Unauthorized tool physically blocked | |
+| 7–8 | **3-tier + episodic memory**: BaseStore namespaces, `load_memory`/`reflect`/`recall`, frozen snapshot, extract/dedup/budget/eviction | Multi-turn chat with RBAC-scoped recall incl. past-session search | |
+| 9–10 | PII sanitizer + HITL interrupts + dashboard v1 (approvals, users, depts) | Admin approves finance transfer from web panel | |
+| 11 | Folder/markdown skills + skill RBAC + **skills editor + memory browser** | Edit a skill → behavior changes on next run | |
+| 12 | **Trace viewer + evals harness** (deterministic + judge), auto-eval hook | Ops tab shows run trees; eval scores per run | |
+| 13–14 | Attack suites: policy matrix, prompt-injection, cross-dept memory, skill misuse, loop-abuse, HITL-bypass, trace/audit integrity + hardening | Attack demo passes | |
+| 15 | Stretch: `learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter | Optional extensions | |
+| 16 | Report + README + **recorded demo script** (login as roles → tool use → deny → HITL → memory recall + skill → trace + eval review) | Report + demo | |
 
 ---
 

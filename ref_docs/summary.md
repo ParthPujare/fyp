@@ -30,6 +30,20 @@ Security that depends on a model "remembering" to obey is not security. Access m
 
 A Marketing user asks the assistant for CRM data: it works. The same user, or a prompt-injection attempt, tries to delete an HR record or trigger a DevOps change: the harness blocks it at runtime and logs the denial. A finance transfer is requested: it suspends until an admin approves it on a dashboard. The assistant remembers a user's preferences across sessions in their private tier, and the company's shared policies in the central tier — but only the people allowed to see and change those things can.
 
+## Current Status (2026-08-10)
+
+**Milestone 1 (weeks 1–2) is complete** — the foundation is running and tested offline:
+
+- Repo scaffold at the repo root (uv, `pyproject.toml`, `.env.example`, `Makefile`, `scripts/run_dev.sh`).
+- **Mock JWT auth** (`app/auth/`, :8000): 5 seeded roles (marketing/hr/finance/devops/admin), HS256 issue + verify, `POST /auth/login`, `GET /auth/me`.
+- **Pluggable LLM** (`app/llm/`): provider protocol, deterministic `MockLLM` (default — offline CI), `LiteLLMProvider` (Gemini/OpenAI/Claude), factory.
+- **Trace store** (`app/ops/`): append-only SQLite with SHA-256 per-run integrity chain; tamper/truncation detection.
+- **4 dept mock services** (`app/services/`, :8002–8005): crm/hr/devops/finance, FastAPI + seeded SQLite (hr includes salary/ssn PII for the later sanitizer).
+- **Gateway shell** (`app/gateway/`, :8001): role-aware `POST /hello` — the harness entry point that becomes the LangGraph gateway.
+- **32 offline tests green** (`uv run pytest`), `ruff` clean.
+
+**Next milestone (weeks 3–4):** LangGraph agent + HTTP tools to the services + guardrails node (max steps, tool budget, deny-retry, timeout). Full plan: `ref_docs/plan.md` §11; build log: `agent_history/`.
+
 ## Out of Scope
 
 The project deliberately does not build an agent framework from scratch, does not train or fine-tune models (it uses off-the-shelf models), and does not implement enterprise identity infrastructure (identity is simplified). The focus is the harness — the enforcement layer — and proving, with deterministic tests, that it holds under attack.

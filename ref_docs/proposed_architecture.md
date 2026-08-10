@@ -2,6 +2,8 @@
 
 Detailed architecture flow for the Enterprise AI Personal Assistant secured by a zero-trust harness. This document is the implementation blueprint derived from `plan.md`. Every flow below maps to a module in the proposed repository structure and to a test in the attack/verification suites.
 
+> **Implementation status (2026-08-10):** Milestone 1 (weeks 1–2) is built — see `agent_history/session_002_milestone1_foundation.md`. Live: `auth` :8000, `gateway` :8001 (role-aware `/hello` shell), and all four dept services :8002–8005 with seeded SQLite. The trace event schema (§12) + `TraceStore` exist in `app/ops/`. The LangGraph agent, Casbin harness, memory, dashboard, and evals remain planned per `ref_docs/plan.md` §11. Code lives at the repo root next to `ref_docs/` + `agent_history/`.
+
 ---
 
 ## 1. System Context
@@ -38,16 +40,16 @@ Detailed architecture flow for the Enterprise AI Personal Assistant secured by a
 
 ## 2. Runtime Topology
 
-| Process | Role | Persistence | Port (dev) |
-|---|---|---|---|
-| `auth` service | Mock JWT issue/verify | none (stateless) | 8000 |
-| `harness` gateway | LangGraph runtime + enforcement | SQLite checkpointer, trace store | 8001 |
-| `/crm` service | Marketing dept tools | SQLite | 8002 |
-| `/hr` service | HR dept tools | SQLite | 8003 |
-| `/devops` service | DevOps dept tools | SQLite | 8004 |
-| `/finance` service | Finance dept tools | SQLite | 8005 |
-| `dashboard` | Admin + ops web UI | same DBs (read) | 8006 |
-| LLM backend | LiteLLM → Gemini / OpenAI / Claude / MockLLM | none | external |
+| Process | Role | Persistence | Port (dev) | Status (M1) |
+|---|---|---|---|---|
+| `auth` service | Mock JWT issue/verify | none (stateless) | 8000 | ✅ live |
+| `harness` gateway | LangGraph runtime + enforcement | SQLite checkpointer, trace store | 8001 | ⚠️ shell only — `/hello`; graph + enforcement Wk 3–6 |
+| `/crm` service | Marketing dept tools | SQLite | 8002 | ✅ live (seeded) |
+| `/hr` service | HR dept tools | SQLite | 8003 | ✅ live (seeded) |
+| `/devops` service | DevOps dept tools | SQLite | 8004 | ✅ live (seeded) |
+| `/finance` service | Finance dept tools | SQLite | 8005 | ✅ live (seeded) |
+| `dashboard` | Admin + ops web UI | same DBs (read) | 8006 | planned (Wk 9–10) |
+| LLM backend | LiteLLM → Gemini / OpenAI / Claude / MockLLM | none | external | provider ready; wired into graph Wk 3–4 |
 
 All dept services are **local FastAPI** processes seeded with realistic data (customers, employees, incidents, ledgers). Tools in the agent call these over HTTP — the same call shape a real internal gateway would use.
 
