@@ -46,12 +46,18 @@ def test_chat_returns_reply_shape():
         gateway_app.dependency_overrides.clear()
 
 
-def test_chat_runs_real_agent(dept_apps, executor, trace_store):
+def test_chat_runs_real_agent(dept_apps, executor, trace_store, enforcer, audit_log):
     provider = MockLLM(sequence=[
         {"text": "searching", "tool_calls": [{"name": "crm_search_customer", "args": {"query": "acme"}}]},
         {"text": "Found them.", "tool_calls": []},
     ])
-    runner = make_runner(provider=provider, executor=executor, trace=trace_store)
+    runner = make_runner(
+        provider=provider,
+        executor=executor,
+        trace=trace_store,
+        enforcer=enforcer,
+        audit=audit_log,
+    )
     token = login_token("alice@acme.com")
 
     gateway = TestClient(gateway_app)

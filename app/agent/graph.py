@@ -16,9 +16,11 @@ from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from app.agent.enforce import scope_allowed
 from app.agent.guardrails import GuardrailTracker
 from app.agent.tools import TOOL_REGISTRY, ToolExecutor, ToolResult
+from app.harness.audit import AuditLog
+from app.harness.enforcer import PolicyEnforcer
+from app.harness.intercept import intercept_tool
 from app.llm.base import LLMProvider
 from app.ops.schema import TraceEventType
 from app.ops.store import TraceStore
@@ -41,6 +43,8 @@ class AgentDeps:
     executor: ToolExecutor
     tracker: GuardrailTracker
     trace: TraceStore
+    enforcer: PolicyEnforcer
+    audit: AuditLog
     run_id: str
     actor: dict[str, Any]
     tool_schemas: list[dict[str, Any]]
@@ -113,16 +117,19 @@ def build_agent_graph(deps: AgentDeps):
                     reason="rbac",
                     content=f"{name} was blocked earlier in this run; route around it.",
                 )
-            elif not scope_allowed(tool, state["claims"]):
-                tracker.mark_denied(name)
-                result = ToolResult(
-                    ok=False,
-                    denied=True,
-                    reason="rbac",
-                    content=f"Permission denied: you need scope {tool.required_scope} to call {name}.",
-                )
             else:
-                result = deps.executor.execute(tool, args)
+                result = intercept_tool(
+                    tool,
+                    args,
+                    enforcer=deps.enforcer,
+                    claims=state["claims"],
+                    audit=deps.audit,
+                    run_id=deps.run_id,
+                )
+                if result is None:
+                    result = deps.executor.execute(tool, args)
+                else:
+                    deps.tracker.mark_denied(name)
 
             outcome = (
                 "denied" if result.denied else "timeout" if result.timeout else "error" if not result.ok else "allowed"

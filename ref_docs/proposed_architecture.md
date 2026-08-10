@@ -2,7 +2,7 @@
 
 Detailed architecture flow for the Enterprise AI Personal Assistant secured by a zero-trust harness. This document is the implementation blueprint derived from `plan.md`. Every flow below maps to a module in the proposed repository structure and to a test in the attack/verification suites.
 
-> **Implementation status (2026-08-10):** Milestone 1 (weeks 1–2) and Milestone 2 (weeks 3–4) are built. Live: `auth` :8000, `gateway` :8001 (role-aware `/hello` + bounded `/chat`), and all four dept services :8002–8005 with seeded SQLite. `app/agent/` has the LangGraph agent, HTTP tool registry/executor, scope-gate stub, and guardrails node (max steps, tool budget, deny-retry, timeout) with the trace schema (§12) + `TraceStore` wired into every run. Casbin `filter_tools`/`intercept` (weeks 5–6), memory, dashboard, and evals remain planned per `ref_docs/plan.md` §11. Code lives at the repo root next to `ref_docs/` + `agent_history/`.
+> **Implementation status (2026-08-10):** Milestones 1–3 (weeks 1–6) are built. Live: `auth` :8000, `gateway` :8001 (role-aware `/hello` + bounded `/chat`), and all four dept services :8002–8005 with seeded SQLite. `app/agent/` has the LangGraph agent, HTTP tool registry/executor, and guardrails node (max steps, tool budget, deny-retry, timeout) with the trace schema (§12) + `TraceStore` wired into every run. `app/harness/` now holds the Casbin core: `policies/{model.conf,policy.csv}`, `PolicyEnforcer`, `filter_tools`, `intercept`, and the JSONL audit log — the `scope_allowed` stub is gone. Memory (weeks 7–8), PII sanitizer + HITL + dashboard (weeks 9–10), skills (week 11), and evals (week 12) remain planned per `ref_docs/plan.md` §11. Code lives at the repo root next to `ref_docs/` + `agent_history/`.
 
 ---
 
@@ -131,12 +131,17 @@ JWT ──▶ verify signature + expiry
 ```
 
 ### Casbin Model (model.conf)
+
+Standard "RBAC with domains": the request carries the caller's own domain (`dom` = JWT `dept`),
+the target resource namespace (`obj`), and the action (`act`). `keyMatch2` on `obj` enables
+`*` wildcards (the admin row); deny-by-default means any unmatched `(sub, dom, obj, act)` is denied.
+
 ```
 [request_definition]
-r = sub, dom, obj, act          # subject, domain(dept), object, action
+r = sub, dom, obj, act          # sub=user email, dom=caller's dept, obj=resource ns, act=action
 
 [policy_definition]
-p = sub, dom, obj, act          # e.g. p, marketing_agent, marketing, crm.read, allow
+p = sub, dom, obj, act          # e.g. p, marketing_agent, marketing, crm, read
 
 [role_definition]
 g = _, _, _                     # g, user, role, domain   (RBAC with domains)
@@ -145,35 +150,31 @@ g = _, _, _                     # g, user, role, domain   (RBAC with domains)
 e = some(where (p.eft == allow))
 
 [matchers]
-m = g(r.sub, p.sub, r.dom) && r.dom == p.dom && keyMatch(r.obj, p.obj) && (r.act == p.act || p.act == "*")
+m = g(r.sub, p.sub, r.dom) && r.dom == p.dom && keyMatch2(r.obj, p.obj) && (r.act == p.act || p.act == "*")
 ```
 
-### Policy.csv (seed excerpt)
+### Policy.csv (seed)
+
+Role-level allow rows + user→role→domain assignment. Anything not matched is denied (so
+cross-department calls and `hr.delete` are denied by default — no explicit deny rows needed).
+
 ```
-p, admin, *, *, *, allow
-
-p, marketing_agent, marketing, crm.read, allow
-p, marketing_agent, marketing, crm.create, allow
-p, marketing_agent, hr, *, deny          # explicit deny wins by policy order
-p, marketing_agent, devops, *, deny
-p, marketing_agent, finance, *, deny
-
-p, hr_agent, hr, hr.read, allow
-p, hr_agent, hr, hr.delete, deny          # even inside own dept, destructive acts are gated
-
-p, finance_agent, finance, finance.read, allow
-p, finance_agent, finance, finance.transfer, allow   # but transfer is ALSO HITL-gated (§8)
-
-p, devops_agent, devops, devops.*, allow
-p, devops_agent, devops, devops.promote, deny
+p, admin, admin, *, *
+p, marketing_agent, marketing, crm, read
+p, marketing_agent, marketing, crm, create
+p, hr_agent, hr, hr, read
+p, hr_agent, hr, hr, create
+p, finance_agent, finance, finance, read
+p, finance_agent, finance, finance, transfer
+p, devops_agent, devops, devops, read
+p, devops_agent, devops, devops, create
 
 g, alice@acme.com, marketing_agent, marketing
 g, bob@acme.com, hr_agent, hr
 g, carol@acme.com, finance_agent, finance
+g, dave@acme.com, devops_agent, devops
 g, admin@acme.com, admin, admin
 ```
-
-**Deny-by-default:** any object/act with no matching allow row is denied. Explicit deny rows are kept for documentation and for the "policy matrix" report table.
 
 ---
 

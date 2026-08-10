@@ -1,0 +1,33 @@
+# Policy matrix — roles x departments x resources (see ref_docs/plan.md §4, §12).
+# Deny-by-default: every (sub, dom, obj, act) not matched by an allow row below is denied,
+# so cross-department and destructive actions need an explicit allow row.
+# obj uses keyMatch2 wildcards ("*" matches anything); act "*" matches any action.
+# p, <role>, <dom>, <obj>, <act>
+# g, <user>, <role>, <dom>
+
+# ---- Admin: owns everything in its "admin" domain ----
+p, admin, admin, *, *
+
+# ---- Marketing (CRM) ----
+p, marketing_agent, marketing, crm, read
+p, marketing_agent, marketing, crm, create
+
+# ---- HR ----
+p, hr_agent, hr, hr, read
+p, hr_agent, hr, hr, create
+# hr.delete is deliberately absent -> deny-by-default (even inside own dept)
+
+# ---- Finance ----
+p, finance_agent, finance, finance, read
+p, finance_agent, finance, finance, transfer
+
+# ---- DevOps ----
+p, devops_agent, devops, devops, read
+p, devops_agent, devops, devops, create
+
+# ---- Role assignment (user -> role -> domain) ----
+g, alice@acme.com, marketing_agent, marketing
+g, bob@acme.com, hr_agent, hr
+g, carol@acme.com, finance_agent, finance
+g, dave@acme.com, devops_agent, devops
+g, admin@acme.com, admin, admin

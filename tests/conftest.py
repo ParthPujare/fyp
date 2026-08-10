@@ -12,6 +12,8 @@ from fastapi import FastAPI
 from app.agent.runner import run_agent
 from app.agent.tools import ToolExecutor
 from app.config import Settings, get_settings
+from app.harness.audit import AuditLog
+from app.harness.enforcer import PolicyEnforcer
 from app.llm.base import LLMProvider
 from app.ops.store import TraceStore
 from app.services import crm, devops, finance, hr
@@ -49,6 +51,8 @@ def make_runner(
     executor: ToolExecutor,
     trace: TraceStore,
     settings: Settings | None = None,
+    enforcer: PolicyEnforcer | None = None,
+    audit: AuditLog | None = None,
 ):
     """Run agent against in-process services."""
 
@@ -60,9 +64,21 @@ def make_runner(
             executor=executor,
             trace=trace,
             settings=settings,
+            enforcer=enforcer,
+            audit=audit,
         )
 
     return _run
+
+
+@pytest.fixture
+def enforcer() -> PolicyEnforcer:
+    return PolicyEnforcer()
+
+
+@pytest.fixture
+def audit_log(tmp_path) -> AuditLog:
+    return AuditLog(tmp_path / "audit.jsonl")
 
 
 @pytest.fixture
@@ -86,9 +102,16 @@ def executor(dept_apps) -> ToolExecutor:
 
 
 @pytest.fixture
-def runner_factory(executor, trace_store):
+def runner_factory(executor, trace_store, enforcer, audit_log):
     def _make(provider: LLMProvider, settings: Settings | None = None):
-        return make_runner(provider=provider, executor=executor, trace=trace_store, settings=settings)
+        return make_runner(
+            provider=provider,
+            executor=executor,
+            trace=trace_store,
+            settings=settings,
+            enforcer=enforcer,
+            audit=audit_log,
+        )
 
     return _make
 

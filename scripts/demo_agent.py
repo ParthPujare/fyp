@@ -1,4 +1,4 @@
-"""Demo: watch the Milestone 2 agent loop do real things (fully offline, no pytest).
+"""Demo: watch the Milestone 3 agent loop do real things (fully offline, no pytest).
 
 Usage:
     uv run python scripts/demo_agent.py
@@ -6,14 +6,16 @@ Usage:
 Runs the actual LangGraph agent against the 4 dept services in-process with a
 scripted MockLLM, and prints, for each scenario:
     - every tool call the agent made + its outcome (allowed/denied/timeout)
-    - the scope-gate denials and deny-retry guardrail hits
+    - the Casbin RBAC denials and deny-retry guardrail hits
     - the trace event tree written for one run
+    - the audit log entries (every allow/deny decision)
 
 Scenarios:
     1. alice  -> allowed CRM search (agent really executes against seeded data)
-    2. alice  -> cross-dept HR delete -> scope-gate DENY (tool never hits the service)
+    2. alice  -> cross-dept HR delete -> Casbin DENY (tool never hits the service)
     3. bob    -> deny-storm on hr_delete_employee -> bounded by guardrails
     4. trace  -> dump one run's event tree from the TraceStore
+    5. audit  -> dump the JSONL decision log (ALLOW/DENY)
 """
 
 from __future__ import annotations
@@ -31,6 +33,8 @@ from app.agent.runner import run_agent
 from app.agent.tools import TOOL_REGISTRY, ToolExecutor
 from app.auth.users import USERS
 from app.config import Settings, get_settings
+from app.harness.audit import AuditLog
+from app.harness.enforcer import PolicyEnforcer
 from app.llm.mock import MockLLM
 from app.ops.store import TraceStore
 from app.services import crm, devops, finance, hr
@@ -110,8 +114,11 @@ def main() -> None:
     }
     executor = ToolExecutor(client=make_service_client(apps), settings=settings)
     trace = TraceStore(workdir / "trace.sqlite")
+    enforcer = PolicyEnforcer()
+    audit = AuditLog(workdir / "audit.jsonl")
     n_tools = len(TOOL_REGISTRY)
     print(f"{DIM}tool registry: {n_tools} tools (crm/hr/devops/finance) • LLM: MockLLM (scripted){RESET}")
+    print(f"{DIM}policy: Casbin model.conf + policy.csv (deny-by-default) • audit: {audit.path.name}{RESET}")
 
     # 1. Allowed tool call — alice runs a real CRM search against seeded data.
     header("1. alice (marketing_agent) — ALLOWED crm_search_customer")
@@ -125,17 +132,27 @@ def main() -> None:
         provider=provider,
         executor=executor,
         trace=trace,
+        enforcer=enforcer,
+        audit=audit,
     )
     show_run(run1, "alice: 'find customer acme'")
 
     # 2. Cross-dept denial — alice asks to delete an HR record.
-    header("2. alice — CROSS-DEPT hr_delete_employee -> scope-gate DENY")
+    header("2. alice — CROSS-DEPT hr_delete_employee -> Casbin DENY")
     provider = MockLLM(sequence=[
         {"text": "deleting...", "tool_calls": [{"name": "hr_delete_employee", "args": {"id": 1}}]},
         {"text": "done", "tool_calls": []},
     ])
     show_run(
-        run_agent(claims_for("alice@acme.com"), "delete employee 1", provider=provider, executor=executor, trace=trace),
+        run_agent(
+            claims_for("alice@acme.com"),
+            "delete employee 1",
+            provider=provider,
+            executor=executor,
+            trace=trace,
+            enforcer=enforcer,
+            audit=audit,
+        ),
         "alice: 'delete employee 1'",
     )
 
@@ -145,7 +162,15 @@ def main() -> None:
         {"name": "hr_delete_employee", "args": {"id": 1}},
     ]}})
     show_run(
-        run_agent(claims_for("bob@acme.com"), "delete the employee", provider=provider, executor=executor, trace=trace),
+        run_agent(
+            claims_for("bob@acme.com"),
+            "delete the employee",
+            provider=provider,
+            executor=executor,
+            trace=trace,
+            enforcer=enforcer,
+            audit=audit,
+        ),
         "bob: 'delete the employee' (tool budget 8, max steps 10)",
     )
 
@@ -156,6 +181,16 @@ def main() -> None:
         print(f"  {e['seq']:>3}  {color}{e['type']:<11}{RESET} {e['payload']}")
     ok, issues = trace.verify_integrity(run1.run_id)
     print(f"\n  trace integrity: {GREEN}OK{RESET}" if ok else f"  trace integrity: {RED}FAILED {issues}{RESET}")
+
+    # 5. Audit log — every allow/deny decision Casbin made, JSONL append-only.
+    header("5. Audit log — every ALLOW/DENY decision (append-only JSONL)")
+    for entry in audit.entries():
+        color = GREEN if entry["decision"] == "ALLOW" else RED
+        print(
+            f"  {color}{entry['decision']:<7}{RESET} {entry['resource']['type']:<4} "
+            f"{entry['resource']['id']:<22} actor={entry['actor']['sub']:<20} reason={entry['reason']}"
+        )
+    print(f"\n  {DIM}{len(audit.entries())} decision(s) logged → {audit.path}{RESET}")
 
     print(f"\n{B}Demo complete. Every run above is also in the trace store ({workdir}/trace.sqlite).{RESET}")
 

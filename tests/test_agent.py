@@ -108,7 +108,7 @@ def test_max_steps_respected(runner_factory, settings_with_max_steps):
     assert "guardrail hit" in result.reply
 
 
-def test_run_timeout_terminates(dept_apps, trace_store, settings_with_timeout):
+def test_run_timeout_terminates(dept_apps, trace_store, settings_with_timeout, enforcer, audit_log):
     app = dept_apps[8002]
 
     def slow_handler(request):
@@ -121,7 +121,12 @@ def test_run_timeout_terminates(dept_apps, trace_store, settings_with_timeout):
         {"name": "crm_search_customer", "args": {"query": "x"}},
     ]}})
     run = make_runner(
-        provider=provider, executor=slow_executor, trace=trace_store, settings=settings_with_timeout
+        provider=provider,
+        executor=slow_executor,
+        trace=trace_store,
+        settings=settings_with_timeout,
+        enforcer=enforcer,
+        audit=audit_log,
     )
     result = run(ALICE, "search")
 

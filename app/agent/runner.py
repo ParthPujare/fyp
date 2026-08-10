@@ -15,6 +15,9 @@ from app.agent.graph import AgentDeps, build_agent_graph
 from app.agent.guardrails import make_tracker
 from app.agent.tools import TOOL_REGISTRY, ToolExecutor, tool_schema
 from app.config import Settings, get_settings
+from app.harness.audit import AuditLog
+from app.harness.enforcer import PolicyEnforcer
+from app.harness.filter import filter_tools
 from app.llm.base import LLMProvider
 from app.llm.factory import get_provider
 from app.ops.store import TraceStore
@@ -35,12 +38,19 @@ def run_agent(
     provider: LLMProvider | None = None,
     executor: ToolExecutor | None = None,
     trace: TraceStore | None = None,
+    enforcer: PolicyEnforcer | None = None,
+    audit: AuditLog | None = None,
     settings: Settings | None = None,
 ) -> AgentResult:
     settings = settings or get_settings()
     provider = provider or get_provider(settings)
     executor = executor or ToolExecutor(settings=settings)
-    trace = trace or TraceStore(settings.services.data_dir / "trace.sqlite")
+    if trace is None:
+        trace = TraceStore(settings.services.data_dir / "trace.sqlite")
+    if enforcer is None:
+        enforcer = PolicyEnforcer()
+    if audit is None:
+        audit = AuditLog(settings.services.audit_path)
 
     tracker = make_tracker(settings.guardrails)
     actor = {"sub": claims["sub"], "role": claims["role"], "dept": claims["dept"]}
@@ -51,9 +61,13 @@ def run_agent(
         executor=executor,
         tracker=tracker,
         trace=trace,
+        enforcer=enforcer,
+        audit=audit,
         run_id=run_id,
         actor=actor,
-        tool_schemas=[tool_schema(t) for t in TOOL_REGISTRY.values()],
+        tool_schemas=[
+            tool_schema(t) for t in filter_tools(TOOL_REGISTRY.values(), enforcer, claims)
+        ],
     )
     graph = build_agent_graph(deps)
 

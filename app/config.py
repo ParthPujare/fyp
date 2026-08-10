@@ -23,6 +23,7 @@ class LLMSettings(BaseModel):
 
 class ServiceSettings(BaseModel):
     data_dir: Path = Path("data")
+    audit_path: Path = Path("data/audit.jsonl")
     auth_url: str = "http://127.0.0.1:8000"
     gateway_url: str = "http://127.0.0.1:8001"
     crm_url: str = "http://127.0.0.1:8002"

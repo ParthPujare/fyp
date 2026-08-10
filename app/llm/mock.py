@@ -20,6 +20,7 @@ class MockLLM:
     def __init__(self, script: dict[str, dict] | None = None, sequence: list[dict] | None = None):
         self._script = script or {}
         self._sequence = list(sequence) if sequence is not None else None
+        self.last_tools: list[dict[str, Any]] | None = None
 
     def _last_user(self, messages: list[dict[str, Any]]) -> str:
         for message in reversed(messages):
@@ -33,6 +34,7 @@ class MockLLM:
         tools: list[dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
+        self.last_tools = tools
         if self._sequence is not None:
             if self._sequence:
                 spec = self._sequence.pop(0)

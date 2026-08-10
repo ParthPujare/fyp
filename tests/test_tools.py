@@ -1,8 +1,7 @@
-"""Tool registry + executor: route mapping, HTTP calls, scope gate, timeouts."""
+"""Tool registry + executor: route mapping, HTTP calls, Casbin gate, timeouts."""
 
 import httpx
 
-from app.agent.enforce import scope_allowed
 from app.agent.tools import TOOL_REGISTRY, ToolExecutor
 from app.services import crm, devops, finance, hr
 
@@ -32,15 +31,15 @@ def test_registry_maps_to_service_routes():
         assert found, f"{tool.name} -> {tool.http_method} {path} not found in {tool.dept} service"
 
 
-def test_scope_allowed_by_scope():
+def test_casbin_tool_allowed_by_role(enforcer):
     tool = TOOL_REGISTRY["crm_create_campaign"]
-    assert scope_allowed(tool, ALICE) is True
-    assert scope_allowed(tool, BOB) is False
-    assert scope_allowed(tool, ADMIN) is True
+    assert enforcer.tool_allowed(tool, ALICE) is True
+    assert enforcer.tool_allowed(tool, BOB) is False
+    assert enforcer.tool_allowed(tool, ADMIN) is True
 
 
-def test_scope_denied_without_scopes():
-    assert scope_allowed(TOOL_REGISTRY["crm_search_customer"], {"sub": "x", "role": "y"}) is False
+def test_casbin_denied_for_unknown_user(enforcer):
+    assert enforcer.tool_allowed(TOOL_REGISTRY["crm_search_customer"], {"sub": "x", "role": "y"}) is False
 
 
 def test_executor_search_customer(dept_apps, executor):
