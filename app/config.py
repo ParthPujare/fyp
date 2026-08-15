@@ -24,6 +24,7 @@ class LLMSettings(BaseModel):
 class ServiceSettings(BaseModel):
     data_dir: Path = Path("data")
     audit_path: Path = Path("data/audit.jsonl")
+    members_path: Path = Path("data/members.sqlite")
     memory_path: Path = Path("data/memory.sqlite")
     checkpoint_path: Path = Path("data/checkpoints.sqlite")
     auth_url: str = "http://127.0.0.1:8000"

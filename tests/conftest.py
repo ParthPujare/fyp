@@ -200,3 +200,21 @@ def settings_with_max_steps() -> Settings:
 @pytest.fixture
 def settings_with_timeout() -> Settings:
     return Settings(guardrails={"run_timeout_seconds": 0.05, "call_timeout_seconds": 5.0})
+
+
+@pytest.fixture(autouse=True)
+def member_store(tmp_path):
+    """Isolate the MemberStore per test (fresh, seeded tmp DB) so the suite never
+    touches the real `data/members.sqlite` (plan_mk2 Phase 1 test isolation)."""
+    from app.auth import users as auth_users
+    from app.auth.store import MemberStore
+    from app.harness.audit import AuditLog
+
+    previous = auth_users.get_store()
+    store = MemberStore(
+        tmp_path / "members.sqlite",
+        audit=AuditLog(tmp_path / "members_audit.jsonl"),
+    )
+    auth_users.set_store(store)
+    yield store
+    auth_users.set_store(previous)

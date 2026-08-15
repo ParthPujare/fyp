@@ -235,6 +235,12 @@ run (deny-retry); repeats are short-circuited. Every run lands in `data/trace.sq
 Mock users: `alice@acme.com` (marketing), `bob@acme.com` (hr), `carol@acme.com` (finance),
 `dave@acme.com` (devops), `admin@acme.com` (admin). Dev passwords are `alice123`, `bob123`, `carol123`, `dave123`, `admin123`.
 
+**Members (Mk2):** identity now lives in `data/members.sqlite` (`app/auth/store.py` — the single
+source of truth; the 5 seeds are migrated on first open). Passwords are stored as scrypt hashes,
+never plaintext. Login/`/auth/me`/`USERS` all read the store, every member change is audit-logged,
+and a lockout guard prevents deactivating the last active admin (or yourself). Member *management*
+UI lands in Mk2 Phase 4; Phase 2 moves Casbin `g` assignments onto the store.
+
 ## Configuration
 
 Copy `.env.example` to `.env` to override settings. Defaults are fully offline:
@@ -245,6 +251,7 @@ to use a real model (Gemini free tier default).
 
 `uv run pytest` — all offline:
 - auth: JWT round-trip, expiry, tamper detection, login/me endpoints
+- members: MemberStore seeding, scrypt hashing (no plaintext), create-then-login (molly), `/auth/me` reflects store edits, inactive login 401, lockout guard (last admin / self), reset password, audit logging, `USERS`/`claims_for` read the store
 - llm: MockLLM determinism (script + sequence), factory routing (mock vs litellm)
 - trace: chain building, tamper/truncation detection via SHA-256 integrity chain, per-event `source` derivation/override, `list_runs` summaries + legacy-DB migration
 - services: seeded data, CRUD, field validation, PII present for the later sanitize milestone

@@ -1,10 +1,18 @@
-"""Auth service — FastAPI on :8000. Mock JWT login."""
+"""Auth service — FastAPI on :8000. Mock JWT login backed by the MemberStore.
+
+Since Mk2 Phase 1 the identity source is `app.auth.store.MemberStore`
+(`data/members.sqlite`), not the static `USERS` dict: `/auth/login` verifies the
+scrypt hash, `/auth/me` re-reads the member so an admin edit (role/dept/scopes)
+is reflected on the *next* claims read even with an existing token
+(plan_mk2 §3.1). Inactive members cannot log in; Phase 2 additionally denies
+their already-issued tokens at enforcement time.
+"""
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+from app.auth import users
 from app.auth.jwt import AuthError, create_token, verify_token
-from app.auth.users import USERS
 from app.config import get_settings
 
 settings = get_settings()
@@ -24,16 +32,17 @@ def health() -> dict:
 
 @app.post("/auth/login")
 def login(req: LoginRequest) -> dict:
-    user = USERS.get(req.username)
-    if user is None or user.password != req.password:
+    store = users.get_store()
+    member = store.get(req.username)
+    if member is None or not store.verify(req.username, req.password):
         raise HTTPException(status_code=401, detail="invalid credentials")
+    claims = member.claims()
     token = create_token(
-        user,
+        member,
         settings.jwt.secret,
         settings.jwt.algorithm,
         settings.jwt.expiry_minutes,
     )
-    claims = verify_token(token, settings.jwt.secret, settings.jwt.algorithm)
     return {"access_token": token, "token_type": "bearer", "claims": claims}
 
 
@@ -43,12 +52,15 @@ def me(authorization: str | None = Header(default=None)) -> dict:
         raise HTTPException(status_code=401, detail="missing bearer token")
     token = authorization.split(" ", 1)[1]
     try:
-        claims = verify_token(token, settings.jwt.secret, settings.jwt.algorithm)
+        verified = verify_token(token, settings.jwt.secret, settings.jwt.algorithm)
     except AuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+    member = users.get_store().get(verified["sub"])
+    if member is None:
+        raise HTTPException(status_code=404, detail="member deactivated or removed")
     return {
-        "sub": claims["sub"],
-        "role": claims["role"],
-        "dept": claims["dept"],
-        "scopes": claims["scopes"],
+        "sub": member.username,
+        "role": member.role,
+        "dept": member.dept,
+        "scopes": member.scopes,
     }

@@ -90,3 +90,22 @@ def test_me_returns_claims():
 def test_me_missing_token():
     client = TestClient(auth_app)
     assert client.get("/auth/me").status_code == 401
+
+
+def test_login_reads_store_after_member_creation(member_store):
+    """Mk2 Phase 1: auth reads the MemberStore — a freshly created member can log in."""
+    member_store.create(
+        "molly@acme.com",
+        "molly123",
+        role="marketing_agent",
+        dept="marketing",
+        scopes=["crm:read", "crm:create"],
+        actor="admin@acme.com",
+    )
+    client = TestClient(auth_app)
+    resp = client.post("/auth/login", json={"username": "molly@acme.com", "password": "molly123"})
+    assert resp.status_code == 200
+    claims = resp.json()["claims"]
+    assert claims["role"] == "marketing_agent"
+    # USERS mapping is store-backed: the new member shows up through the shim too.
+    assert USERS["molly@acme.com"].dept == "marketing"

@@ -220,7 +220,13 @@ def users(
 ) -> list[dict[str, Any]]:
     _verify_admin(authorization)
     return [
-        {"username": u.username, "role": u.role, "dept": u.dept, "scopes": u.scopes}
+        {
+            "username": u.username,
+            "role": u.role,
+            "dept": u.dept,
+            "scopes": u.scopes,
+            "active": u.active,
+        }
         for u in sorted(USERS.values(), key=lambda u: u.username)
     ]
 

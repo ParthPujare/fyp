@@ -10,7 +10,7 @@ original 16-week plan** (`ref_docs/plans/plan_mk1_core_harness.md`) and is froze
 | Plan | Title | Status | Dates | Deliverable / focus | Link |
 |------|-------|--------|-------|---------------------|------|
 | Mk1 | Core harness — full 16-week vertical slice (RBAC, 3-tier memory, HITL, sanitizer, skills, trajectory+evals, attack suites) | Milestones 1–8 (weeks 1–14) DONE; stretch + report (weeks 15–16) still open | 2026-08-10 → | Deterministic zero-trust harness with evidence (204 offline tests green) | [./plan_mk1_core_harness.md](./plan_mk1_core_harness.md) |
-| Mk2 | Web-UI demo + member management | **Planned** (documented 2026-08-15; execution sessions 010–015, one session = one phase) | 2026-08-15 → | All functionality usable via the web UI (chat, any-user login, dynamic members + departments, browser memory test) + report/recorded demo | [./plan_mk2_web_ui_members.md](./plan_mk2_web_ui_members.md) |
+| Mk2 | Web-UI demo + member management | **Phase 1 DONE 2026-08-15 (session_010)**; Phases 2–6 pending (one session = one phase, sessions 011–015) | 2026-08-15 → | All functionality usable via the web UI (chat, any-user login, dynamic members + departments, browser memory test) + report/recorded demo | [./plan_mk2_web_ui_members.md](./plan_mk2_web_ui_members.md) |
 
 ## Rules
 
