@@ -69,6 +69,18 @@ p, hr_agent, hr, pii_email, read
 p, finance_agent, finance, pii_email, read
 p, devops_agent, devops, pii_email, read
 
+# ---- Skills (weeks 11): one Casbin row per skill (plan.md §9) ----
+# Visibility is per-skill: a Marketing skill (launch_campaign) has no row for HR, so
+# HR cannot see it (filter) and is denied even if invoked (intercept). triage_incident
+# is central and visible to every dept — but it calls a devops tool, so any dept that
+# invokes it is blocked at the nested-tool intercept (attack A4).
+p, marketing_agent, marketing, skill_launch_campaign, use
+p, hr_agent, hr, skill_new_leave_request, use
+p, marketing_agent, marketing, skill_triage_incident, use
+p, hr_agent, hr, skill_triage_incident, use
+p, finance_agent, finance, skill_triage_incident, use
+p, devops_agent, devops, skill_triage_incident, use
+
 # ---- Role assignment (user -> role -> domain) ----
 g, alice@acme.com, marketing_agent, marketing
 g, bob@acme.com, hr_agent, hr

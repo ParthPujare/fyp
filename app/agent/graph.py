@@ -39,6 +39,8 @@ from app.memory.snapshot import build_snapshot
 from app.memory.store import SqliteBaseStore
 from app.ops.schema import TraceEventType
 from app.ops.store import TraceStore
+from app.skills.executor import SkillExecutor
+from app.skills.registry import SkillRegistry
 
 
 class AgentState(TypedDict, total=False):
@@ -71,6 +73,7 @@ class AgentDeps:
     recall: RecallService
     memory: MemorySettings
     thread_id: str
+    skills: SkillRegistry
     executed_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -159,7 +162,7 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
         executed: list[dict[str, Any]] = []
 
         def _critical_gate(
-            tool: Any, args: dict[str, Any], state: AgentState
+            tool: Any, args: dict[str, Any]
         ) -> ToolResult | None:
             """HITL gate for risk=critical tools (plan.md §6, §8): suspend via
             interrupt() and execute only after admin approval."""
@@ -199,15 +202,60 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                 content=f"{tool.name} was rejected by an admin and will not run.",
             )
 
-        for call in state.get("pending_calls") or []:
-            tracker.record_tool_call()
-            name = call["name"]
-            args = call.get("args") or {}
-            tool = TOOL_REGISTRY.get(name)
+        def _outcome(result: ToolResult) -> str:
+            return (
+                "denied" if result.denied
+                else "timeout" if result.timeout
+                else "error" if not result.ok
+                else "allowed"
+            )
 
+        def _trace_call(name: str, args: dict[str, Any], result: ToolResult) -> None:
+            deps.trace.add_event(
+                deps.run_id,
+                TraceEventType.TOOL_CALL,
+                deps.actor,
+                {
+                    "tool": name,
+                    "args": args,
+                    "outcome": _outcome(result),
+                    "latency_ms": result.latency_ms,
+                    "reason": result.reason,
+                    "sanitized": MASK in result.content,
+                },
+            )
+
+        def _trace_skill(name: str, args: dict[str, Any], result: ToolResult, steps: int) -> None:
+            deps.trace.add_event(
+                deps.run_id,
+                TraceEventType.SKILL_USE,
+                deps.actor,
+                {
+                    "skill": name,
+                    "args": args,
+                    "steps": steps,
+                    "outcome": _outcome(result),
+                    "reason": result.reason,
+                },
+            )
+
+        def _execute_one(name: str, args: dict[str, Any]) -> ToolResult:
+            """Single enforced call — the shared path for direct tool calls and
+            for every nested call inside a skill (plan.md §9: skills run through
+            the exact same intercept/HITL/sanitize/guardrail chain)."""
+            tracker.record_tool_call()
+            tool = TOOL_REGISTRY.get(name)
             if tool is None:
-                result = ToolResult(ok=False, reason="args", content=f"unknown tool: {name}")
-            elif tracker.is_denied(name):
+                skill = deps.skills.get(name)
+                if skill is not None:
+                    result, steps = skill_executor.execute(
+                        skill, args, state["claims"], mark_denied=tracker.mark_denied
+                    )
+                    _trace_skill(name, args, result, steps)
+                    _trace_call(name, args, result)
+                    return result
+                return ToolResult(ok=False, reason="args", content=f"unknown tool: {name}")
+            if tracker.is_denied(name):
                 tracker.hit("deny_retry", name)
                 deps.trace.add_event(
                     deps.run_id, TraceEventType.GUARDRAIL, deps.actor, {"type": "deny_retry", "tool": name}
@@ -228,7 +276,7 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                     run_id=deps.run_id,
                 )
                 if result is None and tool.risk_level == "critical":
-                    result = _critical_gate(tool, args, state)
+                    result = _critical_gate(tool, args)
                 if result is None:
                     if tool.handler == "recall":
                         result = deps.recall.recall(str(args.get("query", "")), state["claims"])
@@ -240,29 +288,23 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                         )
                 else:
                     deps.tracker.mark_denied(name)
+            _trace_call(name, args, result)
+            return result
 
-            outcome = (
-                "denied" if result.denied else "timeout" if result.timeout else "error" if not result.ok else "allowed"
-            )
-            deps.trace.add_event(
-                deps.run_id,
-                TraceEventType.TOOL_CALL,
-                deps.actor,
-                {
-                    "tool": name,
-                    "args": args,
-                    "outcome": outcome,
-                    "latency_ms": result.latency_ms,
-                    "reason": result.reason,
-                    "sanitized": MASK in result.content,
-                },
-            )
+        skill_executor = SkillExecutor(
+            enforcer=deps.enforcer, audit=deps.audit, run_id=deps.run_id, run_step=_execute_one
+        )
+
+        for call in state.get("pending_calls") or []:
+            name = call["name"]
+            args = call.get("args") or {}
+            result = _execute_one(name, args)
             messages.append({"role": "tool", "content": result.summary, "name": name})
             executed.append(
                 {
                     "name": name,
                     "args": args,
-                    "outcome": outcome,
+                    "outcome": _outcome(result),
                     "latency_ms": result.latency_ms,
                     "content": result.summary,
                 }

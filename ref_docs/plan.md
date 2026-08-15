@@ -54,7 +54,7 @@ The harness goes beyond tool gates. It also:
 | 14 | Deliverable | **Report + working demo** | Code structured so it is easy to document (modules mapped to concepts, audit logs as evidence) |
 | 15 | Timeline | **One semester (~12–16 weeks)** | Focused vertical slice; no feature creep |
 | 16 | Loop control | **Guardrails node in the graph** | Max steps/run, tool-call budget, deny-retry policy, timeout — bounds the multi-step risk called out in the problem statement |
-| 17 | Tracing | **Custom local SQLite trace store** | Offline, deterministic, shares event conventions with the audit log; LangFuse/LangSmith are documented stretch adapters |
+| 17 | Tracing | **Custom local SQLite trace store — trajectory-style** | Offline, deterministic, shares event conventions with the audit log. Records **everything the model saw** (system prompt, context injections, reasoning, tool I/O) plus a by-source trajectory viewer; LangFuse/LangSmith and trajectory search/fork/replay are documented stretch adapters (DeepSeek-harness inspired, `ref_docs/ideas.md`) |
 | 18 | Evals | **Auto-eval after every run: deterministic + LLM-as-judge** | Deterministic RBAC/tool-contract checks + judge evals (response quality, injection-resistance); results stored and traced |
 
 ---
@@ -73,7 +73,7 @@ User ──(JWT: sub, role, dept)──▶  Central Assistant (LangGraph)
                           │  5. reflect             │ policy-checked memory writes
                           │  6. sanitize            │ PII masking on tool output
                           │  7. HITL gate           │ interrupt → dashboard approval
-                          │  8. trace (SQLite)      │ every run, tool call, token, latency
+                          │  8. trace/trajectory   │ every run + everything the model saw
                           │  9. eval hook           │ deterministic + judge evals after each run
                           │ 10. audit log (JSONL)   │ every allow/deny/approve decision
                           └───────────┬────────────┘
@@ -109,7 +109,7 @@ fyp-agent-harness/            ← this repo (root: FYP/)
 │   ├── config.py             ✅ pydantic-settings: jwt, llm, services (env_nested_delimiter="__")
 │   ├── auth/                 ✅ mock JWT login, role claims, token verify — service on :8000
 │   ├── llm/                  ✅ LiteLLM provider + MockLLM adapter + factory
-│   ├── ops/                  ✅ trace schema + SQLite TraceStore (append-only, SHA-256 chain)
+│   ├── ops/                  ✅ trace schema + SQLite TraceStore (append-only, SHA-256 chain; trajectory events: prompt/context/reasoning + source)
 │   ├── gateway/              ✅ JWT-verified /hello + /chat (thread-backed) + /approvals/{id}/decide (admin-JWT, :8001)
 │   ├── agent/                ✅ LangGraph graph (load_memory/agent/tools/finalize/reflect) + HTTP tools; guardrails node
 │   │   └── guardrails.py     ✅ step limit, tool-call budget, deny-retry, timeout (Wk 3–4)
@@ -122,7 +122,7 @@ fyp-agent-harness/            ← this repo (root: FYP/)
 │   │   └── sanitize.py       ✅ PII masking (fields + regex, scope-aware) [Wk 9–10]
 │   ├── evals/                planned — auto-eval hook + deterministic/ + judge/ suites [Wk 12]
 │   ├── dashboard/            ✅ FastAPI + static web UI: approvals, users, depts (admin JWT) [Wk 9–10]
-│   │                         planned —   skills editor, memory browser, trace viewer, evals
+│   │                         planned —   skills editor, memory browser, trajectory viewer, evals
 │   ├── memory/               ✅ 3-tier SqliteBaseStore + episodic FTS5 + approvals, load/reflect/recall
 │   │                         ✅   extract, dedup, budget/eviction, snapshot [Wk 7–8]
 │   ├── skills/               planned — folder/markdown skill registry + (stretch) learn_skill [Wk 11]
@@ -247,16 +247,19 @@ This is enforcement, not prompting: the guardrails node is deterministic graph l
 
 ---
 
-## 7. Tracing & Observability
+## 7. Tracing & Trajectory
 
-Custom local SQLite trace store (`app/ops/`) sharing event conventions with the audit log:
+Custom local SQLite trace store (`app/ops/`) sharing event conventions with the audit log. The trace is **trajectory-style** (DeepSeek-harness inspired, `ref_docs/ideas.md`): it records not only what the agent *did*, but **everything the model saw** — the system prompt, every context injection (incl. the frozen memory snapshot and recall results), model reasoning, and the raw LLM I/O — so a run can be inspected end-to-end by source.
 
-- **Run tree per agent run**: input → per-node events → tool calls (name, args, result summary, **tokens in/out, latency**) → memory loads → skill invocation → guardrail triggers → final output.
-- **Trace viewer in dashboard** ("ops" tab): drill into any run's event tree.
+- **Run tree per agent run**: `run_start` → per-node events → `PROMPT` (message list sent to the LLM) → `REASONING` (model thinking) → `CONTEXT_INJECTION` (system prompt + memory snapshot + recall results) → tool calls (name, args, result summary, **tokens in/out, latency**) → memory loads/writes → skill invocation → guardrail triggers → `run_end`.
+- **`source` on every event** (`llm` / `memory` / `tool` / `guardrail` / `hitl` / `user`) so the trajectory can be filtered by origin.
+- **Trajectory viewer in dashboard** ("ops" tab): drill into any run's event tree, filter by source, expand prompt/context/reasoning/tool-I/O blocks. **Admin-JWT only** — trajectories store raw prompts and reasoning.
+- **PII discipline**: raw prompts/reasoning pass through the same scope-aware sanitizer before persisting, so the trajectory never stores more than the run itself was allowed to see.
 - **Immutable, append-only** trace with per-entry integrity hashing (report evidence).
+- **Stretch (Wk 15)**: FTS5 **search** over trajectories, **replay** of a stored event stream for offline evals, **fork** of a run from a copied trajectory.
 - LangFuse/LangSmith = documented **stretch adapters** only; not required.
 
-Trace answers "what did the agent do"; audit answers "what did policy decide". Both are written for every run.
+Trace answers "what did the agent do and see"; audit answers "what did policy decide". Both are written for every run.
 
 ---
 
@@ -264,7 +267,7 @@ Trace answers "what did the agent do"; audit answers "what did policy decide". B
 
 Auto-eval hook runs **after every agent run**; results persisted in the trace store:
 
-- **`deterministic/`** — rule-based checks: RBAC contract holds (no unauthorized tool/memory access in the trace), audit entry exists for every decision, guardrails respected, eval determinism (same input → same result).
+- **`deterministic/`** — rule-based checks: RBAC contract holds (no unauthorized tool/memory access in the trace), audit entry exists for every decision, guardrails respected, eval determinism (same input → same result), **trace completeness** (every `PROMPT` has a matching `REASONING` and any emitted `TOOL_CALL` events; every decision in the trace has a corresponding audit entry).
 - **`judge/`** — **LLM-as-judge** via LiteLLM (same Gemini/Mock backend): response quality, prompt-injection resistance (did any injected instruction trigger an unauthorized action?), skill faithfulness.
 - Every eval run is itself traced + audited.
 
@@ -323,9 +326,9 @@ Every change written to the audit log.
 | 7–8 | **3-tier + episodic memory**: BaseStore namespaces, `load_memory`/`reflect`/`recall`, frozen snapshot, extract/dedup/budget/eviction, HITL for central writes, thread-backed chat | Multi-turn chat with RBAC-scoped recall incl. past-session search | ✅ **DONE 2026-08-10** (session_005) |
 | 9–10 | PII sanitizer + HITL interrupts + dashboard v1 (approvals, users, depts) | Admin approves finance transfer from web panel | ✅ **DONE 2026-08-10** (session_006) |
 | 11 | Folder/markdown skills + skill RBAC + **skills editor + memory browser** | Edit a skill → behavior changes on next run | |
-| 12 | **Trace viewer + evals harness** (deterministic + judge), auto-eval hook | Ops tab shows run trees; eval scores per run | |
+| 12 | **Trajectory viewer + evals harness** (deterministic + judge): record everything the model saw (`PROMPT`/`REASONING`/`CONTEXT_INJECTION` events + per-event `source`), by-source trajectory viewer (admin-only, PII-sanitized), trace-completeness eval | Ops tab shows run trajectories filterable by source; eval scores per run | |
 | 13–14 | Attack suites: policy matrix, prompt-injection, cross-dept memory, skill misuse, loop-abuse, HITL-bypass, trace/audit integrity + hardening | Attack demo passes | |
-| 15 | Stretch: `learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter | Optional extensions | |
+| 15 | Stretch: `learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter; **trajectory search / replay / fork** | Optional extensions | |
 | 16 | Report + README + **recorded demo script** (login as roles → tool use → deny → HITL → memory recall + skill → trace + eval review) | Report + demo | |
 
 ---
@@ -337,7 +340,7 @@ Every change written to the audit log.
 - **Cross-tier memory denial tests** — Marketing can't read HR or another user's memory.
 - **Prompt-injection attack suite** — proving interception, not prompts, enforces access.
 - **Audit log determinism** — "same input → same deny decision".
-- **Trace trees** proving the loop: run → tool calls → tokens/latency → guardrail behavior.
+- **Trace trees** proving the loop: run → tool calls → tokens/latency → guardrail behavior (trajectory: prompts, reasoning, and context injections recorded for every run).
 - **Eval scores** (deterministic + judge) proving the harness holds under attack.
 - **Loop-guardrail tests** — deny-storm bounded, budget respected.
 
@@ -351,7 +354,8 @@ Every change written to the audit log.
 | Judge evals non-deterministic | Runs on MockLLM in CI; same LLM backend as dev; score + trace stored as evidence |
 | Auto-learned skills unreliable | Staged behind HITL approval; always reversible |
 | LangGraph version churn | Pin versions in pyproject.toml; use stable interrupt/store APIs |
-| Scope creep | User-private tier + admin panel are in scope; auto-learning + Telegram + LangFuse stay stretch-goal only |
+| Scope creep | User-private tier + admin panel are in scope; auto-learning + Telegram + LangFuse + trajectory search/fork/replay stay stretch-goal only |
+| Trajectory stores raw prompts/reasoning (may embed PII) | Same scope-aware sanitizer applied before persisting; trajectory viewer is admin-JWT only |
 
 ---
 

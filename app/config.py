@@ -55,6 +55,12 @@ class GuardrailSettings(BaseModel):
     run_timeout_seconds: float = Field(default=120.0, gt=0)
 
 
+class SkillSettings(BaseModel):
+    """Skills registry location (folder/markdown registry, see plan.md §9)."""
+
+    skills_dir: Path = Path("skills")
+
+
 class Settings(BaseSettings):
     app_name: str = "fyp-agent-harness"
     env: str = "dev"
@@ -64,6 +70,7 @@ class Settings(BaseSettings):
     services: ServiceSettings = ServiceSettings()
     guardrails: GuardrailSettings = GuardrailSettings()
     memory: MemorySettings = MemorySettings()
+    skills: SkillSettings = SkillSettings()
 
     model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")
 

@@ -29,6 +29,7 @@ from app.memory.recall import RecallService
 from app.memory.store import SqliteBaseStore
 from app.ops.schema import TraceEventType
 from app.ops.store import TraceStore
+from app.skills.registry import SkillRegistry
 
 
 @dataclass
@@ -86,6 +87,8 @@ def _build_deps(
         checkpointer = _make_checkpointer(settings)
 
     actor = {"sub": claims["sub"], "role": claims["role"], "dept": claims["dept"]}
+    skills = SkillRegistry(settings.skills.skills_dir)
+    visible_skills = [s for s in skills.load_all() if enforcer.skill_allowed(s.name, claims)]
     deps = AgentDeps(
         provider=provider,
         executor=executor,
@@ -95,13 +98,16 @@ def _build_deps(
         audit=audit,
         run_id=run_id,
         actor=actor,
-        tool_schemas=[tool_schema(t) for t in filter_tools(TOOL_REGISTRY.values(), enforcer, claims)],
+        tool_schemas=[
+            tool_schema(t) for t in filter_tools(TOOL_REGISTRY.values(), enforcer, claims)
+        ] + [SkillRegistry.schema_for(s) for s in visible_skills],
         store=store,
         episodic=episodic,
         approvals=approvals,
         recall=recall,
         memory=settings.memory,
         thread_id=thread_id,
+        skills=skills,
     )
     return deps, checkpointer
 

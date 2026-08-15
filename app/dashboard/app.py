@@ -31,10 +31,20 @@ from app.harness.audit import AuditLog
 from app.harness.enforcer import PolicyEnforcer
 from app.harness.sanitize import MASK
 from app.memory.approvals import ApprovalStore
+from app.memory.edit import MemoryEditor
 from app.memory.episodic import EpisodicStore
 from app.memory.recall import RecallService
+from app.memory.scopes import (
+    SCOPE_CENTRAL,
+    namespace_to_scope,
+    scope_dept,
+    scope_to_namespace,
+    scope_user,
+)
 from app.memory.store import SqliteBaseStore
 from app.ops.store import TraceStore
+from app.skills.model import SkillValidationError, parse_skill_document, render_skill
+from app.skills.registry import SkillRegistry
 
 settings = get_settings()
 
@@ -58,14 +68,17 @@ def _get_components() -> dict[str, Any]:
     """Persistent shared components — same files the gateway uses."""
     global _components
     if _components is None:
+        _store = SqliteBaseStore(settings.services.memory_path)
         _components = {
             "trace": TraceStore(settings.services.data_dir / "trace.sqlite"),
             "enforcer": PolicyEnforcer(),
             "audit": AuditLog(settings.services.audit_path),
-            "store": SqliteBaseStore(settings.services.memory_path),
+            "store": _store,
             "episodic": EpisodicStore(settings.services.memory_path),
             "approvals": ApprovalStore(settings.services.memory_path),
             "checkpointer": _checkpointer(),
+            "skills": SkillRegistry(settings.skills.skills_dir),
+            "memory_editor": MemoryEditor(_store, settings.memory),
         }
         _components["recall"] = RecallService(
             _components["episodic"], _components["enforcer"], settings.memory
@@ -115,6 +128,18 @@ class LoginRequest(BaseModel):
 
 class DecideRequest(BaseModel):
     approve: bool
+
+
+class SkillWriteRequest(BaseModel):
+    content: str  # raw skill.md document (frontmatter + body)
+
+
+class MemoryFactRequest(BaseModel):
+    text: str
+
+
+class MemoryItemRequest(BaseModel):
+    text: str
 
 
 @app.get("/", include_in_schema=False)
@@ -239,3 +264,233 @@ def _service_for(dept: str) -> str:
         "admin": "harness gateway",
     }
     return mapping.get(dept, "")
+
+
+def _skill_registry() -> SkillRegistry:
+    return _get_components()["skills"]
+
+
+def _skill_summary(skill: Any) -> dict[str, Any]:
+    return {
+        "name": skill.name,
+        "scope": skill.scope,
+        "owner_role": skill.owner_role,
+        "version": skill.version,
+        "trigger": skill.trigger,
+        "steps": skill.steps,
+        "tool_calls": skill.tool_calls,
+        "path": skill.path,
+        "policy_row": _has_policy_row(skill.name),
+    }
+
+
+def _has_policy_row(skill_name: str) -> bool:
+    """True iff policy.csv has a non-admin `p, role, dom, skill_<name>, use` row."""
+    needle = f"skill_{skill_name}"
+    with open(_policy_csv()) as fh:
+        for line in fh:
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) == 5 and parts[0] == "p" and parts[1] != "admin" and parts[3] == needle:
+                return True
+    return False
+
+
+@app.get("/api/skills")
+def list_skills(
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """List all skills on disk (registry is the folder, hot-reloaded)."""
+    _verify_admin(authorization)
+    skills, errors = _get_components()["skills"].load_with_errors()
+    return {"skills": [_skill_summary(s) for s in skills], "errors": errors}
+
+
+@app.get("/api/skills/{name}")
+def get_skill(
+    name: str,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    _verify_admin(authorization)
+    skill = _get_components()["skills"].get(name)
+    if skill is None:
+        raise HTTPException(status_code=404, detail=f"skill {name!r} not found")
+    return {"content": render_skill(skill)}
+
+
+@app.post("/api/skills")
+def create_skill(
+    req: SkillWriteRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    claims = _verify_admin(authorization)
+    try:
+        skill = parse_skill_document(req.content)
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    registry = _get_components()["skills"]
+    if registry.get(skill.name) is not None:
+        raise HTTPException(status_code=409, detail=f"skill {skill.name!r} already exists")
+    path = registry.save(skill)
+    _get_components()["audit"].log(
+        decision="ALLOW",
+        resource={"type": "skill", "id": skill.name},
+        actor={"sub": claims["sub"], "role": claims["role"], "dept": claims["dept"]},
+        run_id="dashboard",
+        reason="admin",
+    )
+    return {"name": skill.name, "path": str(path), "saved": True}
+
+
+@app.put("/api/skills/{name}")
+def update_skill(
+    name: str,
+    req: SkillWriteRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Save an edited skill.md — takes effect (hot reload) on the next run."""
+    claims = _verify_admin(authorization)
+    registry = _get_components()["skills"]
+    if registry.get(name) is None:
+        raise HTTPException(status_code=404, detail=f"skill {name!r} not found")
+    try:
+        skill = parse_skill_document(req.content, fallback_name=name)
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if skill.name != name:
+        raise HTTPException(status_code=409, detail="skill name in frontmatter must match the url")
+    path = registry.save(skill)
+    _get_components()["audit"].log(
+        decision="ALLOW",
+        resource={"type": "skill", "id": skill.name},
+        actor={"sub": claims["sub"], "role": claims["role"], "dept": claims["dept"]},
+        run_id="dashboard",
+        reason="admin",
+    )
+    return {"name": skill.name, "path": str(path), "saved": True}
+
+
+@app.delete("/api/skills/{name}")
+def delete_skill(
+    name: str,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    claims = _verify_admin(authorization)
+    registry = _get_components()["skills"]
+    if not registry.delete(name):
+        raise HTTPException(status_code=404, detail=f"skill {name!r} not found")
+    _get_components()["audit"].log(
+        decision="ALLOW",
+        resource={"type": "skill", "id": name},
+        actor={"sub": claims["sub"], "role": claims["role"], "dept": claims["dept"]},
+        run_id="dashboard",
+        reason="admin",
+    )
+    return {"name": name, "deleted": True}
+
+
+# ---- Memory browser/editor (ops face) ----
+
+
+def _scope_namespaces() -> list[dict[str, Any]]:
+    """All memory namespaces split into scopes, with their items."""
+    store = _get_components()["store"]
+    namespaces = store.list_namespaces()
+    scopes: dict[str, dict[str, Any]] = {}
+    for ns in namespaces:
+        scope = namespace_to_scope(ns)
+        items = [
+            {
+                "key": item.key,
+                "text": str(item.value.get("text", "")),
+                "updated_at": item.updated_at.isoformat(),
+            }
+            for item in store.items_in(ns)
+            if item.value.get("text")
+        ]
+        scopes.setdefault(scope, {"scope": scope, "items": []})["items"] = items
+    for scope in (SCOPE_CENTRAL,):
+        scopes.setdefault(scope, {"scope": scope, "items": []})
+    for dept in ["marketing", "hr", "devops", "finance"]:
+        scopes.setdefault(scope_dept(dept), {"scope": scope_dept(dept), "items": []})
+    for user in USERS.values():
+        scopes.setdefault(scope_user(user.username), {"scope": scope_user(user.username), "items": []})
+    return [
+        {"scope": s["scope"], "items": s["items"]}
+        for s in sorted(scopes.values(), key=lambda s: s["scope"])
+    ]
+
+
+def _audit_memory(claims: dict[str, Any], scope: str, action: str) -> None:
+    _get_components()["audit"].log(
+        decision="ALLOW",
+        resource={"type": "memory", "id": scope},
+        actor={"sub": claims["sub"], "role": claims["role"], "dept": claims["dept"]},
+        run_id="dashboard",
+        reason=f"admin:{action}",
+    )
+
+
+@app.get("/api/memory")
+def memory_browser(
+    authorization: str | None = Header(default=None),
+) -> list[dict[str, Any]]:
+    _verify_admin(authorization)
+    return _scope_namespaces()
+
+
+@app.post("/api/memory/{scope:path}")
+def add_memory_fact(
+    scope: str,
+    req: MemoryFactRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    claims = _verify_admin(authorization)
+    _validate_scope(scope)
+    outcome = _get_components()["memory_editor"].add(scope, req.text)
+    _audit_memory(claims, scope, outcome.op)
+    return {"scope": scope, "op": outcome.op, "text": req.text, "evicted": outcome.evicted}
+
+
+@app.put("/api/memory/{scope:path}/{key}")
+def update_memory_fact(
+    scope: str,
+    key: str,
+    req: MemoryItemRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    claims = _verify_admin(authorization)
+    _validate_scope(scope)
+    store = _get_components()["store"]
+    item = store.get(scope_to_namespace(scope), key)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"memory {key!r} not found in {scope}")
+    store.put(scope_to_namespace(scope), key, {"text": req.text, "op": "replace"})
+    _audit_memory(claims, scope, "replace")
+    return {"scope": scope, "key": key, "text": req.text, "op": "replace"}
+
+
+@app.delete("/api/memory/{scope:path}/{key}")
+def delete_memory_fact(
+    scope: str,
+    key: str,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    claims = _verify_admin(authorization)
+    _validate_scope(scope)
+    store = _get_components()["store"]
+    if store.get(scope_to_namespace(scope), key) is None:
+        raise HTTPException(status_code=404, detail=f"memory {key!r} not found in {scope}")
+    store.delete(scope_to_namespace(scope), key)
+    _audit_memory(claims, scope, "remove")
+    return {"scope": scope, "key": key, "deleted": True}
+
+
+def _validate_scope(scope: str) -> None:
+    if scope == SCOPE_CENTRAL:
+        return
+    kind, _, value = scope.partition("/")
+    if kind == "dept" and value:
+        return
+    if kind == "user" and value:
+        return
+    raise HTTPException(status_code=422, detail=f"invalid memory scope {scope!r}")

@@ -2,7 +2,7 @@
 
 Detailed architecture flow for the Enterprise AI Personal Assistant secured by a zero-trust harness. This document is the implementation blueprint derived from `plan.md`. Every flow below maps to a module in the proposed repository structure and to a test in the attack/verification suites.
 
-> **Implementation status (2026-08-10):** Milestones 1–5 (weeks 1–10) are built. Live: `auth` :8000, `gateway` :8001 (role-aware `/hello`, thread-backed `/chat`, admin-JWT `/approvals/{id}/decide`), all four dept services :8002–8005 with seeded SQLite, and the **`dashboard`** :8006 (approvals queue, users, departments). `app/agent/` has the LangGraph agent (graph now `load_memory → agent ⇄ execute_tools → finalize → reflect`), HTTP tool registry/executor (incl. the memory `recall` tool), guardrails node with the trace schema (§12) + `TraceStore` wired into every run, and the **critical-tool HITL gate** (risk=critical suspends via `interrupt()`, resumes only after admin approval/rejection). `app/harness/` holds the Casbin core: `policies/{model.conf,policy.csv}` (tool + memory + `pii_*` rows), `PolicyEnforcer` (incl. `memory_allowed`/`memory_recall_allowed`), `filter_tools`, `intercept`, the JSONL audit log — the `scope_allowed` stub is gone — and **`sanitize.py`** (scope-aware PII masking applied to every tool response + recalled transcript). `app/memory/` (weeks 7–8) is built: `SqliteBaseStore` (3 tiers: central / dept / user) as a persistent LangGraph `BaseStore`, rule-based fact extraction + dedup + per-tier budget/eviction, FTS5 episodic recall (scope-gated), frozen snapshot per session, LangGraph checkpointer for threads, and HITL `interrupt()` + SQLite `ApprovalStore` for central writes. Skills (week 11) and evals (week 12) remain planned per `ref_docs/plan.md` §11. Code lives at the repo root next to `ref_docs/` + `agent_history/`.
+> **Implementation status (2026-08-10):** Milestones 1–5 (weeks 1–10) are built. Live: `auth` :8000, `gateway` :8001 (role-aware `/hello`, thread-backed `/chat`, admin-JWT `/approvals/{id}/decide`), all four dept services :8002–8005 with seeded SQLite, and the **`dashboard`** :8006 (approvals queue, users, departments). `app/agent/` has the LangGraph agent (graph now `load_memory → agent ⇄ execute_tools → finalize → reflect`), HTTP tool registry/executor (incl. the memory `recall` tool), guardrails node with the trace schema (§12) + `TraceStore` wired into every run, and the **critical-tool HITL gate** (risk=critical suspends via `interrupt()`, resumes only after admin approval/rejection). `app/harness/` holds the Casbin core: `policies/{model.conf,policy.csv}` (tool + memory + `pii_*` rows), `PolicyEnforcer` (incl. `memory_allowed`/`memory_recall_allowed`), `filter_tools`, `intercept`, the JSONL audit log — the `scope_allowed` stub is gone — and **`sanitize.py`** (scope-aware PII masking applied to every tool response + recalled transcript). `app/memory/` (weeks 7–8) is built: `SqliteBaseStore` (3 tiers: central / dept / user) as a persistent LangGraph `BaseStore`, rule-based fact extraction + dedup + per-tier budget/eviction, FTS5 episodic recall (scope-gated), frozen snapshot per session, LangGraph checkpointer for threads, and HITL `interrupt()` + SQLite `ApprovalStore` for central writes. Skills (week 11) and evals (week 12) remain planned per `ref_docs/plan.md` §11. **Trajectory-style tracing** — recording *everything the model saw* (system prompts, context injections, reasoning) with a by-source trajectory viewer — is folded into the week-12 trace/evals milestone per `ref_docs/plan.md` §7. Code lives at the repo root next to `ref_docs/` + `agent_history/`.
 
 ---
 
@@ -107,10 +107,10 @@ Every step after (3) that touches a tool, memory, or skill passes through a Casb
         │  └──────┬────────┘   └──────┬────────┘   └─────┬─────┘  │
         │         ▼                  ▼                   ▼         │
         │  ┌───────────────┐   ┌───────────────┐   ┌───────────┐  │
-        │  │ 7 guardrails  │   │ 8 reflect     │   │ 9 trace + │  │
-        │  │  loop bounds  │   │  policy-      │   │   eval    │  │
-        │  │  deny-retry   │   │  checked      │   │   hook    │  │
-        │  │               │   │  memory writes│   │           │  │
+        │  │ 7 guardrails  │   │ 8 reflect     │   │ 9 trajectory +│  │
+        │  │  loop bounds  │   │  policy-      │   │  eval hook    │  │
+        │  │  deny-retry   │   │  checked      │   │  (model saw)  │  │
+        │  │               │   │  memory writes│   │               │  │
         │  └───────────────┘   └───────────────┘   └───────────┘  │
         │                                                          │
         └──────────────────────────────────────────────────────────┘
@@ -394,10 +394,13 @@ State is checkpointer-backed (SQLite), so HITL `interrupt()` suspends/resumes wi
 ```
 event_id    uuid            run_id      uuid
 seq         int             ts          iso8601
-type        enum: run_start | node | tool_call | memory_load | memory_write |
-                   skill_use | guardrail | eval | run_end
+type        enum: run_start | node | prompt | reasoning | context_injection |
+                   tool_call | memory_load | memory_write | skill_use |
+                   guardrail | eval | run_end
+source      llm | memory | tool | guardrail | hitl | user   # inspect by origin
 actor       {sub, role, dept}
-payload     json            # tool name/args/result-summary, tokens, latency, etc.
+payload     json            # prompt text, reasoning, context injection, tool
+                            # name/args/result-summary, tokens, latency, etc.
 prev_hash   sha256          # chain integrity
 ```
 
@@ -457,7 +460,7 @@ steps:
 1. **Deny-by-default** — Casbin `some(where allow)`; anything unmatched is denied.
 2. **Defense in depth** — schema filtering (never see it) → runtime block (cannot call it) → HITL (cannot run it alone) → sanitize (cannot read the masked parts).
 3. **Determinism** — enforcement is graph logic, not model judgment; `MockLLM` makes CI fully offline and repeatable.
-4. **Immutable evidence** — audit + trace are append-only, hashed, and cross-linked by `run_id`.
+4. **Immutable evidence** — audit + trace are append-only, hashed, and cross-linked by `run_id`; trajectory content (raw prompts/reasoning) is PII-sanitized before persist and readable only via the admin dashboard.
 5. **Least-privilege memory** — read/write/recall all flow through the same enforcement chain.
 6. **Bounded autonomy** — guardrails cap steps, tool calls, and deny-retries so no run can spin out of control.
 
@@ -490,5 +493,5 @@ steps:
 ### Ops face
 - Memory browser/editor per tier (view/edit/delete facts)
 - Skill editor (edit `skill.md`, save → hot reload)
-- Trace viewer (run tree: tools, tokens, latency, guardrail hits)
-- Evals (deterministic pass/fail + judge scores per run)
+- **Trajectory viewer** (run tree + prompts + reasoning + context injections; filter by source; admin-only; PII-sanitized)
+- Evals (deterministic pass/fail incl. trace-completeness + judge scores per run)

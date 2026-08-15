@@ -88,3 +88,16 @@ class PolicyEnforcer:
             "memory_recall",
             "use",
         )
+
+    def skill_allowed(self, skill_name: str, claims: dict[str, Any]) -> bool:
+        """Can (role, dept) use a skill? (plan.md §9 — Casbin row per skill).
+
+        A Marketing skill has no row for HR, so it is invisible to HR (filter_tools)
+        and denied even if invoked at runtime (intercept_skill).
+        """
+        return self.enforce(
+            str(claims.get("sub", "")),
+            str(claims.get("dept", "")),
+            f"skill_{skill_name}",
+            "use",
+        )

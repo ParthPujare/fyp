@@ -47,6 +47,8 @@
     <button class="ghost" data-tab="approvals">Approvals</button>
     <button class="ghost" data-tab="users">Users</button>
     <button class="ghost" data-tab="depts">Departments</button>
+    <button class="ghost" data-tab="skills">Skills</button>
+    <button class="ghost" data-tab="memory">Memory</button>
     <button class="ghost" id="logout" class="hidden">Log out</button>
   </nav>
 </header>
@@ -76,6 +78,28 @@
       <table><thead><tr><th>Name</th><th>Service</th><th>Resources</th><th>Members</th></tr></thead>
         <tbody id="depts"></tbody></table>
     </div>
+    <div id="skills-view" class="hidden">
+      <h2>Skills <span class="muted" style="font-weight:normal;font-size:13px">(folder/markdown registry — edits hot-reload on the next run)</span></h2>
+      <div class="row" style="margin-bottom:12px">
+        <button id="new-skill">+ New skill</button>
+        <span class="muted">A skill needs a <code>skill_&lt;name&gt;</code> row in <code>policy.csv</code> to be usable by a role.</span>
+      </div>
+      <div id="skills"></div>
+      <div id="skill-editor" class="hidden">
+        <h3 id="skill-editor-title">Edit skill</h3>
+        <textarea id="skill-content" rows="24" style="width:100%;background:#0b1220;color:var(--fg);border:1px solid var(--line);border-radius:6px;font:13px/1.5 ui-monospace,monospace;padding:10px"></textarea>
+        <div class="row" style="margin-top:8px">
+          <button id="save-skill">Save</button>
+          <button class="ghost" id="cancel-skill">Cancel</button>
+          <button class="bad" id="delete-skill">Delete</button>
+        </div>
+        <div class="status" id="skill-status"></div>
+      </div>
+    </div>
+    <div id="memory-view" class="hidden">
+      <h2>Memory browser</h2>
+      <div id="memory"></div>
+    </div>
   </section>
 </main>
 <script>
@@ -100,7 +124,8 @@
   }
 
   function show(tab) {
-    ["approvals", "users", "depts"].forEach((t) => $(t + "-view").classList.toggle("hidden", t !== tab));
+    ["approvals", "users", "depts", "skills", "memory"].forEach((t) =>
+      $(t + "-view").classList.toggle("hidden", t !== tab));
   }
 
   function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
@@ -172,6 +197,8 @@
     if (b.dataset.tab === "approvals") loadApprovals();
     if (b.dataset.tab === "users") loadUsers();
     if (b.dataset.tab === "depts") loadDepts();
+    if (b.dataset.tab === "skills") loadSkills();
+    if (b.dataset.tab === "memory") loadMemory();
   }));
 
   $("signin").addEventListener("click", async () => {
@@ -189,6 +216,166 @@
 
   $("logout").addEventListener("click", () => { localStorage.removeItem("harness_admin_token");
     token = ""; setAuthed(false); });
+
+  // ---- Skills ----
+  let editingSkill = null;
+  let editingNew = false;
+
+  async function loadSkills() {
+    $("skills").textContent = "loading...";
+    try {
+      const out = await api("/api/skills");
+      $("skills").innerHTML = "";
+      if (out.errors && out.errors.length) {
+        $("skills").appendChild(elm('<p class="status" style="color:var(--bad)">Registry errors: ' + esc(out.errors.join("; ")) + "</p>"));
+      }
+      out.skills.forEach((s) => {
+        const card = elm(`<div class="card">
+          <div class="row">
+            <b>${esc(s.name)}</b>
+            <span class="pill">${esc(s.scope)}</span>
+            <span class="pill">v${esc(s.version)}</span>
+            ${s.policy_row ? '<span class="badge approved">policy row</span>' : '<span class="badge rejected">no policy row</span>'}
+            <span class="muted">${esc(s.owner_role || "")}</span>
+          </div>
+          <div class="status muted">${esc(s.trigger)}</div>
+          <pre style="white-space:pre-wrap;color:var(--muted);font-size:12px">${esc(JSON.stringify(s.tool_calls, null, 2))}</pre>
+          <button data-edit="${esc(s.name)}">Edit</button>
+        </div>`);
+        card.querySelector("[data-edit]").addEventListener("click", () => openSkillEditor(s.name));
+        $("skills").appendChild(card);
+      });
+      if (!out.skills.length) $("skills").innerHTML = '<p class="muted">No skills found in the registry.</p>';
+    } catch (e) { $("skills").textContent = "error: " + e.message; }
+  }
+
+  function elm(html) {
+    const d = document.createElement("div");
+    d.innerHTML = html;
+    return d.firstElementChild;
+  }
+
+  async function openSkillEditor(name) {
+    editingNew = !name;
+    editingSkill = name || null;
+    let content = "";
+    if (name) {
+      const out = await api("/api/skills/" + encodeURIComponent(name));
+      content = out.content;
+    }
+    $("skill-editor-title").textContent = name ? "Edit skill: " + name : "New skill";
+    $("skill-content").value = content;
+    $("skill-status").textContent = "";
+    $("skills").classList.add("hidden");
+    $("skill-editor").classList.remove("hidden");
+  }
+
+  async function saveSkill() {
+    const content = $("skill-content").value;
+    $("skill-status").textContent = "saving...";
+    try {
+      const url = editingNew ? "/api/skills" : "/api/skills/" + encodeURIComponent(editingSkill);
+      const method = editingNew ? "POST" : "PUT";
+      const out = await api(url, { method, headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content }) });
+      $("skill-status").textContent = "saved → will hot-reload on the next run (" + out.name + ")";
+      $("skill-status").classList.add("muted");
+      setTimeout(() => { $("skill-editor").classList.add("hidden"); $("skills").classList.remove("hidden"); loadSkills(); }, 800);
+    } catch (e) { $("skill-status").textContent = "error: " + e.message; }
+  }
+
+  async function deleteSkill() {
+    if (!editingSkill || !confirm("Delete skill " + editingSkill + "?")) return;
+    try {
+      await api("/api/skills/" + encodeURIComponent(editingSkill), { method: "DELETE" });
+      $("skill-editor").classList.add("hidden");
+      $("skills").classList.remove("hidden");
+      loadSkills();
+    } catch (e) { $("skill-status").textContent = "error: " + e.message; }
+  }
+
+  // ---- Memory ----
+  async function loadMemory() {
+    $("memory").textContent = "loading...";
+    try {
+      const scopes = await api("/api/memory");
+      $("memory").innerHTML = "";
+      scopes.forEach((s) => $("memory").appendChild(memoryScope(s)));
+    } catch (e) { $("memory").textContent = "error: " + e.message; }
+  }
+
+  function memoryScope(s) {
+    const card = elm(`<div class="card">
+      <h3><code>${esc(s.scope)}</code> <span class="pill">${s.items.length} facts</span></h3>
+      <div id="facts-${esc(cssEsc(s.scope))}"></div>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="add-${esc(cssEsc(s.scope))}" placeholder="new fact..." style="flex:1">
+        <button data-add="${esc(cssEsc(s.scope))}">Add</button>
+      </div>
+      <div class="status" data-mem-status="${esc(cssEsc(s.scope))}"></div>
+    </div>`);
+    const box = card.querySelector(`[data-add="${esc(cssEsc(s.scope))}"]`);
+    box.addEventListener("click", () => addFact(s.scope));
+    const factsHost = card.querySelector("[id^=facts-]");
+    s.items.forEach((it) => factsHost.appendChild(memoryItem(s.scope, it)));
+    return card;
+  }
+
+  function memoryItem(scope, it) {
+    const row = elm(`<div class="row" style="margin:6px 0;align-items:flex-start">
+      <input type="text" value="${esc(it.text)}" data-text="${esc(cssEsc(scope))}/${esc(cssEsc(it.key))}" style="flex:1">
+      <button class="ok" data-save="${esc(cssEsc(scope))}/${esc(cssEsc(it.key))}">Save</button>
+      <button class="bad" data-del="${esc(cssEsc(scope))}/${esc(cssEsc(it.key))}">Delete</button>
+    </div>`);
+    row.querySelector("[data-save]").addEventListener("click", () =>
+      updateFact(scope, it.key, row.querySelector("[data-text]").value));
+    row.querySelector("[data-del]").addEventListener("click", () => deleteFact(scope, it.key));
+    return row;
+  }
+
+  async function addFact(scope) {
+    const inputId = "add-" + cssEsc(scope);
+    const box = $(inputId);
+    const text = box.value.trim();
+    const status = document.querySelector(`[data-mem-status="${esc(cssEsc(scope))}"]`);
+    if (!text) return;
+    status.textContent = "saving...";
+    try {
+      const out = await api("/api/memory/" + scope, { method: "POST",
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+      status.textContent = out.op + (out.evicted.length ? " (evicted " + out.evicted.length + ")" : "");
+      box.value = "";
+      loadMemory();
+    } catch (e) { status.textContent = "error: " + e.message; }
+  }
+
+  async function updateFact(scope, key, text) {
+    const status = document.querySelector(`[data-mem-status="${esc(cssEsc(scope))}"]`);
+    status.textContent = "saving...";
+    try {
+      await api("/api/memory/" + scope + "/" + encodeURIComponent(key), { method: "PUT",
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+      loadMemory();
+    } catch (e) { status.textContent = "error: " + e.message; }
+  }
+
+  async function deleteFact(scope, key) {
+    const status = document.querySelector(`[data-mem-status="${esc(cssEsc(scope))}"]`);
+    try {
+      await api("/api/memory/" + scope + "/" + encodeURIComponent(key), { method: "DELETE" });
+      loadMemory();
+    } catch (e) { status.textContent = "error: " + e.message; }
+  }
+
+  function cssEsc(s) { return String(s).replace(/[^a-zA-Z0-9_-]/g, "-"); }
+
+  $("new-skill").addEventListener("click", () => openSkillEditor(null));
+  $("save-skill").addEventListener("click", saveSkill);
+  $("cancel-skill").addEventListener("click", () => {
+    $("skill-editor").classList.add("hidden");
+    $("skills").classList.remove("hidden");
+  });
+  $("delete-skill").addEventListener("click", deleteSkill);
 
   if (token) { setAuthed(true); loadApprovals(); }
   else setAuthed(false);

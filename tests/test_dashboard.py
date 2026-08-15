@@ -158,3 +158,167 @@ def test_departments_read_only_list():
     assert marketing["service"] == "crm"
     assert "crm" in marketing["resources"]
     assert "alice@acme.com" in marketing["members"]
+
+
+# --- Skills editor + memory browser API (Week 11) ---
+
+
+@pytest.fixture
+def skills_registry(tmp_path):
+    import shutil
+
+    from app.skills.registry import SkillRegistry
+
+    shutil.rmtree(tmp_path / "skills", ignore_errors=True)
+    root = tmp_path / "skills"
+
+    def write_skill(name: str, tool: str) -> None:
+        skill_dir = root / "dept" / "marketing" / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "skill.md").write_text(
+            f"""---
+name: {name}
+trigger: "test trigger"
+scope: dept/marketing
+owner_role: marketing_agent
+version: 1
+args_schema:
+  q:
+    type: string
+    description: "query"
+steps:
+  - query the q
+tool_calls:
+  - tool: {tool}
+    args:
+      query: "{{{{q}}}}"
+---
+
+Body.
+""",
+            encoding="utf-8",
+        )
+
+    write_skill("editor_skill", "crm_search_customer")
+    write_skill("launch_campaign", "crm_create_campaign")
+    return SkillRegistry(root)
+
+
+@pytest.fixture
+def components(tmp_path, skills_registry):
+    """Swap the dashboard's shared components for isolated temp ones (restored after)."""
+    import app.dashboard.app as dash
+    from app.harness.audit import AuditLog
+    from app.memory.edit import MemoryEditor
+    from app.memory.store import SqliteBaseStore
+
+    store = SqliteBaseStore(tmp_path / "memory.sqlite")
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    original = dash._components
+    dash._components = {
+        "enforcer": dash.PolicyEnforcer(),
+        "audit": audit,
+        "store": store,
+        "skills": skills_registry,
+        "memory_editor": MemoryEditor(store, dash.settings.memory),
+    }
+    yield dash, audit
+    dash._components = original
+
+
+def test_skills_memory_require_admin(skills_registry):
+    assert TestClient(dashboard_app).get("/api/skills").status_code == 401
+    assert TestClient(dashboard_app).get("/api/memory").status_code == 401
+
+
+def test_skills_editor_roundtrip(tmp_path, components):
+    dash, _ = components
+    client = TestClient(dashboard_app)
+
+    listing = client.get("/api/skills", headers=AUTH)
+    assert listing.status_code == 200
+    assert listing.json()["errors"] == []
+    skill = next(s for s in listing.json()["skills"] if s["name"] == "editor_skill")
+    assert skill["scope"] == "dept/marketing"
+    assert skill["tool_calls"][0]["tool"] == "crm_search_customer"
+    assert skill["policy_row"] is False  # no Casbin row for a sandbox skill
+    seed = next(s for s in listing.json()["skills"] if s["name"] == "launch_campaign")
+    assert seed["policy_row"] is True  # its name has a row in the real policy.csv
+
+    content = client.get("/api/skills/editor_skill", headers=AUTH).json()["content"]
+    assert "name: editor_skill" in content
+    assert "Body." in content
+
+    # PUT an edited skill -> persisted to disk
+    edited = content.replace("crm_search_customer", "crm_get_customer")
+    resp = client.put("/api/skills/editor_skill", json={"content": edited}, headers=AUTH)
+    assert resp.status_code == 200 and resp.json()["saved"]
+    refreshed = client.get("/api/skills", headers=AUTH).json()["skills"]
+    assert next(s for s in refreshed if s["name"] == "editor_skill")["tool_calls"][0]["tool"] == "crm_get_customer"
+
+    # invalid content -> 422, unchanged
+    assert client.put("/api/skills/editor_skill", json={"content": "not markdown"}, headers=AUTH).status_code == 422
+
+    # DELETE removes the skill folder
+    assert client.delete("/api/skills/editor_skill", headers=AUTH).status_code == 200
+    names = [s["name"] for s in client.get("/api/skills", headers=AUTH).json()["skills"]]
+    assert "editor_skill" not in names
+
+    # admin edits were audit-logged with resource type "skill"
+    assert any(
+        a["resource"]["type"] == "skill" and a["resource"]["id"] == "editor_skill"
+        for a in dash._components["audit"].entries()
+    )
+
+
+def test_skills_update_missing_404(components):
+    client = TestClient(dashboard_app)
+    assert (
+        client.put(
+            "/api/skills/does_not_exist",
+            json={"content": "---\nname: x\n---\n"},
+            headers=AUTH,
+        ).status_code
+        == 404
+    )
+
+
+def test_memory_browser_crud(components):
+    _, audit = components
+    client = TestClient(dashboard_app)
+
+    before = client.get("/api/memory", headers=AUTH).json()
+    assert any(s["scope"] == "central" for s in before)
+
+    added = client.post("/api/memory/dept/marketing", json={"text": "Team Q3 budget: 50k"}, headers=AUTH)
+    assert added.status_code == 200 and added.json()["op"] == "add"
+
+    refreshed = client.get("/api/memory", headers=AUTH).json()
+    mkt = next(s for s in refreshed if s["scope"] == "dept/marketing")
+    item = next(i for i in mkt["items"] if i["text"] == "Team Q3 budget: 50k")
+    key = item["key"]
+
+    edited = client.put(
+        f"/api/memory/dept/marketing/{key}", json={"text": "Team Q3 budget: 60k"}, headers=AUTH
+    )
+    assert edited.status_code == 200 and edited.json()["op"] == "replace"
+    refreshed = client.get("/api/memory", headers=AUTH).json()
+    mkt = next(s for s in refreshed if s["scope"] == "dept/marketing")
+    assert next(i for i in mkt["items"] if i["key"] == key)["text"] == "Team Q3 budget: 60k"
+
+    # admin edits are audit-logged
+    memory_audits = [a for a in audit.entries() if a["resource"]["type"] == "memory"]
+    assert len(memory_audits) >= 2
+
+    # invalid scope rejected
+    assert client.post("/api/memory/bogus", json={"text": "x"}, headers=AUTH).status_code == 422
+    assert (
+        client.delete("/api/memory/dept/marketing/does-not-exist", headers=AUTH).status_code
+        == 404
+    )
+
+    deleted = client.delete(f"/api/memory/dept/marketing/{key}", headers=AUTH)
+    assert deleted.status_code == 200 and deleted.json()["deleted"]
+    refreshed = client.get("/api/memory", headers=AUTH).json()
+    mkt = next(s for s in refreshed if s["scope"] == "dept/marketing")
+    assert key not in {i["key"] for i in mkt["items"]}

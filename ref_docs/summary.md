@@ -42,7 +42,7 @@ A Marketing user asks the assistant for CRM data: it works. The same user, or a 
 - **Gateway shell** (`app/gateway/`, :8001): role-aware `POST /hello` — the harness entry point that becomes the LangGraph gateway.
 - **32 offline tests green** (`uv run pytest`), `ruff` clean.
 
-**Next milestone (weeks 3–4):** LangGraph agent + HTTP tools to the services + guardrails node (max steps, tool budget, deny-retry, timeout). Full plan: `ref_docs/plan.md` §11; build log: `agent_history/`.
+**Next milestone (weeks 11–12):** skills registry + skills editor, then the **trajectory viewer + evals harness** — the trace store records *everything the model saw* (system prompt, context injections, reasoning, tool I/O) with a by-source, admin-only viewer and a trace-completeness eval (plan.md §7, §11). Full plan: `ref_docs/plan.md` §11; build log: `agent_history/`.
 
 ## Out of Scope
 

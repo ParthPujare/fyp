@@ -108,7 +108,9 @@ def test_filter_tools_visibility_per_role(enforcer):
 
 
 def test_filter_tools_schemas_reach_llm(executor, trace_store, enforcer, audit_log):
-    """Only the role's permitted tool schemas enter the LLM context."""
+    """Only the role's permitted tool + skill schemas enter the LLM context."""
+    from app.skills.registry import SkillRegistry
+
     provider = MockLLM({"hi": {"text": "ok", "tool_calls": []}})
     runner = make_runner(
         provider=provider, executor=executor, trace=trace_store, enforcer=enforcer, audit=audit_log
@@ -116,11 +118,20 @@ def test_filter_tools_schemas_reach_llm(executor, trace_store, enforcer, audit_l
     runner(ALICE, "hi")
     assert provider.last_tools is not None
     visible = {s["function"]["name"] for s in provider.last_tools}
-    assert all(n.startswith("crm_") or n == "recall" for n in visible)
-    assert len(visible) == 5  # the four crm tools + recall
+    # only crm tools + recall + role-visible skills enter the LLM context
+    alice_skills = {
+        s.name for s in SkillRegistry().load_all() if enforcer.skill_allowed(s.name, ALICE)
+    }
+    assert all(n.startswith("crm_") or n in alice_skills or n == "recall" for n in visible)
+    assert alice_skills <= visible
+    assert "new_leave_request" not in visible  # HR skill invisible to marketing
+    assert len(visible) == 5 + len(alice_skills)  # 4 crm tools + recall + allowed skills
 
     runner(ADMIN, "hi")
-    assert len(provider.last_tools) == len(TOOL_REGISTRY)
+    admin_skills = {
+        s.name for s in SkillRegistry().load_all() if enforcer.skill_allowed(s.name, ADMIN)
+    }
+    assert len(provider.last_tools) == len(TOOL_REGISTRY) + len(admin_skills)
 
 
 # --- intercept (runtime enforcement) ---
