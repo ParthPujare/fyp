@@ -44,6 +44,8 @@ A Marketing user asks the assistant for CRM data: it works. The same user, or a 
 
 **Next milestone (weeks 11–12):** skills registry + skills editor, then the **trajectory viewer + evals harness** — the trace store records *everything the model saw* (system prompt, context injections, reasoning, tool I/O) with a by-source, admin-only viewer and a trace-completeness eval (plan.md §7, §11). Full plan: `ref_docs/plan.md` §11; build log: `agent_history/`.
 
+**Today (2026-08-15): Milestones 1–8 (weeks 1–14) are built** — CASBIN RBAC + intercept, 3-tier memory + recall + HITL, PII sanitizer + dashboard, skill registry/editor, trajectory tracing + evals, and now the **attack suites + hardening**: the A1–A8 Attack Test Matrix (`tests/attack/`, §15) is green with models scripted to fully comply with each attack, the audit log is hash-chained (`prev_hash`/`hash` + `.head` sidecar, `verify_integrity()` catches edit/reorder/delete/truncate, EVAL `audit_integrity`), `SkillRegistry.save` rejects registry-root escapes, and the threat model is documented in `ref_docs/threat_model.md`. **204 offline tests green**, `ruff` clean, `make demo-attacks` shows the attack evidence end-to-end. Build log per milestone: `agent_history/`. Remaining: stretch items + report/demo (weeks 15–16).
+
 ## Out of Scope
 
 The project deliberately does not build an agent framework from scratch, does not train or fine-tune models (it uses off-the-shelf models), and does not implement enterprise identity infrastructure (identity is simplified). The focus is the harness — the enforcement layer — and proving, with deterministic tests, that it holds under attack.

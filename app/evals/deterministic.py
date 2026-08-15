@@ -1,7 +1,7 @@
 """Deterministic evals — rule-based checks needing no LLM (plan.md §8).
 
 These are the "tests over evals" proof layer: the harness checks its own trace
-against the RBAC contract + audit log + guardrail guarantees after every run.
++ audit log against the RBAC contract + guardrail guarantees after every run.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ class DeterministicEvaluator:
                 self._completeness(tree),
                 self._rbac_contract(run_id, tree),
                 self._audit_pairs(run_id, tree),
+                self._audit_integrity(),
                 self._guardrails(tree),
             ],
         )
@@ -169,6 +170,19 @@ class DeterministicEvaluator:
             passed=not missing,
             detail="; ".join(missing) or "every audit decision has a trace event",
             score=1.0 if not missing else 0.0,
+        )
+
+    def _audit_integrity(self) -> EvalCheck:
+        """Audit chain is intact — no edited/reordered/deleted decision lines
+        (plan.md §14 "audit + trace are append-only, hashed")."""
+        if self.audit is None:
+            return EvalCheck(name="audit_integrity", passed=True, score=1.0, detail="audit not provided; skipped")
+        ok, issues = self.audit.verify_integrity()
+        return EvalCheck(
+            name="audit_integrity",
+            passed=ok,
+            detail="; ".join(issues) or "audit chain intact",
+            score=1.0 if ok else 0.0,
         )
 
     def _guardrails(self, tree: list[dict[str, Any]]) -> EvalCheck:

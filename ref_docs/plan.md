@@ -327,7 +327,7 @@ Every change written to the audit log.
 | 9–10 | PII sanitizer + HITL interrupts + dashboard v1 (approvals, users, depts) | Admin approves finance transfer from web panel | ✅ **DONE 2026-08-10** (session_006) |
 | 11 | Folder/markdown skills + skill RBAC + **skills editor + memory browser** | Edit a skill → behavior changes on next run | ✅ **DONE 2026-08-15** (session_007) |
 | 12 | **Trajectory viewer + evals harness** (deterministic + judge): record everything the model saw (`PROMPT`/`REASONING`/`CONTEXT_INJECTION` events + per-event `source`), by-source trajectory viewer (admin-only, PII-sanitized), trace-completeness eval | Ops tab shows run trajectories filterable by source; eval scores per run | ✅ **DONE 2026-08-15** (session_008) |
-| 13–14 | Attack suites: policy matrix, prompt-injection, cross-dept memory, skill misuse, loop-abuse, HITL-bypass, trace/audit integrity + hardening | Attack demo passes | |
+| 13–14 | Attack suites: policy matrix, prompt-injection, cross-dept memory, skill misuse, loop-abuse, HITL-bypass, trace/audit integrity + hardening | Attack demo passes | ✅ **DONE 2026-08-15** (session_009) |
 | 15 | Stretch: `learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter; **trajectory search / replay / fork** | Optional extensions | |
 | 16 | Report + README + **recorded demo script** (login as roles → tool use → deny → HITL → memory recall + skill → trace + eval review) | Report + demo | |
 

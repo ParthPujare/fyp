@@ -47,7 +47,7 @@ def test_deterministic_passes_on_clean_run(trace_store, audit_log):
     assert result.passed
     assert result.score == 1.0
     names = [c.name for c in result.checks]
-    assert names == ["trace_integrity", "trace_completeness", "rbac_contract", "audit_pairs", "guardrails"]
+    assert names == ["trace_integrity", "trace_completeness", "rbac_contract", "audit_pairs", "audit_integrity", "guardrails"]
 
 
 def test_deterministic_detects_allowed_without_audit(trace_store, audit_log):

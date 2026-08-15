@@ -188,6 +188,37 @@ curl -s -X POST localhost:8001/chat \
   with per-run score; suspended (pre-approval) runs are evaluated only after
   they complete/resume.
 
+### Attack suites + hardening (Milestone 8)
+
+- **Attack Test Matrix A1–A8** — `tests/attack/` proves the harness holds when the
+  model **fully complies** with an attack (enforcement is in code/policy, never
+  the prompt). Threat model + mapping: `ref_docs/threat_model.md`.
+  - **A1 policy matrix** — `test_policy_matrix.py` parses `policy.csv` as an
+    oracle: full tool matrix, per-role allowed sets, memory matrix, skill matrix,
+    unknown object/action/role → deny.
+  - **A2/A3 injection** — `test_prompt_injection.py` + `test_cross_dept_memory.py`:
+    a delivered injection in the user message, tool-output poisoning, and
+    memory/recall poisoning are denied and audited across all three vectors.
+  - **A4 skill misuse** — `test_skill_misuse.py`: cross-dept skills are invisible
+    or denied, a nested forbidden tool inside an allowed skill is blocked, and
+    `SkillRegistry.save` rejects a scope that escapes the registry root.
+  - **A5 loop abuse** — `test_loop_abuse.py`: deny-storms short-circuit and end on
+    a guardrail; budget / max-steps / run-timeout bounds hold; nothing runs past
+    the terminal guardrail.
+  - **A6 HITL bypass** — `test_hitl_bypass.py`: nothing executes before an admin
+    approves, a rejection never executes on resume, non-admin and forged-JWT
+    deciders get 403/401, a decided approval can't be re-decided.
+  - **A7/A8 integrity** — `test_integrity.py`: editing/deleting/reordering/
+    truncating an audit or trace entry is detected via the SHA-256 chain, and the
+    deterministic EVAL's `audit_integrity`/`trace_integrity` checks surface the
+    tampering.
+- **Audit hardening** — `app/harness/audit.py` writes every decision in a
+  per-line SHA-256 chain (`prev_hash`/`hash`, genesis `0×64`) mirrored to an
+  `.head` sidecar; `verify_integrity()` flags any edit/reorder/delete/truncate.
+  Pre-chain files stay readable (backwards compatible).
+- **Run the evidence** — `make demo-attacks` or
+  `uv run python scripts/demo_attacks.py`.
+
 ### RBAC (Casbin, deny-by-default)
 
 - **`filter_tools`** — only the caller's role-permitted tool schemas enter the LLM context (a Marketing user never *sees* HR/Finance/DevOps tools).
@@ -224,9 +255,9 @@ to use a real model (Gemini free tier default).
 - dashboard: admin-JWT gates (401/403), pending list masking, decide 404/409 + resume, read-only users/departments, skills editor CRUD (policy_row flag), memory browser CRUD, ops trajectory viewer (runs list, source filter, evals)
 - skills: parse/validation, skill RBAC matrix, per-role schema exposure, nested calls go through intercept (deny inside a skill), SKILL_USE trace + audit rows, hot reload on fresh settings
 - evals: deterministic checks pass on clean runs / fail on missing audit pairs, judge suite (scripted MockLLM verdicts, parse/invalid-score handling), EVAL events traced + integrity preserved, eval-on-completion-only, trajectory PII masking
+- attack: A1 policy-matrix oracle, A2/A3 prompt-injection (message + tool-output + memory poisoning), A4 skill misuse + registry path-escape, A5 loop-abuse (deny-storm / budget / steps / timeout), A6 HITL-bypass (pre-approval no-op, reject-never-executes, 403/401, double-decide), A7/A8 trace+audit integrity tamper detection
 - smoke: role-aware hello for every role end-to-end
 
 ## Next milestones
 
-1. Weeks 13–14: attack suites (policy matrix, prompt-injection, cross-dept memory, skill misuse, loop-abuse, HITL-bypass, trace/audit integrity + hardening)
-2. Weeks 15–16: stretch (`learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter; trajectory search / replay / fork) then report + recorded demo
+1. Weeks 15–16: stretch (`learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter; trajectory search / replay / fork) then report + recorded demo

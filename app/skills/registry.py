@@ -56,8 +56,16 @@ class SkillRegistry:
         return self.root.joinpath(*scope_segments, skill.name)
 
     def save(self, skill: Skill) -> Path:
-        """Write a skill.md to disk (create/update), hot-reloaded on next read."""
+        """Write a skill.md to disk (create/update), hot-reloaded on next read.
+
+        The resolved path must stay inside the registry root: a crafted
+        skill name/scope containing ``..`` segments must not escape it (the
+        session_007 delete-bug class applied to writes — hardening, week 13-14).
+        """
+        root = Path(self.root).resolve()
         skill_dir = self._dir_for(skill)
+        if not skill_dir.resolve().is_relative_to(root):
+            raise ValueError(f"skill path {skill_dir} escapes the registry root {root}")
         skill_dir.mkdir(parents=True, exist_ok=True)
         path = skill_dir / "skill.md"
         path.write_text(render_skill(skill), encoding="utf-8")
