@@ -49,6 +49,7 @@
     <button class="ghost" data-tab="depts">Departments</button>
     <button class="ghost" data-tab="skills">Skills</button>
     <button class="ghost" data-tab="memory">Memory</button>
+    <button class="ghost" data-tab="ops">Ops</button>
     <button class="ghost" id="logout" class="hidden">Log out</button>
   </nav>
 </header>
@@ -100,6 +101,23 @@
       <h2>Memory browser</h2>
       <div id="memory"></div>
     </div>
+    <div id="ops-view" class="hidden">
+      <div id="ops-runs-view">
+        <h2>Run trajectories <span class="muted" style="font-weight:normal;font-size:13px">(records everything the model saw — filtered by source)</span></h2>
+        <table><thead><tr><th>Run</th><th>Started</th><th>Actor</th><th>Events</th><th>Outcome</th><th></th></tr></thead>
+          <tbody id="ops-runs"></tbody></table>
+      </div>
+      <div id="ops-run-view" class="hidden">
+        <div class="row" style="margin-bottom:8px">
+          <button class="ghost" id="ops-back">← Runs</button>
+          <h2 style="font-size:15px;margin:0" id="ops-run-title"></h2>
+          <span class="pill" id="ops-eval-summary"></span>
+        </div>
+        <div class="row" style="margin-bottom:8px" id="ops-filters"></div>
+        <div id="ops-trajectory"></div>
+        <div id="ops-evals" style="margin-top:12px"></div>
+      </div>
+    </div>
   </section>
 </main>
 <script>
@@ -124,7 +142,7 @@
   }
 
   function show(tab) {
-    ["approvals", "users", "depts", "skills", "memory"].forEach((t) =>
+    ["approvals", "users", "depts", "skills", "memory", "ops"].forEach((t) =>
       $(t + "-view").classList.toggle("hidden", t !== tab));
   }
 
@@ -199,6 +217,7 @@
     if (b.dataset.tab === "depts") loadDepts();
     if (b.dataset.tab === "skills") loadSkills();
     if (b.dataset.tab === "memory") loadMemory();
+    if (b.dataset.tab === "ops") loadOps();
   }));
 
   $("signin").addEventListener("click", async () => {
@@ -376,6 +395,111 @@
     $("skills").classList.remove("hidden");
   });
   $("delete-skill").addEventListener("click", deleteSkill);
+
+  // ---- Ops (trajectory viewer + evals) ----
+  const OPS_SOURCES = ["llm", "memory", "tool", "guardrail", "hitl", "user", "eval"];
+  let opsRunId = null;
+  let opsSourceFilter = new Set();
+
+  async function loadOps() {
+    opsRunId = null; opsSourceFilter.clear();
+    $("ops-runs-view").classList.remove("hidden");
+    $("ops-run-view").classList.add("hidden");
+    $("ops-runs").innerHTML = "";
+    try {
+      const runs = await api("/api/ops/runs");
+      if (!runs.length) { $("ops-runs").innerHTML = '<tr><td colspan="6" class="muted">No runs traced yet.</td></tr>'; return; }
+      runs.forEach((r) => appendRunRow(r));
+    } catch (e) { $("ops-runs").innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`; }
+  }
+
+  function appendRunRow(r) {
+    const actor = r.actor || {};
+    const tr = elm(`
+      <tr>
+        <td><code>${esc(r.run_id)}</code></td>
+        <td class="muted">${esc((r.started_ts || "").slice(0, 19).replace("T", " "))}</td>
+        <td>${esc(actor.sub || "")} <span class="muted">(${esc(actor.role || "")})</span></td>
+        <td>${r.event_count}</td>
+        <td><span class="badge ${r.outcome === "completed" ? "approved" : "pending"}">${esc(r.outcome)}</span></td>
+        <td><button data-open="${esc(r.run_id)}">View</button></td>
+      </tr>`);
+    tr.querySelector("[data-open]").addEventListener("click", () => openOpsRun(r.run_id));
+    $("ops-runs").appendChild(tr);
+  }
+
+  function renderSourceFilters(runId) {
+    $("ops-filters").innerHTML = OPS_SOURCES.map((s) => {
+      const active = opsSourceFilter.has(s);
+      return `<button class="ghost" data-src="${esc(s)}" style="${active ? "outline:2px solid var(--accent)" : ""}">${esc(s)}${active ? " ✓" : ""}</button>`;
+    }).join("");
+    $("ops-filters").querySelectorAll("[data-src]").forEach((b) => b.addEventListener("click", () => {
+      const s = b.dataset.src;
+      if (opsSourceFilter.has(s)) opsSourceFilter.delete(s); else opsSourceFilter.add(s);
+      renderSourceFilters(runId);
+      loadTrajectory(runId);
+    }));
+  }
+
+  async function openOpsRun(runId) {
+    opsRunId = runId; opsSourceFilter.clear();
+    $("ops-runs-view").classList.add("hidden");
+    $("ops-run-view").classList.remove("hidden");
+    $("ops-run-title").textContent = "Run " + runId.slice(0, 8);
+    renderSourceFilters(runId);
+    await Promise.all([loadTrajectory(runId), loadRunEvals(runId)]);
+  }
+
+  async function loadTrajectory(runId) {
+    $("ops-trajectory").textContent = "loading...";
+    const params = [...opsSourceFilter].map((s) => "source=" + encodeURIComponent(s)).join("&");
+    try {
+      const out = await api("/api/ops/runs/" + encodeURIComponent(runId) + (params ? "?" + params : ""));
+      $("ops-trajectory").innerHTML = "";
+      if (!out.events.length) { $("ops-trajectory").innerHTML = '<p class="muted">No events for this filter.</p>'; return; }
+      out.events.forEach((e) => $("ops-trajectory").appendChild(eventCard(e)));
+    } catch (e) { $("ops-trajectory").textContent = "error: " + e.message; }
+  }
+
+  function eventCard(e) {
+    return elm(`
+      <div class="card">
+        <div class="row">
+          <span class="pill">#${e.seq}</span>
+          <span class="pill">${esc(e.type)}</span>
+          <span class="pill">${esc(e.source)}</span>
+          <span class="muted">${esc((e.ts || "").slice(0, 19).replace("T", " "))}</span>
+        </div>
+        <pre style="white-space:pre-wrap;color:var(--muted);font-size:12px">${esc(JSON.stringify(e.payload, null, 2))}</pre>
+      </div>`);
+  }
+
+  async function loadRunEvals(runId) {
+    const host = $("ops-evals");
+    host.textContent = "loading evals...";
+    try {
+      const evals = await api("/api/ops/runs/" + encodeURIComponent(runId) + "/evals");
+      host.innerHTML = "";
+      if (!evals.length) { host.innerHTML = '<p class="muted">No eval suites recorded for this run.</p>'; return; }
+      host.innerHTML = '<h3 style="margin:0 0 8px">Evals</h3>';
+      evals.forEach((e) => {
+        const p = e.payload || {};
+        const body = (p.checks || []).map((c) =>
+          `<div class="row"><span class="badge ${c.passed ? "approved" : "rejected"}">${c.passed ? "PASS" : "FAIL"}</span>
+           <span>${esc(c.name)}</span><span class="muted">score ${c.score}</span><span class="muted">${esc(c.detail)}</span></div>`)
+          .join("");
+        host.insertAdjacentHTML("beforeend", `
+          <div class="card">
+            <div class="row"><b>${esc(p.suite || e.type)}</b>
+              <span class="badge ${p.passed ? "approved" : "rejected"}">${p.passed ? "PASS" : "FAIL"}</span>
+              <span class="pill">score ${p.score}</span></div>
+            ${body || '<div class="muted">no checks</div>'}
+          </div>`);
+      });
+    } catch (e) { host.textContent = "error: " + e.message; }
+  }
+
+  $("ops-back").addEventListener("click", () => { opsRunId = null; loadOps(); });
 
   if (token) { setAuthed(true); loadApprovals(); }
   else setAuthed(false);

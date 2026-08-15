@@ -120,14 +120,14 @@ fyp-agent-harness/            ← this repo (root: FYP/)
 │   │   ├── intercept.py      ✅ runtime enforcement wrapper (physical block + audit)
 │   │   ├── audit.py          ✅ structured JSONL logging (ALLOW/DENY/APPROVED/REJECTED)
 │   │   └── sanitize.py       ✅ PII masking (fields + regex, scope-aware) [Wk 9–10]
-│   ├── evals/                planned — auto-eval hook + deterministic/ + judge/ suites [Wk 12]
+│   ├── evals/                ✅ auto-eval hook (eval_enabled_for_judge gate) + deterministic/ checks + judge/ suite + evaluate_run → EVAL events [Wk 12]
 │   ├── dashboard/            ✅ FastAPI + static web UI: approvals, users, depts (admin JWT) [Wk 9–10]
-│   │                         planned —   skills editor, memory browser, trajectory viewer, evals
+│   │                         ✅   skills editor, memory browser [Wk 11], trajectory viewer + evals (Ops tab) [Wk 12]
 │   ├── memory/               ✅ 3-tier SqliteBaseStore + episodic FTS5 + approvals, load/reflect/recall
 │   │                         ✅   extract, dedup, budget/eviction, snapshot [Wk 7–8]
-│   ├── skills/               planned — folder/markdown skill registry + (stretch) learn_skill [Wk 11]
+│   ├── skills/               ✅ folder/markdown skill registry + executor + RBAC exposed as tools [Wk 11] + (stretch) learn_skill
 │   └── services/             ✅ crm/hr/devops/finance (FastAPI + SQLite + seed) :8002–8005
-└── tests/                    ✅ offline suites: auth, llm, trace, services, smoke, memory, sanitize, dashboard — 127 tests
+└── tests/                    ✅ offline suites: auth, llm, trace, services, smoke, memory, sanitize, dashboard, skills, evals — 161 tests
 ```
 
 ---
@@ -325,8 +325,8 @@ Every change written to the audit log.
 | 5–6 | **Casbin core** (pulled earlier): model.conf + policy.csv (RBAC + domains), `filter_tools`, `intercept`, audit log | Unauthorized tool physically blocked | ✅ **DONE 2026-08-10** (session_004) |
 | 7–8 | **3-tier + episodic memory**: BaseStore namespaces, `load_memory`/`reflect`/`recall`, frozen snapshot, extract/dedup/budget/eviction, HITL for central writes, thread-backed chat | Multi-turn chat with RBAC-scoped recall incl. past-session search | ✅ **DONE 2026-08-10** (session_005) |
 | 9–10 | PII sanitizer + HITL interrupts + dashboard v1 (approvals, users, depts) | Admin approves finance transfer from web panel | ✅ **DONE 2026-08-10** (session_006) |
-| 11 | Folder/markdown skills + skill RBAC + **skills editor + memory browser** | Edit a skill → behavior changes on next run | |
-| 12 | **Trajectory viewer + evals harness** (deterministic + judge): record everything the model saw (`PROMPT`/`REASONING`/`CONTEXT_INJECTION` events + per-event `source`), by-source trajectory viewer (admin-only, PII-sanitized), trace-completeness eval | Ops tab shows run trajectories filterable by source; eval scores per run | |
+| 11 | Folder/markdown skills + skill RBAC + **skills editor + memory browser** | Edit a skill → behavior changes on next run | ✅ **DONE 2026-08-15** (session_007) |
+| 12 | **Trajectory viewer + evals harness** (deterministic + judge): record everything the model saw (`PROMPT`/`REASONING`/`CONTEXT_INJECTION` events + per-event `source`), by-source trajectory viewer (admin-only, PII-sanitized), trace-completeness eval | Ops tab shows run trajectories filterable by source; eval scores per run | ✅ **DONE 2026-08-15** (session_008) |
 | 13–14 | Attack suites: policy matrix, prompt-injection, cross-dept memory, skill misuse, loop-abuse, HITL-bypass, trace/audit integrity + hardening | Attack demo passes | |
 | 15 | Stretch: `learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter; **trajectory search / replay / fork** | Optional extensions | |
 | 16 | Report + README + **recorded demo script** (login as roles → tool use → deny → HITL → memory recall + skill → trace + eval review) | Report + demo | |

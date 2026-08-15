@@ -14,6 +14,7 @@ class ToolCall:
 class LLMResponse:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    reasoning: str | None = None
 
 
 class LLMProvider(Protocol):

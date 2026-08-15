@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -494,3 +494,54 @@ def _validate_scope(scope: str) -> None:
     if kind == "user" and value:
         return
     raise HTTPException(status_code=422, detail=f"invalid memory scope {scope!r}")
+
+
+# ---- Ops face: trajectory viewer + evals (Week 12) ----
+
+
+def _trace() -> TraceStore:
+    return _get_components()["trace"]
+
+
+@app.get("/api/ops/runs")
+def ops_runs(
+    trace: Annotated[TraceStore, Depends(_trace)],
+    authorization: str | None = Header(default=None),
+) -> list[dict[str, Any]]:
+    """Runs summary for the ops tab (admin-only)."""
+    _verify_admin(authorization)
+    return trace.list_runs()
+
+
+@app.get("/api/ops/runs/{run_id}")
+def ops_run(
+    run_id: str,
+    trace: Annotated[TraceStore, Depends(_trace)],
+    source: Annotated[list[str] | None, Query()] = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """One run's full trajectory, optionally filtered by event source (e.g.
+    ``?source=llm&source=tool``). Trajectory text is PII-sanitized at write
+    time; this endpoint is admin-JWT only (plan.md §7)."""
+    _verify_admin(authorization)
+    tree = trace.get_run_tree(run_id)
+    if not tree:
+        raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+    sources = {s for s in (source or []) if s}
+    if sources:
+        tree = [e for e in tree if e.get("source") in sources]
+    return {"run_id": run_id, "filter": sorted(sources) or None, "events": tree}
+
+
+@app.get("/api/ops/runs/{run_id}/evals")
+def ops_run_evals(
+    run_id: str,
+    trace: Annotated[TraceStore, Depends(_trace)],
+    authorization: str | None = Header(default=None),
+) -> list[dict[str, Any]]:
+    """Eval suites (deterministic / judge) recorded for a run."""
+    _verify_admin(authorization)
+    tree = trace.get_run_tree(run_id)
+    if not tree:
+        raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+    return [dict(e) for e in tree if e["type"] == "eval"]

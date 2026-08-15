@@ -152,7 +152,8 @@ def test_trace_written_and_integrity_holds(runner_factory, trace_store):
     tree = trace_store.get_run_tree(result.run_id)
     types = [e["type"] for e in tree]
     assert types[0] == TraceEventType.RUN_START.value
-    assert types[-1] == TraceEventType.RUN_END.value
+    assert TraceEventType.RUN_END.value in types  # EVAL events now follow run_end
+    assert TraceEventType.EVAL.value in types
     assert TraceEventType.NODE.value in types
     assert TraceEventType.TOOL_CALL.value in types
     assert any(

@@ -18,6 +18,7 @@ from app.agent.graph import AgentDeps, build_agent_graph
 from app.agent.guardrails import make_tracker
 from app.agent.tools import TOOL_REGISTRY, ToolExecutor, tool_schema
 from app.config import Settings, get_settings
+from app.evals import eval_enabled_for_judge, evaluate_run
 from app.harness.audit import AuditLog
 from app.harness.enforcer import PolicyEnforcer
 from app.harness.filter import filter_tools
@@ -112,6 +113,29 @@ def _build_deps(
     return deps, checkpointer
 
 
+def _fire_evals(
+    *,
+    deps: AgentDeps,
+    run_id: str,
+    settings: Settings,
+    judge_provider: LLMProvider | None,
+) -> list[Any]:
+    """Run the eval hook after a completed run and persist EVAL events."""
+    run_judge = eval_enabled_for_judge(
+        judge_provider=judge_provider, llm_provider_name=settings.llm.provider
+    )
+    if run_judge and judge_provider is None:
+        judge_provider = get_provider(settings)
+    return evaluate_run(
+        run_id=run_id,
+        actor=deps.actor,
+        trace=deps.trace,
+        audit=deps.audit,
+        judge_provider=judge_provider,
+        run_judge=run_judge,
+    )
+
+
 def run_agent(
     claims: dict[str, Any],
     message: str,
@@ -128,6 +152,8 @@ def run_agent(
     recall: RecallService | None = None,
     checkpointer: Any = None,
     thread_id: str | None = None,
+    evals_enabled: bool = True,
+    judge_provider: LLMProvider | None = None,
 ) -> AgentResult:
     settings = settings or get_settings()
     if thread_id is None:
@@ -172,6 +198,13 @@ def run_agent(
     reply = final_state.get("reply") or "no reply produced"
     if not interrupted:
         trace.end_run(run_id, {"output": reply})
+        if evals_enabled:
+            _fire_evals(
+                deps=deps,
+                run_id=run_id,
+                settings=settings,
+                judge_provider=judge_provider,
+            )
 
     return AgentResult(
         reply=reply,
@@ -198,6 +231,8 @@ def resume_agent(
     approvals: ApprovalStore | None = None,
     recall: RecallService | None = None,
     checkpointer: Any = None,
+    evals_enabled: bool = True,
+    judge_provider: LLMProvider | None = None,
 ) -> AgentResult:
     """Apply an admin decision and resume a suspended central-write run."""
     settings = settings or get_settings()
@@ -236,6 +271,13 @@ def resume_agent(
     )
     reply = final_state.get("reply") or "no reply produced"
     deps.trace.end_run(run_id, {"output": reply, "resumed": True})
+    if evals_enabled:
+        _fire_evals(
+            deps=deps,
+            run_id=run_id,
+            settings=settings,
+            judge_provider=judge_provider,
+        )
     return AgentResult(
         reply=reply,
         run_id=run_id,

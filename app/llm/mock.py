@@ -46,6 +46,7 @@ class MockLLM:
                     ToolCall(name=tc["name"], args=tc.get("args", {}))
                     for tc in spec.get("tool_calls", [])
                 ],
+                reasoning=spec.get("reasoning"),
             )
 
         last_user = self._last_user(messages)
@@ -55,4 +56,4 @@ class MockLLM:
             ToolCall(name=tc["name"], args=tc.get("args", {}))
             for tc in spec.get("tool_calls", [])
         ]
-        return LLMResponse(text=text, tool_calls=tool_calls)
+        return LLMResponse(text=text, tool_calls=tool_calls, reasoning=spec.get("reasoning"))

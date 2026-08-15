@@ -45,8 +45,13 @@ class LiteLLMProvider:
         response = litellm.completion(**params, **kwargs)
         message = response.choices[0].message
         text = message.content or ""
+        # Some providers (e.g. Gemini thinking, DeepSeek-reasoner) return a
+        # separate reasoning/thinking channel. Record it when present.
+        reasoning = getattr(message, "reasoning_content", None)
+        if not reasoning:
+            reasoning = getattr(message, "reasoning", None)
         tool_calls = []
         for tc in message.tool_calls or []:
             args = json.loads(tc.function.arguments or "{}")
             tool_calls.append(ToolCall(name=tc.function.name, args=args))
-        return LLMResponse(text=text, tool_calls=tool_calls)
+        return LLMResponse(text=text, tool_calls=tool_calls, reasoning=reasoning)

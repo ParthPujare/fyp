@@ -10,7 +10,10 @@ from app.auth.users import USERS
 from app.config import get_settings
 from app.dashboard.app import app as dashboard_app
 from app.dashboard.app import get_approval_store, get_resumer
+from app.harness.audit import AuditLog
 from app.memory.approvals import ApprovalStore
+from app.ops.schema import TraceEventType
+from app.ops.store import TraceStore
 
 
 def admin_token() -> str:
@@ -322,3 +325,87 @@ def test_memory_browser_crud(components):
     refreshed = client.get("/api/memory", headers=AUTH).json()
     mkt = next(s for s in refreshed if s["scope"] == "dept/marketing")
     assert key not in {i["key"] for i in mkt["items"]}
+
+
+# --- Ops face: trajectory viewer + evals API (Week 12) ---
+
+
+OPS_ACTOR = {"sub": "alice@acme.com", "role": "marketing_agent", "dept": "marketing"}
+
+
+def _seed_run(trace: TraceStore, *, resumed: bool = False, message: str = "hi") -> str:
+    run_id = trace.start_run(OPS_ACTOR, {"message": message})
+    trace.add_event(run_id, TraceEventType.NODE, OPS_ACTOR, {"node": "agent", "step": 1})
+    trace.add_event(run_id, TraceEventType.PROMPT, OPS_ACTOR, {"messages": []})
+    trace.add_event(run_id, TraceEventType.REASONING, OPS_ACTOR, {"text": "think"})
+    trace.add_event(run_id, TraceEventType.CONTEXT_INJECTION, OPS_ACTOR, {"kind": "snapshot", "scopes": ["central"]})
+    trace.add_event(run_id, TraceEventType.TOOL_CALL, OPS_ACTOR, {"tool": "crm_search_customer", "outcome": "allowed"})
+    trace.end_run(run_id, {"output": "done", "resumed": resumed})
+    return run_id
+
+
+@pytest.fixture
+def ops_components(tmp_path):
+    import app.dashboard.app as dash
+
+    trace = TraceStore(tmp_path / "ops_trace.sqlite")
+    run_a = _seed_run(trace)
+    run_b = _seed_run(trace, resumed=True, message="again")
+    trace.add_event(
+        run_b,
+        TraceEventType.EVAL,
+        OPS_ACTOR,
+        {"suite": "deterministic", "passed": True, "score": 1.0, "checks": []},
+    )
+    original = dash._components
+    dash._components = {"trace": trace, "audit": AuditLog(tmp_path / "ops_audit.jsonl")}
+    yield dash, trace, (run_a, run_b)
+    dash._components = original
+
+
+def test_ops_requires_admin(ops_components):
+    client = TestClient(dashboard_app)
+    assert client.get("/api/ops/runs").status_code == 401
+    assert client.get("/api/ops/runs", headers={"Authorization": f"Bearer {user_token('alice@acme.com')}"}).status_code == 403
+
+
+def test_ops_runs_lists(ops_components):
+    _, _, (run_a, run_b) = ops_components
+    resp = TestClient(dashboard_app).get("/api/ops/runs", headers=AUTH)
+    assert resp.status_code == 200
+    runs = {r["run_id"]: r for r in resp.json()}
+    assert set(runs) == {run_a, run_b}
+    assert runs[run_b]["actor"] == OPS_ACTOR
+    assert runs[run_b]["event_count"] == 8  # start..end + eval
+    assert runs[run_a]["outcome"] == "completed"
+    assert runs[run_b]["outcome"] == "resumed"
+
+
+def test_ops_run_events_and_source_filter(ops_components):
+    _, _, (run_a, _) = ops_components
+    client = TestClient(dashboard_app)
+    url = f"/api/ops/runs/{run_a}"
+
+    full = client.get(url, headers=AUTH).json()["events"]
+    assert [e["type"] for e in full].count("prompt") == 1
+
+    only_llm = client.get(url + "?source=llm", headers=AUTH).json()
+    assert {e["type"] for e in only_llm["events"]} == {"prompt", "reasoning"}
+    assert only_llm["filter"] == ["llm"]
+
+    multi = client.get(url + "?source=tool&source=memory", headers=AUTH).json()["events"]
+    assert {e["source"] for e in multi} == {"tool", "memory"}
+
+    assert client.get(url, headers=AUTH).status_code == 200
+    assert client.get("/api/ops/runs/does-not-exist", headers=AUTH).status_code == 404
+
+
+def test_ops_run_evals(ops_components):
+    _, _, (_, run_b) = ops_components
+    resp = TestClient(dashboard_app).get(f"/api/ops/runs/{run_b}/evals", headers=AUTH)
+    assert resp.status_code == 200
+    evals = resp.json()
+    assert len(evals) == 1
+    assert evals[0]["payload"]["suite"] == "deterministic"
+    assert evals[0]["payload"]["passed"] is True
+    assert TestClient(dashboard_app).get("/api/ops/runs/does-not-exist/evals", headers=AUTH).status_code == 404

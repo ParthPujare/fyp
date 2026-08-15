@@ -27,7 +27,7 @@ from app.config import MemorySettings
 from app.harness.audit import AuditLog
 from app.harness.enforcer import PolicyEnforcer
 from app.harness.intercept import intercept_tool
-from app.harness.sanitize import MASK, sanitize_tool_result
+from app.harness.sanitize import MASK, sanitize_text, sanitize_tool_result
 from app.llm.base import LLMProvider
 from app.memory.approvals import ApprovalStore
 from app.memory.edit import MemoryEditor, MemoryMatchError
@@ -87,6 +87,33 @@ def _summary(state: AgentState, deps: AgentDeps) -> str:
     return f"Loop guardrail hit ({trigger}); partial progress: {detail}"
 
 
+def _sanitize_trajectory(
+    text: str | None, claims: dict[str, Any], enforcer: PolicyEnforcer
+) -> str:
+    """Mask PII in free-form trajectory text (prompts/reasoning) on a copy.
+
+    The trajectory persists only what the run itself was allowed to see
+    (plan.md §7 "PII discipline"); the message list sent to the model is never
+    mutated by masking.
+    """
+    if not text:
+        return ""
+    return sanitize_text(str(text), claims, enforcer)
+
+
+def _sanitize_messages(
+    messages: list[dict[str, Any]], claims: dict[str, Any], enforcer: PolicyEnforcer
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for message in messages:
+        msg = dict(message)
+        content = msg.get("content")
+        if isinstance(content, str):
+            msg["content"] = sanitize_text(content, claims, enforcer)
+        out.append(msg)
+    return out
+
+
 def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
     def load_memory(state: AgentState) -> dict[str, Any]:
         claims = state["claims"]
@@ -117,6 +144,17 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
 
         facts_by_scope = {scope: deps.store.items_in(scope_to_namespace(scope)) for scope in read_scopes}
         snapshot_text = build_snapshot(facts_by_scope, deps.memory.snapshot_max_chars)
+        deps.trace.add_event(
+            deps.run_id,
+            TraceEventType.CONTEXT_INJECTION,
+            actor,
+            {
+                "kind": "snapshot",
+                "scopes": read_scopes,
+                "chars": len(snapshot_text),
+                "text": _sanitize_trajectory(snapshot_text, claims, deps.enforcer),
+            },
+        )
         return {
             **reset,
             "messages": [{"role": "system", "content": snapshot_text}, user_msg],
@@ -143,6 +181,25 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
             return {"reply": _summary(state, deps), "final": True}
 
         resp = deps.provider.generate(state["messages"], tools=deps.tool_schemas)
+        deps.trace.add_event(
+            deps.run_id,
+            TraceEventType.PROMPT,
+            deps.actor,
+            {
+                "step": tracker.steps_used,
+                "tool_schema_count": len(deps.tool_schemas or []),
+                "messages": _sanitize_messages(state["messages"], state["claims"], deps.enforcer),
+            },
+        )
+        deps.trace.add_event(
+            deps.run_id,
+            TraceEventType.REASONING,
+            deps.actor,
+            {
+                "step": tracker.steps_used,
+                "text": _sanitize_trajectory(resp.reasoning, state["claims"], deps.enforcer),
+            },
+        )
         message: dict[str, Any] = {"role": "assistant", "content": resp.text}
         if resp.tool_calls:
             calls = [{"name": tc.name, "args": tc.args} for tc in resp.tool_calls]
@@ -222,6 +279,7 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                     "latency_ms": result.latency_ms,
                     "reason": result.reason,
                     "sanitized": MASK in result.content,
+                    "result_summary": result.summary,
                 },
             )
 
