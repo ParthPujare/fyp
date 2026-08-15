@@ -1,4 +1,4 @@
-"""Evals harness (Week 12, plan.md §8): deterministic checks, judge suite, EVAL tracing."""
+"""Evals harness (Week 12, plan_mk1_core_harness.md §8): deterministic checks, judge suite, EVAL tracing."""
 
 
 from app.evals import evaluate_run
@@ -155,7 +155,7 @@ def test_run_agent_writes_eval_events_on_completion(runner_factory, trace_store,
 
 def test_trajectory_recorded_with_source_and_sanitized_pii(runner_factory, trace_store, audit_log):
     """PROMPT/REASONING/CONTEXT_INJECTION events exist, carry a source, and PII
-    in reasoning is masked (plan.md §7 PII discipline)."""
+    in reasoning is masked (plan_mk1_core_harness.md §7 PII discipline)."""
     provider = MockLLM(sequence=[
         {"text": "searching", "tool_calls": [{"name": "crm_search_customer", "args": {"query": "acme"}}],
          "reasoning": "alice.zhang@acme.com ssn 123-45-6789"},

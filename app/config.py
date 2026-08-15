@@ -36,7 +36,7 @@ class ServiceSettings(BaseModel):
 
 
 class MemorySettings(BaseModel):
-    """3-tier + episodic memory bounds (see ref_docs/plan.md §5.8)."""
+    """3-tier + episodic memory bounds (see ref_docs/plans/plan_mk1_core_harness.md §5.8)."""
 
     central_bytes: int = Field(default=8192, ge=1)
     dept_bytes: int = Field(default=16384, ge=1)
@@ -47,7 +47,7 @@ class MemorySettings(BaseModel):
 
 
 class GuardrailSettings(BaseModel):
-    """Loop guardrail bounds (see plan.md §6)."""
+    """Loop guardrail bounds (see plan_mk1_core_harness.md §6)."""
 
     max_steps: int = Field(default=10, ge=1)
     tool_budget: int = Field(default=8, ge=1)
@@ -56,7 +56,7 @@ class GuardrailSettings(BaseModel):
 
 
 class SkillSettings(BaseModel):
-    """Skills registry location (folder/markdown registry, see plan.md §9)."""
+    """Skills registry location (folder/markdown registry, see plan_mk1_core_harness.md §9)."""
 
     skills_dir: Path = Path("skills")
 

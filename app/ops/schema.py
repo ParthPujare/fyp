@@ -21,7 +21,7 @@ class TraceEventType(str, Enum):
 
 
 # Source of a trajectory event — how the ops tab filters "what the model saw"
-# by origin (plan.md §7). ``system`` covers harness bookkeeping (run/nodes).
+# by origin (plan_mk1_core_harness.md §7). ``system`` covers harness bookkeeping (run/nodes).
 EVENT_SOURCES = ("llm", "memory", "tool", "guardrail", "hitl", "user", "system", "eval")
 
 # Default source derived from the event type when a caller doesn't specify one.

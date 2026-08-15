@@ -1,4 +1,4 @@
-"""ApprovalStore — pending HITL decisions (plan.md §5.9, §8).
+"""ApprovalStore — pending HITL decisions (plan_mk1_core_harness.md §5.9, §8).
 
 Central-tier memory writes suspend via LangGraph `interrupt()`; this SQLite store
 holds the pending item so an admin can approve/reject. The dashboard (wk 9-10)

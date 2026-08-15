@@ -1,4 +1,4 @@
-# Policy matrix — roles x departments x resources (see ref_docs/plan.md §4, §12).
+# Policy matrix — roles x departments x resources (see ref_docs/plans/plan_mk1_core_harness.md §4, §12).
 # Deny-by-default: every (sub, dom, obj, act) not matched by an allow row below is denied,
 # so cross-department and destructive actions need an explicit allow row.
 # obj uses keyMatch2 wildcards ("*" matches anything); act "*" matches any action.
@@ -69,7 +69,7 @@ p, hr_agent, hr, pii_email, read
 p, finance_agent, finance, pii_email, read
 p, devops_agent, devops, pii_email, read
 
-# ---- Skills (weeks 11): one Casbin row per skill (plan.md §9) ----
+# ---- Skills (weeks 11): one Casbin row per skill (plan_mk1_core_harness.md §9) ----
 # Visibility is per-skill: a Marketing skill (launch_campaign) has no row for HR, so
 # HR cannot see it (filter) and is denied even if invoked (intercept). triage_incident
 # is central and visible to every dept — but it calls a devops tool, so any dept that

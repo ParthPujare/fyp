@@ -1,4 +1,4 @@
-"""LangGraph agent — the bounded tool-use loop with memory nodes (plan.md §5, §11).
+"""LangGraph agent — the bounded tool-use loop with memory nodes (plan_mk1_core_harness.md §5, §11).
 
 Graph: START → load_memory → agent ⇄ execute_tools → finalize → reflect → END.
 
@@ -93,7 +93,7 @@ def _sanitize_trajectory(
     """Mask PII in free-form trajectory text (prompts/reasoning) on a copy.
 
     The trajectory persists only what the run itself was allowed to see
-    (plan.md §7 "PII discipline"); the message list sent to the model is never
+    (plan_mk1_core_harness.md §7 "PII discipline"); the message list sent to the model is never
     mutated by masking.
     """
     if not text:
@@ -221,7 +221,7 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
         def _critical_gate(
             tool: Any, args: dict[str, Any]
         ) -> ToolResult | None:
-            """HITL gate for risk=critical tools (plan.md §6, §8): suspend via
+            """HITL gate for risk=critical tools (plan_mk1_core_harness.md §6, §8): suspend via
             interrupt() and execute only after admin approval."""
             actor = deps.actor
             resource = {"type": "tool", "id": tool.name}
@@ -299,7 +299,7 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
 
         def _execute_one(name: str, args: dict[str, Any]) -> ToolResult:
             """Single enforced call — the shared path for direct tool calls and
-            for every nested call inside a skill (plan.md §9: skills run through
+            for every nested call inside a skill (plan_mk1_core_harness.md §9: skills run through
             the exact same intercept/HITL/sanitize/guardrail chain)."""
             tracker.record_tool_call()
             tool = TOOL_REGISTRY.get(name)

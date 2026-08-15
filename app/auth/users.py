@@ -1,4 +1,4 @@
-"""Seeded mock user store. Identity = simple JWT claims (see plan.md Decision 13)."""
+"""Seeded mock user store. Identity = simple JWT claims (see plan_mk1_core_harness.md Decision 13)."""
 
 from dataclasses import dataclass, field
 

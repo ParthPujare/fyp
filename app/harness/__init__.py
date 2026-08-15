@@ -1,4 +1,4 @@
-"""Harness — the zero-trust enforcement boundary (plan.md §4).
+"""Harness — the zero-trust enforcement boundary (plan_mk1_core_harness.md §4).
 
 Policy (Casbin model + policy.csv), per-role tool filtering, runtime
 interception, and the append-only audit log. Memory (weeks 7-8), PII

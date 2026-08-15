@@ -1,4 +1,4 @@
-"""MemoryEditor — dedup + per-fact update ops + per-tier budget (plan.md §5.5, §5.7, §5.8).
+"""MemoryEditor — dedup + per-fact update ops + per-tier budget (plan_mk1_core_harness.md §5.5, §5.7, §5.8).
 
 - `add`     insert a new fact; an exact normalized match replaces instead of duplicating.
 - `replace` update a fact matched by a **unique substring**; ambiguous -> error.

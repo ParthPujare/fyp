@@ -1,4 +1,4 @@
-"""SkillExecutor — deterministic execution of a skill's tool_calls (plan.md §9).
+"""SkillExecutor — deterministic execution of a skill's tool_calls (plan_mk1_core_harness.md §9).
 
 Invoking a skill is *not* free-form LLM behaviour: the harness runs the skill's
 ``tool_calls[]`` in order, and every nested call flows through the exact same

@@ -1,4 +1,4 @@
-"""Casbin policy enforcer — the deterministic RBAC decision point (plan.md §3, §4).
+"""Casbin policy enforcer — the deterministic RBAC decision point (plan_mk1_core_harness.md §3, §4).
 
 Wraps a `casbin.Enforcer` loaded from `app/harness/policies/{model.conf,policy.csv}`.
 Enforcement is deny-by-default: a `(sub, dom, obj, act)` tuple with no matching
@@ -55,7 +55,7 @@ class PolicyEnforcer:
         )
 
     def memory_allowed(self, scope: str, act: str, claims: dict[str, Any]) -> bool:
-        """Can (role, dept) read/write a memory scope? (plan.md §5.1, §5.10).
+        """Can (role, dept) read/write a memory scope? (plan_mk1_core_harness.md §5.1, §5.10).
 
         Scopes are tier-gated + self-scoped: a dept scope must be the caller's own
         dept and a user scope must be the caller's own uid — cross-tier reads and
@@ -90,7 +90,7 @@ class PolicyEnforcer:
         )
 
     def skill_allowed(self, skill_name: str, claims: dict[str, Any]) -> bool:
-        """Can (role, dept) use a skill? (plan.md §9 — Casbin row per skill).
+        """Can (role, dept) use a skill? (plan_mk1_core_harness.md §9 — Casbin row per skill).
 
         A Marketing skill has no row for HR, so it is invisible to HR (filter_tools)
         and denied even if invoked at runtime (intercept_skill).

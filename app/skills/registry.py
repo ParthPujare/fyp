@@ -1,4 +1,4 @@
-"""SkillRegistry — scans the folder/markdown registry from disk (plan.md §9).
+"""SkillRegistry — scans the folder/markdown registry from disk (plan_mk1_core_harness.md §9).
 
 Hot-reload by design: every ``load_all`` re-reads the ``skills/<scope>/<name>/skill.md``
 files, so an edit made via the dashboard editor (or by hand) takes effect on the very

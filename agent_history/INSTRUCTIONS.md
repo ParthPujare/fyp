@@ -4,9 +4,15 @@ This folder is the **collective memory of past sessions**. Every time a new sess
 
 ## Rules (all sessions must follow)
 
-1. **One session = one step of the multi-step plan** (`ref_docs/plan.md` §11). Do not bundle multiple plan steps into one session.
-2. **Read before you act.** At session start, read this file, then `INDEX.md`, then the latest session summary. State what you learned in your first message.
-3. **Write after you finish.** Before ending the session, create a new summary file and update `INDEX.md`.
+1. **One session = one phase of a registered plan.** Plans live in `ref_docs/plans/` and are
+   indexed in `ref_docs/plans/INDEX.md`; **Plan Mk1** is the original 16-week plan
+   (`ref_docs/plans/plan_mk1_core_harness.md` §11). Every session names its plan + phase (e.g. `mk2 — Phase 1`,
+   `Mk1 — milestone 2`). Do not bundle multiple phases into one session. New work that is not a
+   phase of an existing plan first needs a plan doc (new `plan_mk<NN>_<slug>.md` + a Registry row).
+2. **Read before you act.** At session start, read this file, then `ref_docs/plans/INDEX.md`,
+   then `INDEX.md`, then the latest session summary. State what you learned in your first message.
+3. **Write after you finish.** Before ending the session, create a new summary file, update
+   `INDEX.md`, and update the plan phase status + `ref_docs/plans/INDEX.md`.
 4. **Be specific about state.** "Worked on memory" is useless. "Implemented `reflect` node in `app/memory/reflect.py`, wired Casbin write-check, 3 tests passing" is useful.
 5. **Preserve the timestamped log.** The "What was thought, when" section is the point of this folder — it lets future sessions reconstruct reasoning, not just results.
 6. **Do not delete or rewrite old summaries.** Append-only. If a decision was wrong, add a correction note in the new session's summary instead of editing history.
@@ -29,7 +35,8 @@ agent_history/session_<NNN>_<short_slug>.md
 
 ## Metadata
 - Date: <YYYY-MM-DD>
-- Plan step: <weeks + milestone name, from ref_docs/plan.md §11>
+- Plan / Phase: <plan id + phase, from ref_docs/plans/ (e.g. "mk2 — Phase 1", "Mk1 — milestone 2")>
+- Plan step: <weeks + milestone name, from the plan doc's phase table>  <!-- for Mk1: weeks + §11 milestone -->
 - Scope: <one-line: what this session is about>
 - Status: <in-progress | complete | blocked>
 - State at start: <how the project looked when this session began — files, git HEAD, what was done before>
@@ -68,7 +75,7 @@ agent_history/session_<NNN>_<short_slug>.md
 Every session must append one row:
 
 ```markdown
-| 001 | <slug> | <plan step> | <date> | <one-line summary> | <link> |
+| 001 | Mk1 | <slug> | <plan step> | <date> | <one-line summary> | <link> |
 ```
 
-Keep the table sorted by session number (newest last).
+Columns: `Session | Plan | Focus | Plan step | Date | One-line summary | Link`. Keep the table sorted by session number (newest last).

@@ -1,4 +1,4 @@
-"""RecallService — on-demand FTS5 episodic search (plan.md §5.3, §7.1).
+"""RecallService — on-demand FTS5 episodic search (plan_mk1_core_harness.md §5.3, §7.1).
 
 The `recall` tool is gated by Casbin like any other tool; inside, it searches only
 the scopes the caller is permitted to READ (central + own dept + own user). There

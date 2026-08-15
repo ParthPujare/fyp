@@ -1,4 +1,4 @@
-"""Dashboard v1 — FastAPI on :8006. Admin + ops web panel (plan.md §10, §16).
+"""Dashboard v1 — FastAPI on :8006. Admin + ops web panel (plan_mk1_core_harness.md §10, §16).
 
 Milestone 5 scope (decisions from session_006):
 - HITL approvals queue: list pending ApprovalStore items, approve/reject (admin
@@ -522,7 +522,7 @@ def ops_run(
 ) -> dict[str, Any]:
     """One run's full trajectory, optionally filtered by event source (e.g.
     ``?source=llm&source=tool``). Trajectory text is PII-sanitized at write
-    time; this endpoint is admin-JWT only (plan.md §7)."""
+    time; this endpoint is admin-JWT only (plan_mk1_core_harness.md §7)."""
     _verify_admin(authorization)
     tree = trace.get_run_tree(run_id)
     if not tree:

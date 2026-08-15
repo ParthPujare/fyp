@@ -3,7 +3,9 @@
 A zero-trust security gateway & harness middleware for an Enterprise AI Personal Assistant.
 Every resource — **tools, memory, skills** — is policy-enforced by role, not by what the LLM happens to decide.
 
-> **Status: Milestone 7 (Week 12)** — trajectory viewer + evals harness on top of every milestone before it: **the trace now records everything the model saw** (`PROMPT` / `REASONING` / `CONTEXT_INJECTION` events with a per-event `source`, PII-sanitized before persist), a dashboard **Ops tab** shows run trajectories filterable by source (admin-JWT), and an **auto-eval hook** scores every completed run (deterministic RBAC/trace-completeness checks + optional LLM-as-judge). Deliverables: *"ops tab shows run trajectories filterable by source; eval scores per run"*. See `ref_docs/plan.md` §7–§8.
+> **Status: Milestone 7 (Week 12)** — trajectory viewer + evals harness on top of every milestone before it: **the trace now records everything the model saw** (`PROMPT` / `REASONING` / `CONTEXT_INJECTION` events with a per-event `source`, PII-sanitized before persist), a dashboard **Ops tab** shows run trajectories filterable by source (admin-JWT), and an **auto-eval hook** scores every completed run (deterministic RBAC/trace-completeness checks + optional LLM-as-judge). Deliverables: *"ops tab shows run trajectories filterable by source; eval scores per run"*. See `ref_docs/plans/plan_mk1_core_harness.md` §7–§8.
+
+> **Plans & traceability:** every plan (Mk1 = the original 16-week core, Mk2 = web-UI demo + member management) is indexed in `ref_docs/plans/INDEX.md`; sessions map to plans via `agent_history/INDEX.md`.
 
 ## Repo layout
 
@@ -260,4 +262,5 @@ to use a real model (Gemini free tier default).
 
 ## Next milestones
 
-1. Weeks 15–16: stretch (`learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter; trajectory search / replay / fork) then report + recorded demo
+1. **Plan Mk2** (`ref_docs/plans/plan_mk2_web_ui_members.md`): web-UI demo + member management — chat + any-user login, dynamic members/departments from the dashboard, browser memory test, then report + recorded web demo (this replaces the raw Mk1 week-15/16 stretch+report outlook below).
+2. Mk1 stretch (weeks 15–16): `learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter; trajectory search / replay / fork — remains optional.

@@ -1,4 +1,4 @@
-"""Rule/heuristic fact extraction + scope classification (plan.md §5.4, §5.6).
+"""Rule/heuristic fact extraction + scope classification (plan_mk1_core_harness.md §5.4, §5.6).
 
 Deterministic, offline-testable, no LLM call. Sentences carrying memory markers
 ("prefers X", "uses Y", "team policy Z", ...) become durable facts. A correction

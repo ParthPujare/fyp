@@ -1,4 +1,4 @@
-"""Memory scope helpers (plan.md §5.1) + reversible user-uid encoding.
+"""Memory scope helpers (plan_mk1_core_harness.md §5.1) + reversible user-uid encoding.
 
 Scope notation (used in Casbin obj + audit resource id + episodic `scope` col):
     "central" | "dept/<name>" | "user/<uid>"

@@ -1,4 +1,4 @@
-"""Evals — auto-eval hook after every completed agent run (plan.md §8).
+"""Evals — auto-eval hook after every completed agent run (plan_mk1_core_harness.md §8).
 
 `evaluate_run` runs the deterministic suite always, and the LLM-as-judge suite
 when a judge provider is available (injected in tests/demo, or when the app

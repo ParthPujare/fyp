@@ -1,6 +1,6 @@
 """Attack A1 — exhaustive policy matrix (roles × departments × resources).
 
-The policy matrix doubles as the test suite (plan.md §12 "Policy matrix"). This
+The policy matrix doubles as the test suite (plan_mk1_core_harness.md §12 "Policy matrix"). This
 module cross-validates the Casbin enforcer against the *source of truth*: the
 allow rows in `app/harness/policies/policy.csv`. Everything not granted by an
 explicit row is denied (deny-by-default) — including unknown objects, actions,

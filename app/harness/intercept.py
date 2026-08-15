@@ -1,4 +1,4 @@
-"""intercept — runtime enforcement wrapper (harness pipeline step 4, plan.md §4).
+"""intercept — runtime enforcement wrapper (harness pipeline step 4, plan_mk1_core_harness.md §4).
 
 The deterministic gate applied to every tool call before execution: an allow
 decision is audited and the call proceeds (`None` is returned so the caller

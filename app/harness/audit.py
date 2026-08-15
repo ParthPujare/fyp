@@ -1,4 +1,4 @@
-"""Audit log — append-only JSONL of every policy decision (plan.md §4, §12).
+"""Audit log — append-only JSONL of every policy decision (plan_mk1_core_harness.md §4, §12).
 
 One line per decision: `ALLOW | DENY | APPROVED | REJECTED` (HITL decisions
 arrive with weeks 9-10). Written at decision time, so the log records what

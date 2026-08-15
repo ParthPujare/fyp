@@ -1,4 +1,4 @@
-"""Eval data model — shared by the deterministic and judge suites (plan.md §8)."""
+"""Eval data model — shared by the deterministic and judge suites (plan_mk1_core_harness.md §8)."""
 
 from __future__ import annotations
 

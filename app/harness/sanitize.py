@@ -1,4 +1,4 @@
-"""sanitize — PII / scope-aware masking (harness pipeline step 5, plan.md §9).
+"""sanitize — PII / scope-aware masking (harness pipeline step 5, plan_mk1_core_harness.md §9).
 
 Every tool response and every recalled memory transcript passes through here
 before it returns to the LLM. A sensitive field (email, salary, ssn) is replaced

@@ -1,4 +1,4 @@
-"""Frozen memory snapshot — compiled system-prompt block (plan.md §5.2, §5.3).
+"""Frozen memory snapshot — compiled system-prompt block (plan_mk1_core_harness.md §5.2, §5.3).
 
 `load_memory` distills the caller's permitted scopes into one compact block that is
 frozen for the session (persisted in graph state) and injected as a system message.

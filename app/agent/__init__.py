@@ -1,1 +1,1 @@
-"""LangGraph agent, HTTP tools, and loop guardrails (plan.md weeks 3-4)."""
+"""LangGraph agent, HTTP tools, and loop guardrails (plan_mk1_core_harness.md weeks 3-4)."""

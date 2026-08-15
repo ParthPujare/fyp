@@ -1,4 +1,4 @@
-"""EpisodicStore — SQLite FTS5 transcript recall (plan.md §5.2, §7.3).
+"""EpisodicStore — SQLite FTS5 transcript recall (plan_mk1_core_harness.md §5.2, §7.3).
 
 Every completed session's transcript is appended to a tier-scoped FTS5 table.
 `search` runs a full-text query restricted to the scopes the caller is permitted

@@ -1,4 +1,4 @@
-"""Loop guardrails — deterministic bounds on the agent loop (plan.md §6).
+"""Loop guardrails — deterministic bounds on the agent loop (plan_mk1_core_harness.md §6).
 
 Enforced as graph logic, not prompting: max steps per run, a tool-call budget,
 a deny-retry policy (a denied tool is terminal for the run; repeats are

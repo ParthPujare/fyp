@@ -5,7 +5,7 @@ official SQLite BaseStore. This subclass implements the abstract `batch`/`abatch
 primitive ops (GetOp / PutOp / SearchOp / ListNamespacesOp) over a SQLite table so
 the harness can use the framework-native `BaseStore` API with real persistence.
 
-Namespace model (plan.md §5.2): ``("central",)``, ``("dept", <name>)``,
+Namespace model (plan_mk1_core_harness.md §5.2): ``("central",)``, ``("dept", <name>)``,
 ``("user", <uid>)``. Search ordering is most-recent-first (updated_at DESC) so the
 memory browser and recall see fresh facts first.
 """

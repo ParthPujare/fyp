@@ -1,4 +1,4 @@
-"""Shared helpers for the attack suites (Milestone 8, plan.md §11 row 8).
+"""Shared helpers for the attack suites (Milestone 8, plan_mk1_core_harness.md §11 row 8).
 
 Attack suites prove the harness holds under adversarial scenarios even when the
 model *fully complies* with the attack (e.g. a delivered prompt injection) —

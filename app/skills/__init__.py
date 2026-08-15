@@ -1,4 +1,4 @@
-"""Skills — folder/markdown procedural memory registry (plan.md §9).
+"""Skills — folder/markdown procedural memory registry (plan_mk1_core_harness.md §9).
 
 A skill = named, versioned procedure stored as ``skills/<scope>/<name>/skill.md``
 with YAML frontmatter (name, trigger, scope, owner_role, version, args_schema,

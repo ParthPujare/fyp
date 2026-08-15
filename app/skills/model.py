@@ -1,4 +1,4 @@
-"""Skill model + skill.md frontmatter parsing (plan.md §9).
+"""Skill model + skill.md frontmatter parsing (plan_mk1_core_harness.md §9).
 
 A skill file is a folder ``skills/<scope>/<name>/skill.md``:
 

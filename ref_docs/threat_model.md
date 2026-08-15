@@ -1,6 +1,6 @@
 # Threat Model — Who/What Can Trigger Which Mutation
 
-Report evidence for the attack suites (plan.md §12). Every row maps one
+Report evidence for the attack suites (plan_mk1_core_harness.md §12). Every row maps one
 attacker to a surface, the enforcement layer that actually stops it, and the
 evidence that proves it (automated attack test + demo scenario). The central
 claim of the thesis is explicit in column 3: **access is enforced in code and
@@ -21,7 +21,7 @@ injection cannot cross a boundary.
 | Malicious admin/user | **Privilege escalation**: forge `role=admin` claims into a JWT | JWT signed with a secret the attacker can't sign (HS256); claims verified, role comes from the token | `tests/attack/test_hitl_bypass.py` (role-forge), `test_auth` |
 | Attacker with file access | **Audit/trace tampering**: edit, delete, reorder, or truncate evidence | SHA-256 hash chain + head marker on both trace (`app/ops`) and audit (`app/harness/audit`) → `verify_integrity()` detects it; **audit log determinism** — same input → same decision | `tests/attack/test_integrity.py` A7/A8, `test_evals.py` `audit_integrity` check |
 
-## Enforcement boundaries (defense in depth, plan.md §14)
+## Enforcement boundaries (defense in depth, plan_mk1_core_harness.md §14)
 
 1. **Deny-by-default** — Casbin `model.conf`: anything without a matching `allow` policy is denied.
 2. **Schema hiding** → **runtime block** → **HITL gate** → **sanitize**: even when an attacker gets the model to *attempt* an action, a physical gate stops it.

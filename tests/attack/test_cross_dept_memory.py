@@ -1,6 +1,6 @@
 """Attack A3 — cross-dept / cross-user memory read & write.
 
-Memory is a permission, not a framework default (plan.md §5). A marketing user's
+Memory is a permission, not a framework default (plan_mk1_core_harness.md §5). A marketing user's
 snapshot must never contain HR or another user's facts; `recall` must never
 search a scope outside the caller's readable set; and a write to `hr`/`central`
 must be DENIED+audited while an own-dept write succeeds.

@@ -1,4 +1,4 @@
-"""filter_tools — per-role tool schema filtering (harness pipeline step 1, plan.md §4).
+"""filter_tools — per-role tool schema filtering (harness pipeline step 1, plan_mk1_core_harness.md §4).
 
 Only tools the caller's role is allowed to use ever enter the LLM context. A
 Marketing user's model context contains CRM tool schemas only — HR/Finance/DevOps

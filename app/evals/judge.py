@@ -1,4 +1,4 @@
-"""Judge evals — LLM-as-judge over a completed run (plan.md §8).
+"""Judge evals — LLM-as-judge over a completed run (plan_mk1_core_harness.md §8).
 
 Same provider abstraction as the agent itself (LiteLLM in dev, a scripted
 MockLLM in tests/demo so CI stays deterministic). The judge rates three
