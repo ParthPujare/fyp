@@ -32,8 +32,10 @@
   th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
   code { background:#0b1220; border:1px solid var(--line); border-radius:4px; padding:1px 5px;
          font-size:12px; }
-  input[type=text], input[type=password] { background:#0b1220; border:1px solid var(--line);
-         color:var(--fg); border-radius:6px; padding:7px 10px; }
+input[type=text], input[type=password] { background:#0b1220; border:1px solid var(--line);
+          color:var(--fg); border-radius:6px; padding:7px 10px; }
+   select { background:#0b1220; border:1px solid var(--line); color:var(--fg);
+            border-radius:6px; padding:7px 10px; }
   .status { margin-top:8px; font-size:13px; }
   .hidden { display:none; } .badge { font-size:11px; border-radius:999px; padding:2px 8px; }
   .badge.pending { background:#fef08a33; color:#fef08a; }
@@ -81,13 +83,52 @@
       <div id="approvals"></div>
     </div>
     <div id="users-view" class="hidden">
-      <h2>Users</h2>
-      <table><thead><tr><th>Username</th><th>Role</th><th>Dept</th><th>Scopes</th></tr></thead>
+      <h2>Members</h2>
+      <div class="row" style="margin-bottom:12px">
+        <button id="add-member">+ Add member</button>
+        <span class="muted">Username is immutable; role/dept/scopes are editable. Passwords are hashed (scrypt) — only a reset is shown back.</span>
+      </div>
+      <div id="member-editor" class="hidden">
+        <h3 id="member-editor-title">Edit member</h3>
+        <div class="row">
+          <input type="text" id="mem-username" placeholder="new@acme.com" autocomplete="off">
+          <input type="password" id="mem-password" placeholder="password (add/reset only)" autocomplete="new-password">
+          <button id="mem-gen" class="ghost">Generate</button>
+          <input type="text" id="mem-role" placeholder="role (e.g. marketing_agent)" autocomplete="off">
+          <select id="mem-dept"></select>
+          <input type="text" id="mem-scopes" placeholder="scopes — comma separated (crm:read, crm:create)" autocomplete="off">
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button id="member-save">Save</button>
+          <button class="ghost" id="member-cancel">Cancel</button>
+        </div>
+        <div class="status" id="member-status"></div>
+      </div>
+      <table><thead><tr><th>Username</th><th>Role</th><th>Dept</th><th>Scopes</th><th>State</th><th></th></tr></thead>
         <tbody id="users"></tbody></table>
     </div>
     <div id="depts-view" class="hidden">
       <h2>Departments</h2>
-      <table><thead><tr><th>Name</th><th>Service</th><th>Resources</th><th>Members</th></tr></thead>
+      <div class="row" style="margin-bottom:12px">
+        <button id="add-dept">+ Register department</button>
+        <span class="muted">Registration stores the dept record and appends <code>p, &lt;role&gt;, &lt;name&gt;, *, *</code> to <code>policy.csv</code> so the role is immediately grantable.</span>
+      </div>
+      <div id="dept-editor" class="hidden">
+        <h3>Register department</h3>
+        <div class="row">
+          <input type="text" id="dept-name" placeholder="name (lowercase, e.g. legal)" autocomplete="off">
+          <input type="text" id="dept-service" placeholder="service label (e.g. legal)" autocomplete="off">
+          <input type="text" id="dept-url" placeholder="service URL, e.g. http://127.0.0.1:8007" autocomplete="off">
+          <input type="text" id="dept-resources" placeholder="resources — comma separated" autocomplete="off">
+          <input type="text" id="dept-role" placeholder="role (default: <name>_agent)" autocomplete="off">
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button id="dept-save">Register</button>
+          <button class="ghost" id="dept-cancel">Cancel</button>
+        </div>
+        <div class="status" id="dept-status"></div>
+      </div>
+      <table><thead><tr><th>Name</th><th>Service</th><th>URL</th><th>Resources</th><th>Members</th><th>Role</th></tr></thead>
         <tbody id="depts"></tbody></table>
     </div>
     <div id="skills-view" class="hidden">
@@ -135,7 +176,7 @@
   const $ = (id) => document.getElementById(id);
   const TOKENS = { admin: "harness_admin_token", member: "harness_member_token" };
   const CLAIMS = { admin: "harness_admin_claims", member: "harness_member_claims" };
-  const TAB_LABELS = { chat: "Chat", approvals: "Approvals", users: "Users", depts: "Departments",
+  const TAB_LABELS = { chat: "Chat", approvals: "Approvals", users: "Members", depts: "Departments",
                        skills: "Skills", memory: "Memory", ops: "Ops" };
   const ALL_TABS = Object.keys(TAB_LABELS);
   const ADMIN_TABS = ["approvals", "users", "depts", "skills", "memory", "ops"];
@@ -401,19 +442,163 @@
     } catch (e) { $("approvals").textContent = "error: " + e.message; }
   }
 
-  async function loadUsers() {
-    try { const users = await api("/api/users"); $("users").innerHTML = users.map((u) =>
-      `<tr><td>${esc(u.username)}</td><td>${esc(u.role)}</td><td>${esc(u.dept)}</td>
-       <td>${esc(u.scopes.join(", "))}</td></tr>`).join(""); }
-    catch (e) { $("users").innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
+  // ---- Members (plan_mk2 Phase 4) ----
+  let editingMember = null;   // username being edited, or null when adding
+  let memberAdd = false;
+
+  function splitScopes(v) { return v.split(",").map((s) => s.trim()).filter(Boolean); }
+  function randPass() {
+    const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let out = "";
+    for (let i = 0; i < 12; i++) out += chars[Math.floor(Math.random() * chars.length)];
+    return out;
   }
 
-  async function loadDepts() {
-    try { const depts = await api("/api/departments"); $("depts").innerHTML = depts.map((d) =>
-      `<tr><td>${esc(d.name)}</td><td>${esc(d.service)}</td><td>${esc(d.resources.join(", "))}</td>
-       <td>${esc(d.members.join(", "))}</td></tr>`).join(""); }
-    catch (e) { $("depts").innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
+  async function fillDeptSelect() {
+    const sel = $("mem-dept");
+    sel.innerHTML = "";
+    const depts = await api("/api/departments");
+    depts.forEach((d) => {
+      const o = document.createElement("option");
+      o.value = d.name; o.textContent = d.name;
+      sel.appendChild(o);
+    });
+    sel.addEventListener("change", () => {
+      if (memberAdd || !$("mem-role").value) $("mem-role").value = sel.value + "_agent";
+      else if (editingMember) { /* keep admin-typed role */ }
+    });
   }
+
+  function openMemberEditor(username) {
+    editingMember = username || null;
+    memberAdd = !username;
+    $("member-editor").classList.remove("hidden");
+    $("member-editor-title").textContent = username ? "Edit member: " + username : "Add member";
+    $("mem-username").disabled = !!username;
+    $("mem-username").value = username || "";
+    $("mem-password").value = "";
+    $("mem-password").placeholder = username ? "leave blank to keep current password" : "password (min 6 chars)";
+    $("mem-scopes").value = "";
+    $("member-status").textContent = "";
+    fillDeptSelect().then(() => {
+      if (username) return;
+      $("mem-role").value = "";
+    });
+    if (username) {
+      api("/api/users").then((users) => {
+        const u = users.find((x) => x.username === username);
+        if (!u) return;
+        $("mem-role").value = u.role;
+        $("mem-dept").value = u.dept;
+        $("mem-scopes").value = u.scopes.join(", ");
+      }).catch((e) => { $("member-status").textContent = "error: " + e.message; });
+    }
+  }
+
+  async function saveMember() {
+    const username = $("mem-username").value.trim();
+    const payload = {
+      role: $("mem-role").value.trim(),
+      dept: $("mem-dept").value,
+      scopes: splitScopes($("mem-scopes").value),
+    };
+    if (editingMember) {
+      try {
+        await api("/api/members/" + encodeURIComponent(editingMember), {
+          method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+        const pw = $("mem-password").value.trim();
+        if (pw) {
+          await api("/api/members/" + encodeURIComponent(editingMember) + "/reset-password", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ new_password: pw }) });
+        }
+        $("member-status").textContent = "saved";
+      } catch (e) { $("member-status").textContent = "error: " + e.message; return; }
+    } else {
+      if (!$("mem-username").value.trim()) return $("member-status").textContent = "username required";
+      const pw = $("mem-password").value.trim();
+      if (pw.length < 6) return $("member-status").textContent = "password must be at least 6 characters";
+      try {
+        await api("/api/members", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify(Object.assign({ username, password: pw }, payload)) });
+        $("member-status").textContent = "created " + username;
+      } catch (e) { $("member-status").textContent = "error: " + e.message; return; }
+    }
+    $("member-editor").classList.add("hidden");
+    loadUsers();
+  }
+
+  async function toggleActive(username, activate) {
+    try {
+      const url = "/api/members/" + encodeURIComponent(username) + (activate ? "/activate" : "/deactivate");
+      await api(url, { method: "POST" });
+      loadUsers();
+    } catch (e) { alert(e.message); }
+  }
+
+  async function loadUsers() {
+    try {
+      const users = await api("/api/users");
+      $("users").innerHTML = users.map((u) =>
+        `<tr>
+          <td>${esc(u.username)}</td>
+          <td>${esc(u.role)}</td>
+          <td>${esc(u.dept)}</td>
+          <td>${esc(u.scopes.join(", "))}</td>
+          <td><span class="badge ${u.active ? "approved" : "rejected"}">${u.active ? "active" : "disabled"}</span></td>
+          <td>
+            <button class="ghost" data-edit="${esc(u.username)}">Edit</button>
+            ${u.active
+              ? `<button class="bad" data-deact="${esc(u.username)}">Deactivate</button>`
+              : `<button class="ok" data-act="${esc(u.username)}">Re-activate</button>`}
+          </td>
+        </tr>`).join("");
+      $("users").querySelectorAll("[data-edit]").forEach((b) =>
+        b.addEventListener("click", () => openMemberEditor(b.dataset.edit)));
+      $("users").querySelectorAll("[data-deact]").forEach((b) =>
+        b.addEventListener("click", () => toggleActive(b.dataset.deact, false)));
+      $("users").querySelectorAll("[data-act]").forEach((b) =>
+        b.addEventListener("click", () => toggleActive(b.dataset.act, true)));
+    } catch (e) { $("users").innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`; }
+  }
+
+  // ---- Departments (plan_mk2 Phase 4) ----
+
+  async function loadDepts() {
+    try {
+      const depts = await api("/api/departments");
+      $("depts").innerHTML = depts.map((d) =>
+        `<tr><td>${esc(d.name)}</td><td>${esc(d.service)}</td><td><code>${esc(d.service_url)}</code></td>
+         <td>${esc(d.resources.join(", "))}</td><td>${esc(d.members.join(", "))}</td><td>${esc(d.role || "")}</td></tr>`).join("");
+    } catch (e) { $("depts").innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`; }
+  }
+
+  async function saveDept() {
+    const payload = {
+      name: $("dept-name").value.trim(),
+      service: $("dept-service").value.trim(),
+      service_url: $("dept-url").value.trim(),
+      resources: splitScopes($("dept-resources").value),
+      role: $("dept-role").value.trim(),
+    };
+    if (!payload.name) { $("dept-status").textContent = "name required"; return; }
+    try {
+      await api("/api/departments", { method: "POST",
+        headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+      $("dept-status").textContent = "registered " + payload.name;
+      $("dept-editor").classList.add("hidden");
+      loadDepts();
+    } catch (e) { $("dept-status").textContent = "error: " + e.message; }
+  }
+
+  $("add-member").addEventListener("click", () => openMemberEditor(null));
+  $("member-save").addEventListener("click", saveMember);
+  $("member-cancel").addEventListener("click", () => $("member-editor").classList.add("hidden"));
+  $("mem-gen").addEventListener("click", () => { $("mem-password").value = randPass(); });
+  $("add-dept").addEventListener("click", () => $("dept-editor").classList.remove("hidden"));
+  $("dept-save").addEventListener("click", saveDept);
+  $("dept-cancel").addEventListener("click", () => $("dept-editor").classList.add("hidden"));
 
   // ---- Skills ----
   let editingSkill = null;

@@ -47,6 +47,14 @@ class LockoutGuardError(MemberError):
     """Deactivation refused by the last-admin / self lockout guard."""
 
 
+class DepartmentExistsError(MemberError):
+    """register_department() called with an existing department name."""
+
+
+class DepartmentError(MemberError):
+    """Department not found / invalid."""
+
+
 # Seed demo accounts — migrated into the store on first open (plan_mk2 §5).
 # Passwords are the documented demo credentials; only their hashes are stored.
 SEED_MEMBERS: list[dict[str, Any]] = [
@@ -89,6 +97,49 @@ SEED_MEMBERS: list[dict[str, Any]] = [
 
 # Seed plaintexts, kept for the `USERS` compat shim only (see module docstring).
 SEED_PASSWORDS = {m["username"]: m["password"] for m in SEED_MEMBERS}
+
+# Seed departments — migrated into the store on first open (plan_mk2 Phase 4).
+# Service label + URL follow `_service_for`/`ServiceSettings` today; `resources`
+# are left empty for seeds because `/api/departments` still derives the resource
+# list live from policy.csv `p` rows (unchanged source, plan_mk2 §3.2) and merges
+# it with any stored resources (set by admin at registration time).
+SEED_DEPARTMENTS: list[dict[str, Any]] = [
+    {
+        "name": "marketing",
+        "service": "crm",
+        "service_url": "http://127.0.0.1:8002",
+        "resources": [],
+        "role": "marketing_agent",
+    },
+    {
+        "name": "hr",
+        "service": "hr",
+        "service_url": "http://127.0.0.1:8003",
+        "resources": [],
+        "role": "hr_agent",
+    },
+    {
+        "name": "finance",
+        "service": "finance",
+        "service_url": "http://127.0.0.1:8005",
+        "resources": [],
+        "role": "finance_agent",
+    },
+    {
+        "name": "devops",
+        "service": "devops",
+        "service_url": "http://127.0.0.1:8004",
+        "resources": [],
+        "role": "devops_agent",
+    },
+    {
+        "name": "admin",
+        "service": "harness gateway",
+        "service_url": "http://127.0.0.1:8001",
+        "resources": [],
+        "role": "admin",
+    },
+]
 
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P, _SCRYPT_DKLEN = 2**14, 8, 1, 32
 _MAXMEM = 128 * 1024 * 1024
@@ -168,6 +219,28 @@ class MemberRecord:
         }
 
 
+@dataclass(frozen=True)
+class DepartmentRecord:
+    name: str
+    service: str
+    service_url: str
+    resources: list[str] = field(default_factory=list)
+    role: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "service": self.service,
+            "service_url": self.service_url,
+            "resources": list(self.resources),
+            "role": self.role,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -212,13 +285,26 @@ class MemberStore:
                 "INSERT INTO meta (key, value) VALUES ('members_version', '0') "
                 "ON CONFLICT(key) DO NOTHING"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS departments (
+                    name        TEXT PRIMARY KEY,
+                    service     TEXT NOT NULL,
+                    service_url TEXT NOT NULL,
+                    resources   TEXT NOT NULL,
+                    role        TEXT NOT NULL,
+                    created_at  TEXT NOT NULL,
+                    updated_at  TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
         finally:
             conn.close()
         self._seed_if_empty()
 
     def _seed_if_empty(self) -> None:
-        """Migrate the 5 current users on an empty table (plan_mk2 Phase 1)."""
+        """Migrate the 5 current users + departments on an empty table (plan_mk2 Phase 1/4)."""
         conn = self._connect()
         try:
             count = conn.execute("SELECT COUNT(*) FROM members").fetchone()[0]
@@ -238,7 +324,24 @@ class MemberStore:
                             now,
                         ),
                     )
-                conn.commit()
+            dept_count = conn.execute("SELECT COUNT(*) FROM departments").fetchone()[0]
+            if dept_count == 0:
+                now = _now()
+                for d in SEED_DEPARTMENTS:
+                    conn.execute(
+                        "INSERT INTO departments (name, service, service_url, resources, role,"
+                        " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            d["name"],
+                            d["service"],
+                            d["service_url"],
+                            json.dumps(d["resources"]),
+                            d["role"],
+                            now,
+                            now,
+                        ),
+                    )
+            conn.commit()
         finally:
             conn.close()
 
@@ -257,6 +360,12 @@ class MemberStore:
         )
 
     def _audit(self, actor: str, action: str, username: str) -> None:
+        self._audit_entry(actor, action, "member", username)
+
+    def _audit_department(self, actor: str, action: str, dept: str) -> None:
+        self._audit_entry(actor, action, "department", dept)
+
+    def _audit_entry(self, actor: str, action: str, rtype: str, rid: str) -> None:
         log = self._audit_log
         if log is None:
             from app.harness.audit import AuditLog
@@ -267,13 +376,13 @@ class MemberStore:
             "role": "",
             "dept": "",
         }
-        member = self.get(username)
+        member = self.get(actor)
         if member is not None:
             actor_claims["role"] = member.role
             actor_claims["dept"] = member.dept
         log.log(
             decision="ALLOW",
-            resource={"type": "member", "id": username},
+            resource={"type": rtype, "id": rid},
             actor=actor_claims,
             run_id="members",
             reason=f"admin:members:{action}",
@@ -340,6 +449,70 @@ class MemberStore:
         finally:
             conn.close()
         return [r for r in (self._row_to_record(x) for x in rows) if r is not None]
+
+    # ---- departments (plan_mk2 Phase 4: data, not code) ----
+
+    def _dept_row_to_record(self, row: sqlite3.Row | None) -> DepartmentRecord | None:
+        if row is None:
+            return None
+        return DepartmentRecord(
+            name=row["name"],
+            service=row["service"],
+            service_url=row["service_url"],
+            resources=json.loads(row["resources"]),
+            role=row["role"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def list_departments(self) -> list[DepartmentRecord]:
+        conn = self._connect()
+        try:
+            rows = conn.execute("SELECT * FROM departments ORDER BY name").fetchall()
+        finally:
+            conn.close()
+        return [r for r in (self._dept_row_to_record(x) for x in rows) if r is not None]
+
+    def get_department(self, name: str) -> DepartmentRecord | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM departments WHERE name = ?", (name,)
+            ).fetchone()
+        finally:
+            conn.close()
+        return self._dept_row_to_record(row)
+
+    def register_department(
+        self,
+        name: str,
+        service: str,
+        service_url: str,
+        resources: list[str] | None = None,
+        role: str = "",
+        actor: str = "admin",
+    ) -> DepartmentRecord:
+        """Register a new department record. Bumps `members_version` (same as any
+        policy-affecting mutation) so the enforcer's next build reloads the
+        policy file — picking up any p rows written for the new role."""
+        if self.get_department(name) is not None:
+            raise DepartmentExistsError(f"department {name!r} already exists")
+        now = _now()
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO departments (name, service, service_url, resources, role,"
+                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (name, service, service_url, json.dumps(resources or []), role or f"{name}_agent", now, now),
+            )
+            self._bump_version(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        self._audit_department(actor, f"register:{name}", name)
+        dept = self.get_department(name)
+        assert dept is not None
+        return dept
 
     def verify(self, username: str, password: str) -> bool:
         member = self.get(username)

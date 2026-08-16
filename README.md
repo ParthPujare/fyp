@@ -143,8 +143,14 @@ curl -s -X POST localhost:8001/chat \
 - **Dashboard (:8006)** — static HTML/JS panel over a FastAPI backend. Login
   proxies the auth service; every `/api/*` endpoint except `/api/login` requires a
   verified admin JWT. Pending approvals list (sensitive tool args masked), Approve
-  / Reject buttons that resume the exact suspended thread, and read-only
-  Users / Departments tabs.
+  / Reject buttons that resume the exact suspended thread, a **Members** tab
+  (add / edit role+dept+scopes / activate / deactivate / reset password, lockout-
+  guarded, audit-logged) and a **Departments** tab (register a department — the
+  record lands in the store and a default `p, <role>, <dept>, *, *` row is
+  appended to `policy.csv` so its role is immediately grantable).
+- **Any-member chat (Mk2)** — active members sign in and get the Chat tab; the
+  dashboard `POST /api/chat` verifies the member JWT and forwards it to the
+  gateway (no CORS). Admin + member sessions coexist with an identity switcher.
 
 ### Skills (Milestone 6)
 
@@ -253,7 +259,11 @@ consulted. A `members_version` write counter lazily rebuilds the enforcer's `g` 
 edit (no restart needed). Since **Phase 3** any active member can sign in to the dashboard
 (`:8006`): non-admins see only the **Chat** tab, admins see Chat plus the admin tabs, and a
 dual-session switcher lets a member and an admin stay signed in together (e.g. carol's suspended
-transfer → switch to admin → Approvals). Member *management* UI lands in Mk2 Phase 4.
+transfer → switch to admin → Approvals). Since **Phase 4** the admin **Members** tab can add /
+edit (role, dept, scopes) / activate / deactivate / reset members, and the **Departments** tab
+registers new departments (the record lands in the store and a default
+`p, <role>, <dept>, *, *` row is appended to `policy.csv` so the role is immediately grantable)
+— both audited, with the lockout guard enforced server-side.
 
 ## Configuration
 
@@ -275,9 +285,10 @@ to use a real model (Gemini free tier default).
 - policy: Casbin policy matrix (role × dept × resource), deny-by-default, admin wildcard, `pii_*` matrix, `filter_tools` visibility, `intercept` gate + audit, audit determinism
 - enforcement (Mk2 Phase 2): `g` materialized from store actives, unknown/disabled deny-by-default, lazy version-guard rebuild (role/dept edits + deactivation reflected on a long-lived enforcer), gateway `/hello`/`/chat`/`decide` 403 for disabled/unknown, dashboard 403 for disabled admin, `members_version` increments on every mutation
 - web chat (Mk2 Phase 3): dashboard `/api/chat` proxy contract (member JWT → gateway envelope), 401/403/502 handling, member token denied on admin endpoints, marketing chat → allowed CRM + denied HR visible, carol `finance_transfer` interrupts and shows in Approvals with masked args, login claims route admin vs member sessions
+- members/depts management (Mk2 Phase 4): department store table + seeding, `register_department` (version bump, audit, default `<name>_agent` role), admin member CRUD (create→login, duplicate 409, short-pw 422, edit role/dept/scopes, unknown 404, deactivate → gateway 403 → reactivate 200, server-side lockout, reset password), department registration through the API (record + `p` row appended to a temp policy copy + new role grantable via a temp-policy enforcer but denied cross-dept)
 - memory: scopes/encoding, SqliteBaseStore CRUD + filter, editor (dedup/replace/remove/budget), fact extraction, episodic FTS5 scope-gating, recall service, Casbin memory matrix, snapshot, snapshot injection, thread persistence, dept/user writes, central-write HITL (approve/reject/deny/resume-guard)
 - sanitize: pii matrix, structured/nested masking, text regex masking, ToolResult summary regeneration, masked values never reach LLM, recall transcript masking
-- dashboard: admin-JWT gates (401/403), pending list masking, decide 404/409 + resume, read-only users/departments, skills editor CRUD (policy_row flag), memory browser CRUD, ops trajectory viewer (runs list, source filter, evals)
+- dashboard: admin-JWT gates (401/403), pending list masking, decide 404/409 + resume, store-driven users/departments (seeded + registered), skills editor CRUD (policy_row flag), memory browser CRUD, ops trajectory viewer (runs list, source filter, evals)
 - skills: parse/validation, skill RBAC matrix, per-role schema exposure, nested calls go through intercept (deny inside a skill), SKILL_USE trace + audit rows, hot reload on fresh settings
 - evals: deterministic checks pass on clean runs / fail on missing audit pairs, judge suite (scripted MockLLM verdicts, parse/invalid-score handling), EVAL events traced + integrity preserved, eval-on-completion-only, trajectory PII masking
 - attack: A1 policy-matrix oracle, A2/A3 prompt-injection (message + tool-output + memory poisoning), A4 skill misuse + registry path-escape, A5 loop-abuse (deny-storm / budget / steps / timeout), A6 HITL-bypass (pre-approval no-op, reject-never-executes, 403/401, double-decide), A7/A8 trace+audit integrity tamper detection

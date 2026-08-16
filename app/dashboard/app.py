@@ -13,6 +13,7 @@ directly, so an approval decided here resumes the exact suspended thread. Every
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 from typing import Annotated, Any
@@ -25,7 +26,13 @@ from pydantic import BaseModel
 
 from app.agent.runner import resume_agent
 from app.auth.jwt import AuthError, verify_token
-from app.auth.users import USERS, is_active_member
+from app.auth.store import (
+    DepartmentExistsError,
+    LockoutGuardError,
+    MemberError,
+    MemberExistsError,
+)
+from app.auth.users import USERS, get_store, is_active_member
 from app.config import get_settings
 from app.harness.audit import AuditLog
 from app.harness.enforcer import PolicyEnforcer
@@ -279,16 +286,114 @@ def users(
     authorization: str | None = Header(default=None),
 ) -> list[dict[str, Any]]:
     _verify_admin(authorization)
-    return [
-        {
-            "username": u.username,
-            "role": u.role,
-            "dept": u.dept,
-            "scopes": u.scopes,
-            "active": u.active,
-        }
-        for u in sorted(USERS.values(), key=lambda u: u.username)
-    ]
+    return [m.to_public() for m in get_store().list()]
+
+
+class MemberCreateRequest(BaseModel):
+    username: str
+    password: str
+    role: str
+    dept: str
+    scopes: list[str] = []
+
+
+class MemberUpdateRequest(BaseModel):
+    role: str
+    dept: str
+    scopes: list[str] = []
+
+
+class ResetPasswordRequest(BaseModel):
+    new_password: str
+
+
+@app.post("/api/members")
+def create_member(
+    req: MemberCreateRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Admin add-member (plan_mk2 Phase 4). Username immutable afterwards
+    (store PK); role/dept/scopes editable; password set to the returned member's."""
+    claims = _verify_admin(authorization)
+    username = (req.username or "").strip()
+    if not username:
+        raise HTTPException(status_code=422, detail="username is required")
+    if len(req.password or "") < 6:
+        raise HTTPException(status_code=422, detail="password must be at least 6 characters")
+    try:
+        return get_store().create(
+            username,
+            req.password,
+            role=req.role,
+            dept=req.dept,
+            scopes=list(req.scopes or []),
+            actor=claims["sub"],
+        ).to_public()
+    except MemberExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.put("/api/members/{username}")
+def update_member(
+    username: str,
+    req: MemberUpdateRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims = _verify_admin(authorization)
+    try:
+        return get_store().update(
+            username,
+            role=req.role,
+            dept=req.dept,
+            scopes=list(req.scopes or []),
+            actor=claims["sub"],
+        ).to_public()
+    except MemberError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/members/{username}/activate")
+def activate_member(
+    username: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims = _verify_admin(authorization)
+    try:
+        return get_store().set_active(username, True, actor=claims["sub"]).to_public()
+    except MemberError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/members/{username}/deactivate")
+def deactivate_member(
+    username: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Deactivate — lockout guard enforced server-side (last admin / self)."""
+    claims = _verify_admin(authorization)
+    try:
+        return get_store().set_active(username, False, actor=claims["sub"]).to_public()
+    except LockoutGuardError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except MemberError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/members/{username}/reset-password")
+def reset_password(
+    username: str,
+    req: ResetPasswordRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims = _verify_admin(authorization)
+    if len(req.new_password or "") < 6:
+        raise HTTPException(status_code=422, detail="password must be at least 6 characters")
+    try:
+        return get_store().reset_password(
+            username, req.new_password, actor=claims["sub"]
+        ).to_public()
+    except MemberError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/departments")
@@ -296,40 +401,94 @@ def departments(
     authorization: str | None = Header(default=None),
 ) -> list[dict[str, Any]]:
     _verify_admin(authorization)
-    depts: dict[str, list[str]] = {}
-    for u in USERS.values():
-        depts.setdefault(u.dept, [])
+    store = get_store()
+    dept_roles = [d.name for d in store.list_departments()]
+    # policy.csv `p` rows can still introduce/denote knowable objects per domain;
+    # merge them so the resource list stays accurate even before registration.
+    policy_objs: dict[str, list[str]] = {}
     with open(_policy_csv()) as fh:
         for line in fh:
             parts = [p.strip() for p in line.split(",")]
             if len(parts) == 5 and parts[0] == "p" and parts[3] != "*":
-                depts.setdefault(parts[2], [])
-                if parts[3] not in depts[parts[2]]:
-                    depts[parts[2]].append(parts[3])
-    return [
-        {
-            "name": name,
-            "resources": sorted(resources),
-            "service": _service_for(name),
-            "members": [u.username for u in USERS.values() if u.dept == name],
-        }
-        for name, resources in sorted(depts.items())
-    ]
+                policy_objs.setdefault(parts[2], [])
+                if parts[3] not in policy_objs[parts[2]]:
+                    policy_objs[parts[2]].append(parts[3])
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for name in sorted(set(dept_roles) | set(policy_objs)):
+        seen.add(name)
+        rec = store.get_department(name)
+        resources = list(policy_objs.get(name, []))
+        if rec is not None:
+            for r in rec.resources:
+                if r not in resources:
+                    resources.append(r)
+        rows.append(
+            {
+                "name": name,
+                "service": rec.service if rec is not None else "",
+                "service_url": rec.service_url if rec is not None else "",
+                "resources": sorted(resources),
+                "members": [u.username for u in USERS.values() if u.dept == name],
+                "role": rec.role if rec is not None else "",
+            }
+        )
+    return rows
+
+
+class DepartmentRegisterRequest(BaseModel):
+    name: str
+    service: str = ""
+    service_url: str = ""
+    resources: list[str] = []
+    role: str = ""
+
+
+@app.post("/api/departments")
+def register_department(
+    req: DepartmentRegisterRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Register a new department (plan_mk2 §2.2 / §4 row 4). The department
+    record lands in the store (replacing the hardcoded `_service_for` map) and a
+    default `p, <role>, <dept>, *, *` row is appended to policy.csv so the new
+    role is immediately grantable. Appending to the policy file is the one place
+    the dashboard writes it — kept tiny + explicit."""
+    claims = _verify_admin(authorization)
+    store = get_store()
+    name = (req.name or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9_-]+", name or ""):
+        raise HTTPException(status_code=422, detail="department name must be lowercase [a-z0-9_-]")
+    role = (req.role or "").strip() or f"{name}_agent"
+    try:
+        store.register_department(
+            name,
+            service=(req.service or "").strip(),
+            service_url=(req.service_url or "").strip(),
+            resources=list(req.resources or []),
+            role=role,
+            actor=claims["sub"],
+        )
+    except DepartmentExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _append_policy_row(role, name)
+    rec = store.get_department(name)
+    assert rec is not None
+    return rec.to_public()
+
+
+def _append_policy_row(role: str, dept: str) -> None:
+    """Append `p, <role>, <dept>, *, *` to policy.csv so the role is grantable.
+    `_build`/`load_policy` re-reads the file on the next version guard rebuild,
+    so the newly-registered role takes effect without a restart."""
+    line = f"p, {role}, {dept}, *, *\n"
+    with open(_policy_csv(), "a") as fh:
+        fh.write(line)
 
 
 def _policy_csv() -> Path:
-    return Path(__file__).resolve().parents[1] / "harness" / "policies" / "policy.csv"
-
-
-def _service_for(dept: str) -> str:
-    mapping = {
-        "marketing": "crm",
-        "hr": "hr",
-        "devops": "devops",
-        "finance": "finance",
-        "admin": "harness gateway",
-    }
-    return mapping.get(dept, "")
+    """Policy file — settings-driven so tests can point at a temp copy."""
+    return settings.services.policy_path
 
 
 def _skill_registry() -> SkillRegistry:
@@ -476,7 +635,7 @@ def _scope_namespaces() -> list[dict[str, Any]]:
         scopes.setdefault(scope, {"scope": scope, "items": []})["items"] = items
     for scope in (SCOPE_CENTRAL,):
         scopes.setdefault(scope, {"scope": scope, "items": []})
-    for dept in ["marketing", "hr", "devops", "finance"]:
+    for dept in [d.name for d in get_store().list_departments()]:
         scopes.setdefault(scope_dept(dept), {"scope": scope_dept(dept), "items": []})
     for user in USERS.values():
         scopes.setdefault(scope_user(user.username), {"scope": scope_user(user.username), "items": []})

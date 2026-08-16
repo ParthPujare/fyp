@@ -27,6 +27,7 @@ class ServiceSettings(BaseModel):
     members_path: Path = Path("data/members.sqlite")
     memory_path: Path = Path("data/memory.sqlite")
     checkpoint_path: Path = Path("data/checkpoints.sqlite")
+    policy_path: Path = Path("app/harness/policies/policy.csv")
     auth_url: str = "http://127.0.0.1:8000"
     gateway_url: str = "http://127.0.0.1:8001"
     dashboard_url: str = "http://127.0.0.1:8006"
