@@ -220,6 +220,13 @@ curl -s -X POST localhost:8001/chat \
   Pre-chain files stay readable (backwards compatible).
 - **Run the evidence** — `make demo-attacks` or
   `uv run python scripts/demo_attacks.py`.
+- **Web chat + any-user login (Mk2 Phase 3)** — `make demo-chat-web` or
+  `uv run python scripts/demo_chat_web.py`: the dashboard `/api/chat` proxies a
+  member's own JWT to the gateway `/chat` (no CORS) and returns the envelope the
+  UI renders (reply / tool outcomes / guardrails / interrupted+approval_id).
+  The member-chat demo shows an allowed CRM call + a visible cross-dept HR
+  DENY and a finance `finance_transfer` that interrupts and lists in Approvals
+  with masked args.
 
 ### RBAC (Casbin, deny-by-default)
 
@@ -243,7 +250,10 @@ the Casbin `g` (user→role→dept) assignments are **materialized live from the
 members only** (`app/harness/enforcer.py`), so an unknown or disabled member is denied everywhere
 by default — their existing token gets a **403** at the gateway/dashboard even before policy is
 consulted. A `members_version` write counter lazily rebuilds the enforcer's `g` after any admin
-edit (no restart needed). Member *management* UI lands in Mk2 Phase 4.
+edit (no restart needed). Since **Phase 3** any active member can sign in to the dashboard
+(`:8006`): non-admins see only the **Chat** tab, admins see Chat plus the admin tabs, and a
+dual-session switcher lets a member and an admin stay signed in together (e.g. carol's suspended
+transfer → switch to admin → Approvals). Member *management* UI lands in Mk2 Phase 4.
 
 ## Configuration
 
@@ -264,6 +274,7 @@ to use a real model (Gemini free tier default).
 - chat: `/chat` 200/401 + real agent path via dependency override, `/approvals/{id}/decide` 200/401/403/404/409 (admin JWT)
 - policy: Casbin policy matrix (role × dept × resource), deny-by-default, admin wildcard, `pii_*` matrix, `filter_tools` visibility, `intercept` gate + audit, audit determinism
 - enforcement (Mk2 Phase 2): `g` materialized from store actives, unknown/disabled deny-by-default, lazy version-guard rebuild (role/dept edits + deactivation reflected on a long-lived enforcer), gateway `/hello`/`/chat`/`decide` 403 for disabled/unknown, dashboard 403 for disabled admin, `members_version` increments on every mutation
+- web chat (Mk2 Phase 3): dashboard `/api/chat` proxy contract (member JWT → gateway envelope), 401/403/502 handling, member token denied on admin endpoints, marketing chat → allowed CRM + denied HR visible, carol `finance_transfer` interrupts and shows in Approvals with masked args, login claims route admin vs member sessions
 - memory: scopes/encoding, SqliteBaseStore CRUD + filter, editor (dedup/replace/remove/budget), fact extraction, episodic FTS5 scope-gating, recall service, Casbin memory matrix, snapshot, snapshot injection, thread persistence, dept/user writes, central-write HITL (approve/reject/deny/resume-guard)
 - sanitize: pii matrix, structured/nested masking, text regex masking, ToolResult summary regeneration, masked values never reach LLM, recall transcript masking
 - dashboard: admin-JWT gates (401/403), pending list masking, decide 404/409 + resume, read-only users/departments, skills editor CRUD (policy_row flag), memory browser CRUD, ops trajectory viewer (runs list, source filter, evals)

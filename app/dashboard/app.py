@@ -112,6 +112,45 @@ def get_resumer():
     return _resume
 
 
+def get_gateway_sender():
+    """Forward a verified member chat to the gateway (SEAM: tests override this)."""
+
+    def _send(token: str, message: str, thread_id: str | None) -> dict:
+        try:
+            resp = httpx.post(
+                f"{settings.services.gateway_url}/chat",
+                json={"token": token, "message": message, "thread_id": thread_id},
+                timeout=60.0,
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"gateway unreachable: {exc}") from exc
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        return resp.json()
+
+    return _send
+
+
+def _verified_member(authorization: str | None) -> tuple[dict[str, Any], str]:
+    """Verify a member JWT (401), require existence + active in the store (403).
+
+    plan_mk2 Phase 3: `/api/chat` is the dashboard's single non-admin API. We
+    verify the token locally (and check the Phase-2 active-member gate) before
+    forwarding the *same* token to the gateway, so a disabled/unknown member is
+    rejected here before any run starts.
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    token = authorization.split(" ", 1)[1]
+    try:
+        claims = verify_token(token, settings.jwt.secret, settings.jwt.algorithm)
+    except AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    if not is_active_member(str(claims.get("sub", ""))):
+        raise HTTPException(status_code=403, detail="account disabled or not a member")
+    return claims, token
+
+
 def _mask_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Mask sensitive tool args (e.g. finance transfer memo) in the UI list."""
     if "args" in payload and isinstance(payload["args"], dict):
@@ -126,6 +165,11 @@ def _mask_payload(payload: dict[str, Any]) -> dict[str, Any]:
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    thread_id: str | None = None
 
 
 class DecideRequest(BaseModel):
@@ -168,6 +212,20 @@ def login(req: LoginRequest) -> dict:
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail="invalid credentials")
     return resp.json()
+
+
+@app.post("/api/chat")
+def chat_member(
+    req: ChatRequest,
+    sender: Annotated[Any, Depends(get_gateway_sender)],
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Any-user chat (plan_mk2 Phase 3). The caller's own member JWT is verified
+    and forwarded to the gateway `/chat`; the gateway envelope
+    (reply/guardrail_hits/tool_calls/interrupted/approval_id/…) is returned
+    unchanged so the UI renders it directly. Admin endpoints stay admin-only."""
+    _claims, token = _verified_member(authorization)
+    return sender(token, req.message, req.thread_id)
 
 
 @app.get("/api/approvals/pending")

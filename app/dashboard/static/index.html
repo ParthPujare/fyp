@@ -3,16 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Harness Admin Dashboard</title>
+<title>Harness Demo — Admin & Members</title>
 <style>
   :root { --bg:#0f172a; --panel:#1e293b; --line:#334155; --fg:#e2e8f0; --muted:#94a3b8;
           --accent:#38bdf8; --ok:#4ade80; --bad:#f87171; }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
-  header { display:flex; align-items:center; gap:16px; padding:12px 20px; background:var(--panel);
-           border-bottom:1px solid var(--line); }
+  header { display:flex; align-items:center; gap:14px; padding:10px 20px; background:var(--panel);
+           border-bottom:1px solid var(--line); flex-wrap:wrap; }
   header h1 { font-size:16px; margin:0; }
-  header nav { display:flex; gap:8px; margin-left:auto; }
+  header nav { display:flex; gap:8px; margin-left:auto; flex-wrap:wrap; }
   button { background:var(--accent); color:#062a3a; border:0; border-radius:6px; padding:6px 12px;
            cursor:pointer; font-weight:600; }
   button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); }
@@ -25,6 +25,8 @@
   .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
   .muted { color:var(--muted); } .pill { font-size:12px; border-radius:999px; padding:2px 10px;
           background:#0b1220; border:1px solid var(--line); }
+  .pill.clickable { cursor:pointer; }
+  .pill.active { border:1px solid var(--accent); color:var(--accent); }
   table { width:100%; border-collapse:collapse; } th,td { text-align:left; padding:6px 8px;
           border-bottom:1px solid var(--line); vertical-align:top; }
   th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
@@ -37,35 +39,44 @@
   .badge.pending { background:#fef08a33; color:#fef08a; }
   .badge.approved { background:#4ade8033; color:#4ade80; }
   .badge.rejected { background:#f8717133; color:#f87171; }
+  #chat-transcript { max-height:60vh; overflow-y:auto; display:flex; flex-direction:column; gap:10px;
+                     margin-bottom:12px; }
+  .chat-user { align-self:flex-end; background:var(--accent); color:#062a3a; border-radius:10px;
+               padding:8px 12px; max-width:75%; }
+  .chat-assistant { align-self:flex-start; background:#0b1220; border:1px solid var(--line);
+                    border-radius:10px; padding:8px 12px; max-width:85%; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Harness Admin Dashboard</h1>
+  <h1>Harness Demo</h1>
   <span class="muted" id="who"></span>
-  <nav>
-    <button class="ghost" data-tab="approvals">Approvals</button>
-    <button class="ghost" data-tab="users">Users</button>
-    <button class="ghost" data-tab="depts">Departments</button>
-    <button class="ghost" data-tab="skills">Skills</button>
-    <button class="ghost" data-tab="memory">Memory</button>
-    <button class="ghost" data-tab="ops">Ops</button>
-    <button class="ghost" id="logout" class="hidden">Log out</button>
-  </nav>
+  <span class="row" id="switcher"></span>
+  <nav id="nav"></nav>
 </header>
 <main>
   <section id="login-view" class="card">
-    <h3>Admin sign in</h3>
+    <h3 id="login-title">Sign in</h3>
     <div class="row">
-      <input type="text" id="user" placeholder="admin@acme.com">
-      <input type="password" id="pass" placeholder="password">
+      <input type="text" id="user" placeholder="user@acme.com" autocomplete="username">
+      <input type="password" id="pass" placeholder="password" autocomplete="current-password">
       <button id="signin">Sign in</button>
+      <button class="ghost hidden" id="login-cancel">Cancel</button>
     </div>
-    <div class="status muted">Mock login, e.g. admin@acme.com / admin123.</div>
+    <div class="status muted" id="login-hint">Mock login for any active member, e.g. alice@acme.com / alice123 (marketing) or admin@acme.com / admin123.</div>
   </section>
 
   <section id="content-view" class="hidden">
-    <div id="approvals-view">
+    <div id="chat-view">
+      <h2>Chat <span class="muted" style="font-weight:normal;font-size:13px" id="chat-identity"></span></h2>
+      <div id="chat-transcript"></div>
+      <div class="row">
+        <input type="text" id="chat-msg" placeholder="message…" style="flex:1">
+        <button id="chat-send">Send</button>
+      </div>
+      <div class="status muted" id="chat-status"></div>
+    </div>
+    <div id="approvals-view" class="hidden">
       <h2>Pending approvals</h2>
       <div id="approvals"></div>
     </div>
@@ -122,31 +133,225 @@
 </main>
 <script>
   const $ = (id) => document.getElementById(id);
-  let token = localStorage.getItem("harness_admin_token") || "";
+  const TOKENS = { admin: "harness_admin_token", member: "harness_member_token" };
+  const CLAIMS = { admin: "harness_admin_claims", member: "harness_member_claims" };
+  const TAB_LABELS = { chat: "Chat", approvals: "Approvals", users: "Users", depts: "Departments",
+                       skills: "Skills", memory: "Memory", ops: "Ops" };
+  const ALL_TABS = Object.keys(TAB_LABELS);
+  const ADMIN_TABS = ["approvals", "users", "depts", "skills", "memory", "ops"];
+
+  let identities = { admin: null, member: null };
+  let active = null;          // "admin" | "member" | null
+  let currentTab = null;
+  let loginMode = null;       // null | "admin" | "member" (signing in a second identity)
+
+  // ---- session state -----------------------------------------------------
+
+  function labelFor(claims) { return claims && claims.role === "admin" ? "admin" : "member"; }
+
+  function restoreSessions() {
+    ["admin", "member"].forEach((label) => {
+      const t = localStorage.getItem(TOKENS[label]);
+      const raw = localStorage.getItem(CLAIMS[label]);
+      if (t && raw) { try { identities[label] = { token: t, claims: JSON.parse(raw) }; } catch { identities[label] = null; } }
+    });
+    const saved = localStorage.getItem("harness_active");
+    if (saved && identities[saved]) active = saved;
+    else if (identities.member) active = "member";
+    else if (identities.admin) active = "admin";
+    else active = null;
+    if (active) currentTab = identities[active].claims.role === "admin" ? "approvals" : "chat";
+  }
+
+  function setIdentity(label, claims, token) {
+    identities[label] = { token, claims };
+    localStorage.setItem(TOKENS[label], token);
+    localStorage.setItem(CLAIMS[label], JSON.stringify(claims));
+  }
+
+  function invalidate(label) {
+    identities[label] = null;
+    localStorage.removeItem(TOKENS[label]);
+    localStorage.removeItem(CLAIMS[label]);
+    if (active === label) {
+      active = identities.member ? "member" : identities.admin ? "admin" : null;
+      localStorage.setItem("harness_active", active || "");
+    }
+    loginMode = null;
+    render();
+    if (active) { currentTab = identities[active].claims.role === "admin" ? "approvals" : "chat"; loadCurrent(); }
+  }
+
+  function switchTo(label) {
+    if (!identities[label]) return;
+    active = label;
+    localStorage.setItem("harness_active", label);
+    loginMode = null;
+    currentTab = identities[active].claims.role === "admin" ? "approvals" : "chat";
+    render();
+    loadCurrent();
+  }
+
+  function logoutActive() { invalidate(active); }
+  function openLogin(label) { loginMode = label; render(); setTimeout(() => $("user").focus(), 0); }
+
+  // ---- api ----------------------------------------------------------------
 
   async function api(path, opts = {}) {
     const headers = Object.assign({}, opts.headers || {});
-    if (token) headers["Authorization"] = "Bearer " + token;
+    const id = identities[active];
+    if (id && id.token) headers["Authorization"] = "Bearer " + id.token;
     const resp = await fetch(path, Object.assign({}, opts, { headers }));
-    if (resp.status === 401 || resp.status === 403) { setAuthed(false); throw new Error("unauthorized"); }
+    if (resp.status === 401 || resp.status === 403) { invalidate(active); throw new Error("unauthorized"); }
     if (!resp.ok) { const body = await resp.text(); throw new Error(body); }
     return resp.json();
   }
 
-  function setAuthed(auth) {
-    $("login-view").classList.toggle("hidden", auth);
-    $("content-view").classList.toggle("hidden", !auth);
-    $("logout").classList.toggle("hidden", !auth);
-    if (auth) { $("who").textContent = "signed in as " + (token ? "admin" : ""); show("approvals"); }
-    else token = "";
+  // ---- render --------------------------------------------------------------
+
+  function tabsForRole() {
+    if (!active || !identities[active]) return [];
+    return identities[active].claims.role === "admin" ? ADMIN_TABS : [];
+  }
+
+  function render() {
+    const hasActive = active !== null && identities[active] !== null;
+    const showLogin = !hasActive || loginMode !== null;
+    $("login-view").classList.toggle("hidden", !showLogin);
+    $("content-view").classList.toggle("hidden", !hasActive);
+    $("login-cancel").classList.toggle("hidden", !hasActive || loginMode === null);
+    if (loginMode) $("login-title").textContent = "Sign in — add " + loginMode + " session";
+    else $("login-title").textContent = "Sign in";
+    $("who").textContent = hasActive
+      ? `active: ${identities[active].claims.sub} · ${identities[active].claims.role} (${identities[active].claims.dept})`
+      : "";
+    $("chat-identity").textContent = hasActive ? `(chats as ${identities[active].claims.sub})` : "";
+    renderNav();
+    renderSwitcher();
+    if (hasActive) { show(currentTab || "chat"); }
+  }
+
+  function renderNav() {
+    const nav = $("nav");
+    nav.innerHTML = "";
+    if (!active || !identities[active]) return;
+    let tabs = ["chat"].concat(tabsForRole());
+    tabs.forEach((t) => {
+      const b = document.createElement("button");
+      b.className = "ghost";
+      b.textContent = TAB_LABELS[t];
+      b.addEventListener("click", () => { currentTab = t; show(t); load(t); });
+      nav.appendChild(b);
+    });
+    const lo = document.createElement("button");
+    lo.className = "ghost";
+    lo.textContent = "Log out";
+    lo.addEventListener("click", logoutActive);
+    nav.appendChild(lo);
+  }
+
+  function renderSwitcher() {
+    const host = $("switcher");
+    host.innerHTML = "";
+    ["admin", "member"].forEach((label) => {
+      const id = identities[label];
+      const chip = document.createElement("span");
+      chip.className = "pill clickable" + (active === label ? " active" : "");
+      chip.textContent = label + (id ? ": " + id.claims.sub : " (+ add)");
+      chip.addEventListener("click", () => (id ? switchTo(label) : openLogin(label)));
+      host.appendChild(chip);
+    });
   }
 
   function show(tab) {
-    ["approvals", "users", "depts", "skills", "memory", "ops"].forEach((t) =>
-      $(t + "-view").classList.toggle("hidden", t !== tab));
+    ALL_TABS.forEach((t) => $(t + "-view").classList.toggle("hidden", t !== tab));
   }
 
+  function load(tab) {
+    if (tab === "chat") loadChat();
+    if (tab === "approvals") loadApprovals();
+    if (tab === "users") loadUsers();
+    if (tab === "depts") loadDepts();
+    if (tab === "skills") loadSkills();
+    if (tab === "memory") loadMemory();
+    if (tab === "ops") loadOps();
+  }
+
+  function loadCurrent() { if (active) load(currentTab); }
+
   function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+
+  // ---- login ----------------------------------------------------------------
+
+  async function doLogin() {
+    try {
+      const resp = await fetch("/api/login", { method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username: $("user").value, password: $("pass").value }) });
+      if (!resp.ok) throw new Error("invalid credentials");
+      const body = await resp.json();
+      const label = labelFor(body.claims);
+      setIdentity(label, body.claims, body.access_token);
+      active = label;
+      localStorage.setItem("harness_active", label);
+      loginMode = null;
+      $("user").value = ""; $("pass").value = "";
+      currentTab = label === "admin" ? "approvals" : "chat";
+      render();
+      loadCurrent();
+    } catch (e) { alert(e.message); }
+  }
+
+  // ---- Chat ------------------------------------------------------------------
+
+  async function sendChat() {
+    const msg = $("chat-msg").value.trim();
+    const id = identities[active];
+    if (!msg || !id) return;
+    pushTranscript("user", esc(msg));
+    $("chat-status").textContent = "working…";
+    try {
+      const out = await api("/api/chat", { method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: msg }) });
+      pushTranscript("assistant", renderChatTurn(out));
+      $("chat-status").textContent = "";
+    } catch (e) { $("chat-status").textContent = "error: " + e.message; }
+    $("chat-msg").value = "";
+    $("chat-msg").focus();
+  }
+
+  function renderChatTurn(out) {
+    let html = `<div class="row"><strong style="white-space:pre-wrap">${esc(out.reply)}</strong>` +
+      (out.thread_id ? `<span class="pill">${esc(out.thread_id)}</span>` : "") + `</div>`;
+    if (out.tool_calls && out.tool_calls.length) {
+      html += `<div class="row" style="margin-top:8px">` + out.tool_calls.map((t) =>
+        `<span class="badge ${t.outcome === "allowed" ? "approved" : "rejected"}">${esc(t.outcome)}</span>` +
+        `<code>${esc(t.name)}</code>`).join(" ") + `</div>`;
+    }
+    if (out.guardrail_hits && out.guardrail_hits.length) {
+      html += `<div class="status muted">guardrails: ${esc(out.guardrail_hits.map((h) => h.type || h).join(", "))}</div>`;
+    }
+    if (out.interrupted && out.approval_id) {
+      const hint = identities.admin
+        ? "switch to the admin session and open Approvals to approve."
+        : "an admin must sign in and approve it in the Approvals tab.";
+      html += `<div class="status" style="color:#fef08a">&#9209; run suspended (approval <code>${esc(out.approval_id)}</code>) — ${esc(hint)}</div>`;
+    }
+    return html;
+  }
+
+  function pushTranscript(kind, html) {
+    const row = document.createElement("div");
+    row.className = kind === "user" ? "chat-user" : "chat-assistant";
+    row.innerHTML = html;
+    $("chat-transcript").appendChild(row);
+    $("chat-transcript").scrollTop = $("chat-transcript").scrollHeight;
+  }
+
+  function loadChat() {}
+
+  // ---- Approvals --------------------------------------------------------------
 
   function approvalCard(item) {
     const actor = item.actor || {}, res = item.resource || {}, payload = item.payload || {};
@@ -209,32 +414,6 @@
        <td>${esc(d.members.join(", "))}</td></tr>`).join(""); }
     catch (e) { $("depts").innerHTML = `<tr><td colspan="4">${esc(e.message)}</td></tr>`; }
   }
-
-  document.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
-    show(b.dataset.tab);
-    if (b.dataset.tab === "approvals") loadApprovals();
-    if (b.dataset.tab === "users") loadUsers();
-    if (b.dataset.tab === "depts") loadDepts();
-    if (b.dataset.tab === "skills") loadSkills();
-    if (b.dataset.tab === "memory") loadMemory();
-    if (b.dataset.tab === "ops") loadOps();
-  }));
-
-  $("signin").addEventListener("click", async () => {
-    try {
-      const out = await fetch("/api/login", { method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ username: $("user").value, password: $("pass").value }) });
-      if (!out.ok) throw new Error("invalid credentials");
-      const body = await out.json();
-      token = body.access_token;
-      localStorage.setItem("harness_admin_token", token);
-      setAuthed(true); loadApprovals();
-    } catch (e) { alert(e.message); }
-  });
-
-  $("logout").addEventListener("click", () => { localStorage.removeItem("harness_admin_token");
-    token = ""; setAuthed(false); });
 
   // ---- Skills ----
   let editingSkill = null;
@@ -430,12 +609,12 @@
 
   function renderSourceFilters(runId) {
     $("ops-filters").innerHTML = OPS_SOURCES.map((s) => {
-      const active = opsSourceFilter.has(s);
-      return `<button class="ghost" data-src="${esc(s)}" style="${active ? "outline:2px solid var(--accent)" : ""}">${esc(s)}${active ? " ✓" : ""}</button>`;
+      const activeFlag = opsSourceFilter.has(s);
+      return `<button class="ghost" data-src="${esc(s)}" style="${activeFlag ? "outline:2px solid var(--accent)" : ""}">${esc(s)}${activeFlag ? " ✓" : ""}</button>`;
     }).join("");
     $("ops-filters").querySelectorAll("[data-src]").forEach((b) => b.addEventListener("click", () => {
-      const s = b.dataset.src;
-      if (opsSourceFilter.has(s)) opsSourceFilter.delete(s); else opsSourceFilter.add(s);
+      const src = b.dataset.src;
+      if (opsSourceFilter.has(src)) opsSourceFilter.delete(src); else opsSourceFilter.add(src);
       renderSourceFilters(runId);
       loadTrajectory(runId);
     }));
@@ -501,8 +680,16 @@
 
   $("ops-back").addEventListener("click", () => { opsRunId = null; loadOps(); });
 
-  if (token) { setAuthed(true); loadApprovals(); }
-  else setAuthed(false);
+  // ---- events + boot ----
+  $("signin").addEventListener("click", doLogin);
+  $("pass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+  $("login-cancel").addEventListener("click", () => { loginMode = null; render(); });
+  $("chat-send").addEventListener("click", sendChat);
+  $("chat-msg").addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
+
+  restoreSessions();
+  if (active) { render(); loadCurrent(); }
+  else render();
 </script>
 </body>
 </html>
