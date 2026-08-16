@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from app.agent.runner import AgentResult, resume_agent, run_agent
 from app.auth.jwt import AuthError, verify_token
+from app.auth.users import is_active_member
 from app.config import get_settings
 from app.harness.audit import AuditLog
 from app.harness.enforcer import PolicyEnforcer
@@ -109,12 +110,24 @@ def health() -> dict:
     return {"status": "ok", "service": "gateway"}
 
 
-@app.post("/hello")
-def hello(req: HelloRequest) -> dict:
+def _verified_active(token: str) -> dict:
+    """Verify the JWT (401) then require the member to exist AND be active (403).
+
+    plan_mk2 Phase 2: a disabled or unknown user is denied at every endpoint even
+    if they hold an unexpired token — tokens no longer outlive membership.
+    """
     try:
-        claims = verify_token(req.token, settings.jwt.secret, settings.jwt.algorithm)
+        claims = verify_token(token, settings.jwt.secret, settings.jwt.algorithm)
     except AuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+    if not is_active_member(str(claims.get("sub", ""))):
+        raise HTTPException(status_code=403, detail="account disabled or not a member")
+    return claims
+
+
+@app.post("/hello")
+def hello(req: HelloRequest) -> dict:
+    claims = _verified_active(req.token)
     return {
         "message": (
             f"Hello {claims['sub']}! You are a {claims['role']} "
@@ -131,10 +144,7 @@ def hello(req: HelloRequest) -> dict:
 
 @app.post("/chat")
 def chat(req: ChatRequest, runner: Annotated[Runner, Depends(get_runner)]) -> dict:
-    try:
-        claims = verify_token(req.token, settings.jwt.secret, settings.jwt.algorithm)
-    except AuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    claims = _verified_active(req.token)
     result = runner(claims, req.message, req.thread_id)
     return {
         "reply": result.reply,
@@ -154,12 +164,9 @@ def decide_approval(
     resumer: Annotated[Any, Depends(get_resumer)],
     approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
 ) -> dict:
-    """Admin-only HITL decision. The caller must present an admin JWT; the
+    """Admin-only HITL decision. The caller must present an active admin JWT; the
     decider identity comes from the verified claims (never from the body)."""
-    try:
-        claims = verify_token(req.token, settings.jwt.secret, settings.jwt.algorithm)
-    except AuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    claims = _verified_active(req.token)
     if claims.get("role") != "admin":
         raise HTTPException(status_code=403, detail="only admins may decide approvals")
 

@@ -2,23 +2,31 @@
 
 Wraps a `casbin.Enforcer` loaded from `app/harness/policies/{model.conf,policy.csv}`.
 Enforcement is deny-by-default: a `(sub, dom, obj, act)` tuple with no matching
-allow row is denied. This replaces the scope-gate stub (`app/agent/enforce.py`)
-from weeks 3-4; the call shape (`(tool, claims) -> bool`) is preserved so the
-agent-graph swap is internal.
+allow row is denied.
+
+Since plan_mk2 Phase 2 the user->role->domain **`g` assignments are materialized
+live from the MemberStore** (`data/members.sqlite`, `app/auth/users.get_store()`)
+for ACTIVE members only — policy.csv keeps only the role-level `p` rows. An
+unknown or disabled member has no `g` row, so every action is denied by default.
+A version guard makes `g` refresh automatically: the enforcer caches the store's
+`members_version` write counter and rebuilds the Casbin instance (under a lock)
+lazily on the next enforce call after any member create/update/deactivate/reset.
 
 Tool scopes are `dept:action` (e.g. `crm:read`) and map to Casbin
 `(obj=dept, act=action)`. The subject is the authenticated user (`sub`) resolved
-to a role via the `g` role-assignment rows in policy.csv.
+to a role via its `g` role-assignment.
 """
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
 import casbin
 
 from app.agent.tools import ToolSpec
+from app.auth.users import get_store
 from app.memory.scopes import SCOPE_CENTRAL
 
 POLICY_DIR = Path(__file__).resolve().parent / "policies"
@@ -32,11 +40,44 @@ class PolicyEnforcer:
         model_path: str | Path = MODEL_PATH,
         policy_path: str | Path = POLICY_PATH,
     ):
-        self._enforcer = casbin.Enforcer(str(model_path), str(policy_path))
-        self._enforcer.load_policy()
+        self._model_path = str(model_path)
+        self._policy_path = str(policy_path)
+        self._lock = threading.Lock()
+        self._members_version = -1
+        self._build()
+
+    # ---- g materialization + version guard ----
+
+    def _store_version(self) -> int:
+        return get_store().version
+
+    def _member_assignments(self) -> list[tuple[str, str, str]]:
+        """g rows for ACTIVE members only (unknown/disabled => no g => deny)."""
+        return [
+            (m.username, m.role, m.dept)
+            for m in get_store().list()
+            if m.active
+        ]
+
+    def _build(self) -> None:
+        enforcer = casbin.Enforcer(self._model_path, self._policy_path)
+        enforcer.load_policy()
+        _enforcer = enforcer
+        for sub, role, dept in self._member_assignments():
+            _enforcer.add_role_for_user_in_domain(sub, role, dept)
+        self._enforcer = _enforcer
+        self._members_version = self._store_version()
+
+    def _sync_g(self) -> None:
+        """Rebuild g under the lock if the member store changed (stale-g fix)."""
+        if self._store_version() != self._members_version:
+            with self._lock:
+                if self._store_version() != self._members_version:
+                    self._build()
 
     def enforce(self, sub: str, dom: str, obj: str, act: str) -> bool:
         """True iff the request (sub, dom, obj, act) matches an allow row."""
+        self._sync_g()
         return self._enforcer.enforce(sub, dom, obj, act)
 
     @staticmethod

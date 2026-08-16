@@ -3,7 +3,11 @@
 # so cross-department and destructive actions need an explicit allow row.
 # obj uses keyMatch2 wildcards ("*" matches anything); act "*" matches any action.
 # p, <role>, <dom>, <obj>, <act>
-# g, <user>, <role>, <dom>
+#
+# NOTE (plan_mk2 Phase 2): user->role->domain `g` assignments are NO LONGER listed here.
+# They are materialized live from the MemberStore (data/members.sqlite) by
+# `app/harness/enforcer.py` for ACTIVE members only — an unknown or disabled member
+# has no `g` row and is denied by default.
 
 # ---- Admin: owns everything in its "admin" domain ----
 p, admin, admin, *, *
@@ -80,10 +84,3 @@ p, marketing_agent, marketing, skill_triage_incident, use
 p, hr_agent, hr, skill_triage_incident, use
 p, finance_agent, finance, skill_triage_incident, use
 p, devops_agent, devops, skill_triage_incident, use
-
-# ---- Role assignment (user -> role -> domain) ----
-g, alice@acme.com, marketing_agent, marketing
-g, bob@acme.com, hr_agent, hr
-g, carol@acme.com, finance_agent, finance
-g, dave@acme.com, devops_agent, devops
-g, admin@acme.com, admin, admin

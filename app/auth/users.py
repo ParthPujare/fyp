@@ -89,3 +89,8 @@ def get_user(username: str) -> User | None:
 def claims_for(username: str) -> dict[str, Any] | None:
     """JWT-style claims (sub/role/dept/scopes) for a username — store-backed."""
     return get_store().claims_for(username)
+
+
+def is_active_member(username: str) -> bool:
+    """Enforcement gate: exists AND active in the MemberStore (plan_mk2 Phase 2)."""
+    return get_store().is_active(username)

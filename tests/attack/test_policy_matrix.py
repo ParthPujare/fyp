@@ -2,7 +2,9 @@
 
 The policy matrix doubles as the test suite (plan_mk1_core_harness.md §12 "Policy matrix"). This
 module cross-validates the Casbin enforcer against the *source of truth*: the
-allow rows in `app/harness/policies/policy.csv`. Everything not granted by an
+allow rows in `app/harness/policies/policy.csv` and the ACTIVE-member
+user→role→department assignments materialized from the MemberStore (plan_mk2
+Phase 2 — `g` no longer lives in policy.csv). Everything not granted by an
 explicit row is denied (deny-by-default) — including unknown objects, actions,
 and users.
 """
@@ -12,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.agent.tools import TOOL_REGISTRY
+from app.auth.users import get_store
 from app.harness.enforcer import POLICY_DIR, PolicyEnforcer
 from app.memory.scopes import SCOPE_CENTRAL, scope_dept, scope_user
 from app.skills.registry import SkillRegistry
@@ -20,10 +23,9 @@ from tests.attack.helpers import ADMIN, ALICE, BOB, CAROL, DAVE
 USERS = [ALICE, BOB, CAROL, DAVE, ADMIN]
 
 
-def _parse_policy(path: Path) -> tuple[list[list[str]], dict[str, tuple[str, str]]]:
-    """Parse policy.csv into (allow rows, {user: (role, domain)})."""
+def _parse_policy(path: Path) -> list[list[str]]:
+    """Parse policy.csv into the allow rows (`p`) — `g` is store-materialized."""
     rows: list[list[str]] = []
-    assignments: dict[str, tuple[str, str]] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.split("#", 1)[0].strip()
         if not line:
@@ -31,12 +33,20 @@ def _parse_policy(path: Path) -> tuple[list[list[str]], dict[str, tuple[str, str
         cols = [c.strip() for c in line.split(",")]
         if cols[0] == "p":
             rows.append(cols)
-        elif cols[0] == "g":
-            assignments[cols[1]] = (cols[2], cols[3])
-    return rows, assignments
+    return rows
 
 
-POLICY, ASSIGNMENTS = _parse_policy(POLICY_DIR / "policy.csv")
+def _store_assignments() -> dict[str, tuple[str, str]]:
+    """{username: (role, dept)} for ACTIVE members only (deny-by-default gate)."""
+    return {
+        m.username: (m.role, m.dept)
+        for m in get_store().list()
+        if m.active
+    }
+
+
+POLICY = _parse_policy(POLICY_DIR / "policy.csv")
+ASSIGNMENTS = _store_assignments()
 
 
 def _obj_act(tool) -> tuple[str, str]:
@@ -45,8 +55,11 @@ def _obj_act(tool) -> tuple[str, str]:
 
 
 def _expected(user: str, obj: str, act: str) -> bool:
-    """Derive the expected allow/deny from policy.csv alone (the oracle)."""
-    role, dom = ASSIGNMENTS[user]
+    """Derive the expected allow/deny from policy.csv + store assignments (oracle)."""
+    assignment = ASSIGNMENTS.get(user)
+    if assignment is None:
+        return False
+    role, dom = assignment
     return any(
         r[1] == role and r[2] == dom and (r[3] == obj or r[3] == "*") and (r[4] == act or r[4] == "*")
         for r in POLICY

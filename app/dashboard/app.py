@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from app.agent.runner import resume_agent
 from app.auth.jwt import AuthError, verify_token
-from app.auth.users import USERS
+from app.auth.users import USERS, is_active_member
 from app.config import get_settings
 from app.harness.audit import AuditLog
 from app.harness.enforcer import PolicyEnforcer
@@ -96,6 +96,8 @@ def _verify_admin(authorization: str | None) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     if claims.get("role") != "admin":
         raise HTTPException(status_code=403, detail="only admins may access the dashboard API")
+    if not is_active_member(str(claims.get("sub", ""))):
+        raise HTTPException(status_code=403, detail="account disabled or not a member")
     return claims
 
 

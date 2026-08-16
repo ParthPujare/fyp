@@ -238,8 +238,12 @@ Mock users: `alice@acme.com` (marketing), `bob@acme.com` (hr), `carol@acme.com` 
 **Members (Mk2):** identity now lives in `data/members.sqlite` (`app/auth/store.py` — the single
 source of truth; the 5 seeds are migrated on first open). Passwords are stored as scrypt hashes,
 never plaintext. Login/`/auth/me`/`USERS` all read the store, every member change is audit-logged,
-and a lockout guard prevents deactivating the last active admin (or yourself). Member *management*
-UI lands in Mk2 Phase 4; Phase 2 moves Casbin `g` assignments onto the store.
+and a lockout guard prevents deactivating the last active admin (or yourself). Since **Phase 2**
+the Casbin `g` (user→role→dept) assignments are **materialized live from the store for ACTIVE
+members only** (`app/harness/enforcer.py`), so an unknown or disabled member is denied everywhere
+by default — their existing token gets a **403** at the gateway/dashboard even before policy is
+consulted. A `members_version` write counter lazily rebuilds the enforcer's `g` after any admin
+edit (no restart needed). Member *management* UI lands in Mk2 Phase 4.
 
 ## Configuration
 
@@ -259,6 +263,7 @@ to use a real model (Gemini free tier default).
 - agent: single/multi-step runs, cross-dept denial, deny-storm bounded, budget/max-steps/timeouts, critical-tool HITL (suspend → approve/reject, deny-retry), recall PII masking, trace written + integrity + trajectory (PROMPT/REASONING/CONTEXT_INJECTION recorded + sanitized)
 - chat: `/chat` 200/401 + real agent path via dependency override, `/approvals/{id}/decide` 200/401/403/404/409 (admin JWT)
 - policy: Casbin policy matrix (role × dept × resource), deny-by-default, admin wildcard, `pii_*` matrix, `filter_tools` visibility, `intercept` gate + audit, audit determinism
+- enforcement (Mk2 Phase 2): `g` materialized from store actives, unknown/disabled deny-by-default, lazy version-guard rebuild (role/dept edits + deactivation reflected on a long-lived enforcer), gateway `/hello`/`/chat`/`decide` 403 for disabled/unknown, dashboard 403 for disabled admin, `members_version` increments on every mutation
 - memory: scopes/encoding, SqliteBaseStore CRUD + filter, editor (dedup/replace/remove/budget), fact extraction, episodic FTS5 scope-gating, recall service, Casbin memory matrix, snapshot, snapshot injection, thread persistence, dept/user writes, central-write HITL (approve/reject/deny/resume-guard)
 - sanitize: pii matrix, structured/nested masking, text regex masking, ToolResult summary regeneration, masked values never reach LLM, recall transcript masking
 - dashboard: admin-JWT gates (401/403), pending list masking, decide 404/409 + resume, read-only users/departments, skills editor CRUD (policy_row flag), memory browser CRUD, ops trajectory viewer (runs list, source filter, evals)

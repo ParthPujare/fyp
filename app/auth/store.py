@@ -205,6 +205,13 @@ class MemberStore:
                 )
                 """
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('members_version', '0') "
+                "ON CONFLICT(key) DO NOTHING"
+            )
             conn.commit()
         finally:
             conn.close()
@@ -285,7 +292,30 @@ class MemberStore:
             admins = [a for a in admins if a != exclude]
         return len(admins)
 
+    def _bump_version(self, conn: sqlite3.Connection) -> None:
+        """Increment `members_version` inside the caller's transaction so the
+        PolicyEnforcer's lazy g rebuild detects the change (plan_mk2 §8)."""
+        conn.execute(
+            "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'members_version'"
+        )
+
     # ---- reads (public) ----
+
+    @property
+    def version(self) -> int:
+        """Write counter bumped on every member mutation (g-rebuild trigger)."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = 'members_version'"
+            ).fetchone()
+        finally:
+            conn.close()
+        return int(row["value"]) if row is not None else 0
+
+    def is_active(self, username: str) -> bool:
+        member = self.get(username)
+        return member is not None and member.active
 
     def get(self, username: str) -> MemberRecord | None:
         conn = self._connect()
@@ -346,6 +376,7 @@ class MemberStore:
                     now,
                 ),
             )
+            self._bump_version(conn)
             conn.commit()
         finally:
             conn.close()
@@ -371,6 +402,7 @@ class MemberStore:
                 "UPDATE members SET role = ?, dept = ?, scopes = ?, updated_at = ? WHERE username = ?",
                 (role, dept, json.dumps(scopes or []), _now(), username),
             )
+            self._bump_version(conn)
             conn.commit()
         finally:
             conn.close()
@@ -394,6 +426,7 @@ class MemberStore:
                 "UPDATE members SET active = ?, updated_at = ? WHERE username = ?",
                 (1 if active else 0, _now(), username),
             )
+            self._bump_version(conn)
             conn.commit()
         finally:
             conn.close()
@@ -411,6 +444,7 @@ class MemberStore:
                 "UPDATE members SET password_hash = ?, updated_at = ? WHERE username = ?",
                 (hash_password(new_password), _now(), username),
             )
+            self._bump_version(conn)
             conn.commit()
         finally:
             conn.close()

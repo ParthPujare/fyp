@@ -88,7 +88,7 @@ def make_runner(
 
 
 @pytest.fixture
-def enforcer() -> PolicyEnforcer:
+def enforcer(member_store) -> PolicyEnforcer:
     return PolicyEnforcer()
 
 
