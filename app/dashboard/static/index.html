@@ -77,6 +77,15 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
         <button id="chat-send">Send</button>
       </div>
       <div class="status muted" id="chat-status"></div>
+      <div class="card" id="my-memory" style="margin-top:16px">
+        <div class="row">
+          <h3 style="flex:1;margin:0;font-size:14px">My memory
+            <span class="muted" style="font-weight:normal;font-size:12px">(the readable scopes the agent injects — central, own dept, own user)</span></h3>
+          <button class="ghost" id="memory-refresh">Refresh</button>
+          <button class="ghost" id="memory-toggle">Collapse</button>
+        </div>
+        <div id="my-memory-body" style="margin-top:8px"></div>
+      </div>
     </div>
     <div id="approvals-view" class="hidden">
       <h2>Pending approvals</h2>
@@ -357,6 +366,7 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
         body: JSON.stringify({ message: msg }) });
       pushTranscript("assistant", renderChatTurn(out));
       $("chat-status").textContent = "";
+      loadMyMemory();
     } catch (e) { $("chat-status").textContent = "error: " + e.message; }
     $("chat-msg").value = "";
     $("chat-msg").focus();
@@ -390,7 +400,39 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
     $("chat-transcript").scrollTop = $("chat-transcript").scrollHeight;
   }
 
-  function loadChat() {}
+  function loadChat() { loadMyMemory(); }
+
+  // ---- My memory (plan_mk2 Phase 5) ----
+  let myMemoryCollapsed = false;
+
+  async function loadMyMemory() {
+    const body = $("my-memory-body");
+    if (!body) return;
+    try {
+      const scopes = await api("/api/memory/me");
+      body.innerHTML = "";
+      if (!scopes.length) {
+        body.innerHTML = '<p class="muted">No readable memory scopes for this identity.</p>';
+        return;
+      }
+      scopes.forEach((s) => {
+        const card = elm(`<div class="card" style="margin-bottom:8px">
+          <h4 style="margin:0 0 4px"><code>${esc(s.scope)}</code> <span class="pill">${s.items.length} facts</span></h4>
+          ${s.items.length
+            ? s.items.map((it) => `<div class="row" style="margin:2px 0"><span class="muted">•</span> <span>${esc(it.text)}</span></div>`).join("")
+            : '<span class="muted">(no facts)</span>'}
+        </div>`);
+        body.appendChild(card);
+      });
+    } catch (e) { body.textContent = "error: " + e.message; }
+  }
+
+  $("memory-refresh").addEventListener("click", loadMyMemory);
+  $("memory-toggle").addEventListener("click", () => {
+    myMemoryCollapsed = !myMemoryCollapsed;
+    $("my-memory-body").classList.toggle("hidden", myMemoryCollapsed);
+    $("memory-toggle").textContent = myMemoryCollapsed ? "Expand" : "Collapse";
+  });
 
   // ---- Approvals --------------------------------------------------------------
 

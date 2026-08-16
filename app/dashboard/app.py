@@ -114,7 +114,18 @@ def get_approval_store() -> ApprovalStore:
 
 def get_resumer():
     def _resume(approval_id: str):
-        return resume_agent(approval_id, **_get_components())
+        c = _get_components()
+        return resume_agent(
+            approval_id,
+            trace=c["trace"],
+            enforcer=c["enforcer"],
+            audit=c["audit"],
+            store=c["store"],
+            episodic=c["episodic"],
+            approvals=c["approvals"],
+            recall=c["recall"],
+            checkpointer=c["checkpointer"],
+        )
 
     return _resume
 
@@ -611,6 +622,41 @@ def delete_skill(
         reason="admin",
     )
     return {"name": name, "deleted": True}
+
+
+# ---- Member memory read (plan_mk2 Phase 5) ----
+
+
+@app.get("/api/memory/me")
+def member_memory(
+    authorization: str | None = Header(default=None),
+) -> list[dict[str, Any]]:
+    """A member's own readable memory (plan_mk2 §4 row 5).
+
+    The second member-only API (beside `/api/chat`). It returns exactly what the
+    agent's `load_memory` would inject for this caller — the scopes they may READ
+    (central + own dept + own user, Casbin-filtered) with their facts — so the
+    browser memory-test can prove (1) a 2nd marketing member reads the shared
+    dept/marketing memory and (2) a member from another dept cannot see it.
+    Admin browsing stays on `/api/memory`; this is the same data, scoped to the
+    caller's own readable set.
+    """
+    claims, _token = _verified_member(authorization)
+    components = _get_components()
+    store = components["store"]
+    rows: list[dict[str, Any]] = []
+    for scope in components["recall"].readable_scopes(claims):
+        items = [
+            {
+                "key": item.key,
+                "text": str(item.value.get("text", "")),
+                "updated_at": item.updated_at.isoformat(),
+            }
+            for item in store.items_in(scope_to_namespace(scope))
+            if item.value.get("text")
+        ]
+        rows.append({"scope": scope, "items": items})
+    return rows
 
 
 # ---- Memory browser/editor (ops face) ----

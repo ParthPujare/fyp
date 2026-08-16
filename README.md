@@ -5,6 +5,8 @@ Every resource — **tools, memory, skills** — is policy-enforced by role, not
 
 > **Status: Milestone 7 (Week 12)** — trajectory viewer + evals harness on top of every milestone before it: **the trace now records everything the model saw** (`PROMPT` / `REASONING` / `CONTEXT_INJECTION` events with a per-event `source`, PII-sanitized before persist), a dashboard **Ops tab** shows run trajectories filterable by source (admin-JWT), and an **auto-eval hook** scores every completed run (deterministic RBAC/trace-completeness checks + optional LLM-as-judge). Deliverables: *"ops tab shows run trajectories filterable by source; eval scores per run"*. See `ref_docs/plans/plan_mk1_core_harness.md` §7–§8.
 
+> **Status (mk2): Phases 1–5 DONE (sessions 010–014)** — store-driven identity + enforcement, any-user web chat, Members/Departments admin UI, and the **browser memory-test** (3-tier scoping walkthrough clickable in the UI via the member "My memory" panel + `GET /api/memory/me`). Phase 6 (report + recorded web demo) is next. See `ref_docs/plans/plan_mk2_web_ui_members.md`.
+
 > **Plans & traceability:** every plan (Mk1 = the original 16-week core, Mk2 = web-UI demo + member management) is indexed in `ref_docs/plans/INDEX.md`; sessions map to plans via `agent_history/INDEX.md`.
 
 ## Repo layout
@@ -234,6 +236,40 @@ curl -s -X POST localhost:8001/chat \
   DENY and a finance `finance_transfer` that interrupts and lists in Approvals
   with masked args.
 
+### Browser memory-test walkthrough (Mk2 Phase 5)
+
+The 3-tier memory scoping scenario is now reproducible **with clicks only** in the
+browser — `make run`, open `:8006`, and:
+
+1. **Admin central write → HITL approve.** Sign in `admin@acme.com` / `admin123`
+   (admin session). In **Chat** type `Company policy requires quarterly vendor audits.`
+   — the run **suspends** with an amber "run suspended" hint. Open **Approvals**
+   (same session), see the `memory / central` item, hit **Approve**; the fact
+   commits. Verify under **Memory** (`central`) **and** in the new **"My memory"**
+   panel below the chat box.
+2. **Admin central + private facts.** In **Memory**, add a fact to `central` and
+   one to `user/admin@acme.com` (the admin-only browser is still gated — a member
+   token gets 403).
+3. **alice dept + private facts.** Add the member session (`alice@acme.com` /
+   `alice123`), switch to it, and in **Chat** type
+   `Our team policy requires weekly standups. Alice prefers Slack over Teams.`
+   — the reply is immediate (dept/user writes need no approval). The **My memory**
+   panel now shows `dept/marketing` + `user/alice@acme.com` with those facts.
+4. **2nd marketing member reads shared dept memory.** As admin, create `molly`
+   (Marketing tab → + Add member). Add the member session (`molly@acme.com`).
+   Her **My memory** panel shows `dept/marketing` **including alice's shared
+   fact** (plus `central` and her own empty `user/molly@acme.com`) — shared dept
+   memory visible to any marketing member.
+5. **Cross-dept denial.** Add `bob@acme.com` (`bob123`) as the member session.
+   His **My memory** panel shows only `central` / `dept/hr` / `user/bob@acme.com`
+   — **no `dept/marketing`**. Chat `recall the decision about standups`: bob's
+   recall returns nothing in his permitted scopes.
+
+`GET /api/memory/me` (the second member-only API, beside `/api/chat`) returns the
+caller's **readable** scopes — exactly what the agent's `load_memory` injects —
+so the panel shows "what the agent reads for you", not a special admin view.
+Automated coverage: `tests/test_memory_web.py` (268 offline tests total).
+
 ### RBAC (Casbin, deny-by-default)
 
 - **`filter_tools`** — only the caller's role-permitted tool schemas enter the LLM context (a Marketing user never *sees* HR/Finance/DevOps tools).
@@ -263,7 +299,12 @@ transfer → switch to admin → Approvals). Since **Phase 4** the admin **Membe
 edit (role, dept, scopes) / activate / deactivate / reset members, and the **Departments** tab
 registers new departments (the record lands in the store and a default
 `p, <role>, <dept>, *, *` row is appended to `policy.csv` so the role is immediately grantable)
-— both audited, with the lockout guard enforced server-side.
+— both audited, with the lockout guard enforced server-side. Since **Phase 5** the 
+member **Chat** tab gains a **"My memory"** panel backed by `GET /api/memory/me`
+(the caller's readable scopes only — central + own dept + own user, Casbin-filtered),
+so any member can see — with clicks — the shared dept memory (a 2nd marketing
+member reads `dept/marketing`) and the cross-dept gap (an HR member sees no
+`dept/marketing` scope).
 
 ## Configuration
 
@@ -289,6 +330,7 @@ to use a real model (Gemini free tier default).
 - memory: scopes/encoding, SqliteBaseStore CRUD + filter, editor (dedup/replace/remove/budget), fact extraction, episodic FTS5 scope-gating, recall service, Casbin memory matrix, snapshot, snapshot injection, thread persistence, dept/user writes, central-write HITL (approve/reject/deny/resume-guard)
 - sanitize: pii matrix, structured/nested masking, text regex masking, ToolResult summary regeneration, masked values never reach LLM, recall transcript masking
 - dashboard: admin-JWT gates (401/403), pending list masking, decide 404/409 + resume, store-driven users/departments (seeded + registered), skills editor CRUD (policy_row flag), memory browser CRUD, ops trajectory viewer (runs list, source filter, evals)
+- memory web (Mk2 Phase 5): the browser memory-test e2e — admin central write via `/api/chat` → HITL suspend → decide approve → committed (real resumer), admin central+private facts via the browser, alice dept+private chat facts, `GET /api/memory/me` scope contract for members, **molly reads shared dept/marketing**, bob has no marketing scope + his `recall` finds nothing, member-API gates (401/403), trace integrity after the walkthrough
 - skills: parse/validation, skill RBAC matrix, per-role schema exposure, nested calls go through intercept (deny inside a skill), SKILL_USE trace + audit rows, hot reload on fresh settings
 - evals: deterministic checks pass on clean runs / fail on missing audit pairs, judge suite (scripted MockLLM verdicts, parse/invalid-score handling), EVAL events traced + integrity preserved, eval-on-completion-only, trajectory PII masking
 - attack: A1 policy-matrix oracle, A2/A3 prompt-injection (message + tool-output + memory poisoning), A4 skill misuse + registry path-escape, A5 loop-abuse (deny-storm / budget / steps / timeout), A6 HITL-bypass (pre-approval no-op, reject-never-executes, 403/401, double-decide), A7/A8 trace+audit integrity tamper detection
@@ -296,5 +338,5 @@ to use a real model (Gemini free tier default).
 
 ## Next milestones
 
-1. **Plan Mk2** (`ref_docs/plans/plan_mk2_web_ui_members.md`): web-UI demo + member management — chat + any-user login, dynamic members/departments from the dashboard, browser memory test, then report + recorded web demo (this replaces the raw Mk1 week-15/16 stretch+report outlook below).
+1. **Plan Mk2** (`ref_docs/plans/plan_mk2_web_ui_members.md`): web-UI demo + member management — chat + any-user login, dynamic members/departments from the dashboard, and the browser memory test are **done (Phases 1–5)**; only the **report + recorded web demo (Phase 6, session 015)** remains.
 2. Mk1 stretch (weeks 15–16): `learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter; trajectory search / replay / fork — remains optional.
