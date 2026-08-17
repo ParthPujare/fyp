@@ -52,3 +52,9 @@ Like Hermes, the assistant should be able to **write its own `skills.md` files b
 
 - Skills are then **linked to the individual user** who generated/owns them (per-user registry, not global).
 - **Bonus:** add the ability to **share skills** (user-to-user or team-wide) as an add-on.
+
+---
+
+## 6. Ask clarifying questions instead of assuming
+
+For ambiguous tasks, ask clarifying questions rather than assuming intent — similar to opencode's behavior.
