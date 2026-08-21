@@ -58,3 +58,23 @@ Like Hermes, the assistant should be able to **write its own `skills.md` files b
 ## 6. Ask clarifying questions instead of assuming
 
 For ambiguous tasks, ask clarifying questions rather than assuming intent — similar to opencode's behavior.
+
+---
+
+## 7. API Key Integration (BYOK — Bring Your Own Key)
+
+Core functionality to enable real LLM chat for all users (like ChatGPT):
+
+- Each user provides their own LLM API key (OpenAI, Anthropic, Gemini, etc.) via the dashboard
+- Keys are stored encrypted per-user in the MemberStore (`data/members.sqlite`)
+- Gateway uses the user's key for their chat requests (LiteLLM provider per-user)
+- Fallback to mock provider if no key is set (preserves offline demo)
+- Admin can view key status (set/unset) but not the key itself
+- Keys never leave the server; only used server-side for LLM calls
+
+Points of interest:
+- `app/auth/store.py` — add `api_key_encrypted` column to members table
+- `app/llm/factory.py` — per-user LLMProvider creation from stored key
+- `app/gateway/app.py` — `/chat` uses caller's provider
+- `app/dashboard/static/index.html` — key management UI in member settings
+- `app/config.py` — encryption settings (Fernet from `cryptography`)
