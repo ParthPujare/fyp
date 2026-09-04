@@ -27,6 +27,7 @@ import hmac
 import json
 import os
 import sqlite3
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -241,6 +242,27 @@ class DepartmentRecord:
         }
 
 
+@dataclass(frozen=True)
+class LLMKeyRecord:
+    id: str
+    username: str
+    provider: str
+    model: str
+    active: bool
+    created_at: str
+    updated_at: str
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "provider": self.provider,
+            "model": self.model,
+            "active": self.active,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -295,6 +317,21 @@ class MemberStore:
                     role        TEXT NOT NULL,
                     created_at  TEXT NOT NULL,
                     updated_at  TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS member_llm_keys (
+                    id                TEXT PRIMARY KEY,
+                    username          TEXT NOT NULL,
+                    provider          TEXT NOT NULL,
+                    model             TEXT NOT NULL,
+                    api_key_encrypted TEXT NOT NULL,
+                    active            INTEGER NOT NULL DEFAULT 0,
+                    created_at        TEXT NOT NULL,
+                    updated_at        TEXT NOT NULL,
+                    UNIQUE(username, provider, model)
                 )
                 """
             )
@@ -519,6 +556,141 @@ class MemberStore:
         if member is None or not verify_password(password, member.password_hash):
             return False
         return member.active
+
+    # ---- llm keys (BYOK Plan Mk3) ----
+
+    def list_llm_keys(self, username: str) -> list[LLMKeyRecord]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, username, provider, model, active, created_at, updated_at "
+                "FROM member_llm_keys WHERE username = ? ORDER BY provider, model",
+                (username,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            LLMKeyRecord(
+                id=r["id"],
+                username=r["username"],
+                provider=r["provider"],
+                model=r["model"],
+                active=bool(r["active"]),
+                created_at=r["created_at"],
+                updated_at=r["updated_at"],
+            )
+            for r in rows
+        ]
+
+    def set_llm_key(
+        self,
+        username: str,
+        provider: str,
+        model: str,
+        api_key_plaintext: str,
+        active: bool = True,
+        actor: str | None = None,
+    ) -> LLMKeyRecord:
+        if self.get(username) is None:
+            raise MemberError(f"member {username!r} not found")
+        from app.auth.crypto import encrypt_secret
+
+        encrypted = encrypt_secret(api_key_plaintext)
+        now = _now()
+        conn = self._connect()
+        try:
+            with conn:
+                if active:
+                    conn.execute(
+                        "UPDATE member_llm_keys SET active = 0, updated_at = ? WHERE username = ?",
+                        (now, username),
+                    )
+                existing = conn.execute(
+                    "SELECT id FROM member_llm_keys WHERE username = ? AND provider = ? AND model = ?",
+                    (username, provider, model),
+                ).fetchone()
+                if existing:
+                    key_id = existing["id"]
+                    conn.execute(
+                        "UPDATE member_llm_keys SET api_key_encrypted = ?, active = ?, updated_at = ? WHERE id = ?",
+                        (encrypted, 1 if active else 0, now, key_id),
+                    )
+                else:
+                    key_id = str(uuid.uuid4())
+                    conn.execute(
+                        "INSERT INTO member_llm_keys (id, username, provider, model, api_key_encrypted, active, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (key_id, username, provider, model, encrypted, 1 if active else 0, now, now),
+                    )
+        finally:
+            conn.close()
+        self._audit_key(actor or username, f"set_key:{provider}:{model}", username)
+        keys = self.list_llm_keys(username)
+        for k in keys:
+            if k.id == key_id:
+                return k
+        raise MemberError("Failed to store LLM key")
+
+    def activate_llm_key(self, username: str, key_id: str, actor: str | None = None) -> None:
+        now = _now()
+        conn = self._connect()
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT id FROM member_llm_keys WHERE id = ? AND username = ?",
+                    (key_id, username),
+                ).fetchone()
+                if not row:
+                    raise MemberError("LLM key not found")
+                conn.execute(
+                    "UPDATE member_llm_keys SET active = 0, updated_at = ? WHERE username = ?",
+                    (now, username),
+                )
+                conn.execute(
+                    "UPDATE member_llm_keys SET active = 1, updated_at = ? WHERE id = ?",
+                    (now, key_id),
+                )
+        finally:
+            conn.close()
+        self._audit_key(actor or username, f"activate_key:{key_id}", username)
+
+    def delete_llm_key(self, username: str, key_id: str, actor: str | None = None) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT id FROM member_llm_keys WHERE id = ? AND username = ?",
+                    (key_id, username),
+                ).fetchone()
+                if not row:
+                    raise MemberError("LLM key not found")
+                conn.execute(
+                    "DELETE FROM member_llm_keys WHERE id = ? AND username = ?",
+                    (key_id, username),
+                )
+        finally:
+            conn.close()
+        self._audit_key(actor or username, f"delete_key:{key_id}", username)
+
+    def get_active_llm_key(self, username: str) -> tuple[str, str, str] | None:
+        """Returns (provider, model, decrypted_api_key) for user's active key, or None."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT provider, model, api_key_encrypted FROM member_llm_keys WHERE username = ? AND active = 1",
+                (username,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None
+        from app.auth.crypto import decrypt_secret
+
+        decrypted = decrypt_secret(row["api_key_encrypted"])
+        return row["provider"], row["model"], decrypted
+
+    def _audit_key(self, actor: str, action: str, username: str) -> None:
+        self._audit_entry(actor, action, "llm_key", username)
 
     # ---- writes (admin-only, every change audit-logged) ----
 

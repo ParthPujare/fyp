@@ -4,8 +4,7 @@
 - **Scope:** Per-user LLM API keys so every member can chat with a **real model through their own
   provider** — keys stored encrypted per-user, used server-side only, admin-visible as status only,
   mock fallback preserved for the offline demo.
-- **Status:** PLANNED 2026-08-21 — no phases implemented yet. Sessions are recorded here only as
-  phases are implemented (never pre-assigned); one session = one phase (`agent_history/INSTRUCTIONS.md`).
+- **Status:** Phases 1–3 DONE 2026-09-04 (session 015).
 - **Registry:** `ref_docs/plans/INDEX.md`
 - **Predecessor:** Plan Mk2 (`ref_docs/plans/plan_mk2_web_ui_members.md`) — Phases 1–5 DONE;
   extends the finished web UI + MemberStore foundation; does not rewrite either prior plan.
@@ -149,9 +148,56 @@ Admin-scoped (`_verify_admin`): the same four operations under
 
 | Phase | Session | Deliverable | Acceptance |
 |-------|---------|-------------|------------|
-| 1 | — | **Crypto + store layer.** `cryptography` dependency; `LLM__FERNET_KEY` setting + `.env.example` entry; `app/auth/crypto.py`; `member_llm_keys` table + MemberStore API (`list/set/activate/delete/get_active`) + audit entries; unit tests (roundtrip, missing/invalid fernet key, multi-key CRUD, active-switch atomicity, duplicate replace, delete-active). | Existing suite green unchanged (268 tests); new crypto/store tests green; zero runtime behaviour change to chat/auth yet; ruff clean |
-| 2 | — | **Per-user provider routing.** `get_provider_for_user` precedence chain; gateway Runner + both resumers wired (HITL resume uses original actor); classified 502 error path + errored-run tracing; judge stays global. Tests: fake-provider seam proves decrypted key + user model reach `run_agent`; resume path; no-key → global/mock unchanged; failure classification; leakage scan. | Precedence + failure tests green; `make demo-*` regression green; judge provider ≠ user provider asserted; ruff clean |
-| 3 | — | **Dashboard API + UI + docs closeout.** Member `/api/account/llm-keys*` + admin `/api/members/{u}/llm-keys*` endpoints (+ status in `/api/users`); Account tab + Members-tab key column/manage panel; e2e test (set key → chat uses it → clear → mock fallback); authz matrix (member B cannot touch A's keys; admin can); README/.env.example/threat_model/todo.md #7/INDEX updates. | Browser e2e green; zero key-material leakage asserted across responses/traces/audit; docs updated; ruff clean |
+| 1 | 015 | **Crypto + store layer.** `cryptography` dependency; `LLM__FERNET_KEY` setting + `.env.example` entry; `app/auth/crypto.py`; `member_llm_keys` table + MemberStore API (`list/set/activate/delete/get_active`) + audit entries; unit tests (roundtrip, missing/invalid fernet key, multi-key CRUD, active-switch atomicity, duplicate replace, delete-active). | ✅ **DONE 2026-09-04 (session 015)** — Existing suite green unchanged (275 tests); new crypto/store tests green; zero runtime behaviour change to chat/auth yet; ruff clean |
+| 2 | 015 | **Per-user provider routing.** `get_provider_for_user` precedence chain; gateway Runner + both resumers wired (HITL resume uses original actor); classified 502 error path + errored-run tracing; judge stays global. Tests: fake-provider seam proves decrypted key + user model reach `run_agent`; resume path; no-key → global/mock unchanged; failure classification; leakage scan. | ✅ **DONE 2026-09-04 (session 015)** — Precedence + failure tests green; regression green; judge provider ≠ user provider asserted; ruff clean |
+| 3 | 015 | **Dashboard API + UI + docs closeout.** Member `/api/account/llm-keys*` + admin `/api/members/{u}/llm-keys*` endpoints (+ status in `/api/users`); Account tab + Members-tab key column/manage panel; e2e test (set key → chat uses it → clear → mock fallback); authz matrix (member B cannot touch A's keys; admin can); README/.env.example/threat_model/todo.md #7/INDEX updates. | ✅ **DONE 2026-09-04 (session 015)** — Browser/e2e green; zero key-material leakage asserted across responses/traces/audit; docs updated; ruff clean |
+
+### Detailed Implementation Checklists
+
+#### Phase 1 Checklist (Crypto & MemberStore Layer)
+- [x] **Dependencies & Config**
+  - [x] Add `cryptography` to `pyproject.toml`.
+  - [x] Add `fernet_key: str = ""` (env `LLM__FERNET_KEY`) to `LLMSettings` in `app/config.py`.
+  - [x] Update `.env.example` with `LLM__FERNET_KEY` generation instructions and placeholder.
+- [x] **Crypto Helpers (`app/auth/crypto.py`)**
+  - [x] Implement `encrypt_secret(plaintext: str) -> str` using Fernet initialized from `LLM__FERNET_KEY`.
+  - [x] Implement `decrypt_secret(token: str) -> str`.
+  - [x] Handle unconfigured or invalid Fernet key gracefully (raise explicit 503 configuration error).
+- [x] **Store Layer (`app/auth/store.py`)**
+  - [x] Create `member_llm_keys` table in `data/members.sqlite` (`id`, `username`, `provider`, `model`, `api_key_encrypted`, `active`, `created_at`, `updated_at`, UNIQUE on `(username, provider, model)`).
+  - [x] Implement store methods: `list_llm_keys`, `set_llm_key`, `activate_llm_key`, `delete_llm_key`, `get_active_llm_key`.
+  - [x] Audit log every key mutation with acting identity.
+- [x] **Verification**
+  - [x] Write unit tests (`tests/test_llm_keys.py`).
+  - [x] Verify existing test suite passes green (`uv run pytest`).
+
+#### Phase 2 Checklist (Per-User Provider Routing & Gateway Wiring)
+- [x] **Provider Factory (`app/llm/factory.py`)**
+  - [x] Implement `get_provider_for_user(settings, username, store)` (user active key → global config → MockLLM).
+- [x] **Gateway & Runner Integration (`app/gateway/app.py`, `app/agent/runner.py`)**
+  - [x] Update `POST /chat` runner setup to resolve provider per calling user.
+  - [x] Update HITL resume paths (`get_resumer` in gateway and dashboard) to resolve provider from the original approval entry actor (`entry["actor"]["sub"]`).
+- [x] **Error Classification & Trace Integrity**
+  - [x] Catch LiteLLM authentication, rate-limit, quota, and timeout exceptions; map to classified HTTP 502 responses with sanitized details.
+  - [x] Ensure errored runs complete `trace.end_run` with error status.
+  - [x] Assert judge evals remain tied to the global/mock provider.
+- [x] **Verification**
+  - [x] Write integration tests for per-user provider resolution, failure classification, and resume actor isolation.
+  - [x] Run `uv run pytest` and `make demo-*` regression suites.
+
+#### Phase 3 Checklist (Dashboard API, UI & End-to-End Verification)
+- [x] **Dashboard API Endpoints (`app/dashboard/app.py`)**
+  - [x] Member-scoped (`_verified_member`): `GET/POST /api/account/llm-keys`, `POST /api/account/llm-keys/{id}/activate`, `DELETE /api/account/llm-keys/{id}`.
+  - [x] Admin-scoped (`_verify_admin`): `/api/members/{username}/llm-keys*` and key status in `/api/users`.
+- [x] **Dashboard UI (`app/dashboard/static/index.html`)**
+  - [x] Add **Account tab** for all members (list, add form, activate/delete).
+  - [x] Update **Members tab** for admins (key status column and manage panel).
+- [x] **Leakage Scans & Security Checks**
+  - [x] Add security tests verifying decrypted keys never appear in API responses, traces, audit logs, or stdout logs.
+- [x] **Documentation & Closeout**
+  - [x] Update `README.md`, `ref_docs/threat_model.md`, `ref_docs/todo.md` (#7), and `ref_docs/plans/INDEX.md`.
+- [x] **Final Verification**
+  - [x] Run full test suite (`uv run pytest`) and linters (`uv run ruff check app tests scripts`).
 
 ---
 

@@ -17,6 +17,7 @@ class LLMSettings(BaseModel):
     provider: str = "mock"  # "mock" (offline/CI) | "litellm" (real model)
     model: str = "gemini/gemini-2.0-flash"
     api_key: str | None = None
+    fernet_key: str = ""
     temperature: float = 0.2
     max_tokens: int = 1024
 

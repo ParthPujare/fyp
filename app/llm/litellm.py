@@ -42,7 +42,11 @@ class LiteLLMProvider:
         if tools:
             params["tools"] = tools
 
-        response = litellm.completion(**params, **kwargs)
+        try:
+            response = litellm.completion(**params, **kwargs)
+        except Exception as exc:
+            from app.llm.factory import classify_llm_error
+            raise RuntimeError(classify_llm_error(exc)) from exc
         message = response.choices[0].message
         text = message.content or ""
         # Some providers (e.g. Gemini thinking, DeepSeek-reasoner) return a

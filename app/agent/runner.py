@@ -23,7 +23,7 @@ from app.harness.audit import AuditLog
 from app.harness.enforcer import PolicyEnforcer
 from app.harness.filter import filter_tools
 from app.llm.base import LLMProvider
-from app.llm.factory import get_provider
+from app.llm.factory import get_provider, get_provider_for_user
 from app.memory.approvals import ApprovalStore
 from app.memory.episodic import EpisodicStore
 from app.memory.recall import RecallService
@@ -68,16 +68,16 @@ def _build_deps(
     thread_id: str,
     checkpointer: Any,
 ) -> tuple[AgentDeps, Any]:
-    provider = provider or get_provider(settings)
-    executor = executor or ToolExecutor(settings=settings)
+    if store is None:
+        store = SqliteBaseStore(settings.services.memory_path)
     if trace is None:
         trace = TraceStore(settings.services.data_dir / "trace.sqlite")
     if enforcer is None:
         enforcer = PolicyEnforcer()
     if audit is None:
         audit = AuditLog(settings.services.audit_path)
-    if store is None:
-        store = SqliteBaseStore(settings.services.memory_path)
+    provider = provider or get_provider_for_user(settings, claims.get("sub"), store)
+    executor = executor or ToolExecutor(settings=settings)
     if episodic is None:
         episodic = EpisodicStore(settings.services.memory_path)
     if approvals is None:
@@ -186,7 +186,11 @@ def run_agent(
 
     graph = build_agent_graph(deps, checkpointer=checkpointer)
     initial: dict[str, Any] = {"claims": claims, "input": message}
-    final_state = graph.invoke(initial, config={"configurable": {"thread_id": thread_id}})
+    try:
+        final_state = graph.invoke(initial, config={"configurable": {"thread_id": thread_id}})
+    except Exception as exc:
+        trace.end_run(run_id, {"error": str(exc)})
+        raise
 
     interrupts = final_state.get("__interrupt__") or []
     interrupted = bool(interrupts)
@@ -265,10 +269,14 @@ def resume_agent(
     graph = build_agent_graph(deps, checkpointer=checkpointer)
     from langgraph.types import Command
 
-    final_state = graph.invoke(
-        Command(resume=entry["status"] == "approved"),
-        config={"configurable": {"thread_id": thread_id}},
-    )
+    try:
+        final_state = graph.invoke(
+            Command(resume=entry["status"] == "approved"),
+            config={"configurable": {"thread_id": thread_id}},
+        )
+    except Exception as exc:
+        deps.trace.end_run(run_id, {"error": str(exc)})
+        raise
     reply = final_state.get("reply") or "no reply produced"
     deps.trace.end_run(run_id, {"output": reply, "resumed": True})
     if evals_enabled:

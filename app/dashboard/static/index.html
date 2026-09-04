@@ -87,6 +87,28 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
         <div id="my-memory-body" style="margin-top:8px"></div>
       </div>
     </div>
+    <div id="account-view" class="hidden">
+      <h2>LLM API Keys (BYOK)</h2>
+      <div class="card">
+        <h3>Add or update LLM API key</h3>
+        <div class="row">
+          <select id="acc-provider">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="gemini">Gemini</option>
+            <option value="groq">Groq</option>
+            <option value="other">Other</option>
+          </select>
+          <input type="text" id="acc-model" placeholder="Model string (e.g. openai/gpt-4o-mini)" style="flex:1" autocomplete="off">
+          <input type="password" id="acc-key" placeholder="API key (never shown back)" autocomplete="current-password">
+          <button id="acc-save">Save key</button>
+        </div>
+        <div class="status" id="acc-status"></div>
+      </div>
+      <h3>Your API Key Configurations</h3>
+      <table><thead><tr><th>Provider</th><th>Model</th><th>Status</th><th>Created</th><th></th></tr></thead>
+        <tbody id="acc-keys"></tbody></table>
+    </div>
     <div id="approvals-view" class="hidden">
       <h2>Pending approvals</h2>
       <div id="approvals"></div>
@@ -185,7 +207,7 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
   const $ = (id) => document.getElementById(id);
   const TOKENS = { admin: "harness_admin_token", member: "harness_member_token" };
   const CLAIMS = { admin: "harness_admin_claims", member: "harness_member_claims" };
-  const TAB_LABELS = { chat: "Chat", approvals: "Approvals", users: "Members", depts: "Departments",
+  const TAB_LABELS = { chat: "Chat", account: "Account", approvals: "Approvals", users: "Members", depts: "Departments",
                        skills: "Skills", memory: "Memory", ops: "Ops" };
   const ALL_TABS = Object.keys(TAB_LABELS);
   const ADMIN_TABS = ["approvals", "users", "depts", "skills", "memory", "ops"];
@@ -285,7 +307,7 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
     const nav = $("nav");
     nav.innerHTML = "";
     if (!active || !identities[active]) return;
-    let tabs = ["chat"].concat(tabsForRole());
+    let tabs = ["chat", "account"].concat(tabsForRole());
     tabs.forEach((t) => {
       const b = document.createElement("button");
       b.className = "ghost";
@@ -319,6 +341,7 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
 
   function load(tab) {
     if (tab === "chat") loadChat();
+    if (tab === "account") loadAccount();
     if (tab === "approvals") loadApprovals();
     if (tab === "users") loadUsers();
     if (tab === "depts") loadDepts();
@@ -326,6 +349,70 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
     if (tab === "memory") loadMemory();
     if (tab === "ops") loadOps();
   }
+
+  // ---- Account LLM Keys (BYOK Plan Mk3) ----
+  async function loadAccount() {
+    const list = $("acc-keys");
+    if (!list) return;
+    try {
+      const keys = await api("/api/account/llm-keys");
+      list.innerHTML = "";
+      if (!keys.length) {
+        list.innerHTML = '<tr><td colspan="5" class="muted">No API keys configured (falling back to global provider or MockLLM).</td></tr>';
+        return;
+      }
+      keys.forEach((k) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td><code>${esc(k.provider)}</code></td>
+          <td><code>${esc(k.model)}</code></td>
+          <td>${k.active ? '<span class="pill active">Active</span>' : '<span class="muted">Inactive</span>'}</td>
+          <td><span class="muted">${esc((k.created_at || "").slice(0, 19).replace("T", " "))}</span></td>
+          <td style="text-align:right">
+            ${!k.active ? `<button class="ghost" onclick="activateAccountKey('${k.id}')">Activate</button>` : ""}
+            <button class="bad" onclick="deleteAccountKey('${k.id}')">Delete</button>
+          </td>
+        `;
+        list.appendChild(tr);
+      });
+    } catch (e) { list.innerHTML = `<tr><td colspan="5" style="color:var(--bad)">error: ${esc(e.message)}</td></tr>`; }
+  }
+
+  async function saveAccountKey() {
+    const provider = $("acc-provider").value;
+    const model = $("acc-model").value.trim();
+    const apiKey = $("acc-key").value.trim();
+    const status = $("acc-status");
+    if (!model || !apiKey) { status.textContent = "Model and API key are required."; return; }
+    try {
+      await api("/api/account/llm-keys", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider, model, api_key: apiKey }),
+      });
+      $("acc-model").value = "";
+      $("acc-key").value = "";
+      status.textContent = "API key saved and set active successfully.";
+      loadAccount();
+    } catch (e) { status.textContent = "error: " + e.message; }
+  }
+
+  async function activateAccountKey(id) {
+    try {
+      await api(`/api/account/llm-keys/${id}/activate`, { method: "POST" });
+      loadAccount();
+    } catch (e) { alert(e.message); }
+  }
+
+  async function deleteAccountKey(id) {
+    if (!confirm("Delete this API key configuration?")) return;
+    try {
+      await api(`/api/account/llm-keys/${id}`, { method: "DELETE" });
+      loadAccount();
+    } catch (e) { alert(e.message); }
+  }
+
+  $("acc-save")?.addEventListener("click", saveAccountKey);
 
   function loadCurrent() { if (active) load(currentTab); }
 

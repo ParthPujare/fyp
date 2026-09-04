@@ -297,7 +297,14 @@ def users(
     authorization: str | None = Header(default=None),
 ) -> list[dict[str, Any]]:
     _verify_admin(authorization)
-    return [m.to_public() for m in get_store().list()]
+    store = get_store()
+    out = []
+    for m in store.list():
+        pub = m.to_public()
+        active_key = store.get_active_llm_key(m.username)
+        pub["active_llm_key"] = {"provider": active_key[0], "model": active_key[1]} if active_key else None
+        out.append(pub)
+    return out
 
 
 class MemberCreateRequest(BaseModel):
@@ -804,6 +811,124 @@ def ops_run(
     return {"run_id": run_id, "filter": sorted(sources) or None, "events": tree}
 
 
+class LLMKeyRequest(BaseModel):
+    provider: str
+    model: str
+    api_key: str
+
+
+@app.get("/api/account/llm-keys")
+def get_own_llm_keys(authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+    claims, _token = _verified_member(authorization)
+    store = get_store()
+    return [k.to_public() for k in store.list_llm_keys(claims["sub"])]
+
+
+@app.post("/api/account/llm-keys")
+def set_own_llm_key(
+    req: LLMKeyRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims, _token = _verified_member(authorization)
+    provider = (req.provider or "").strip()
+    model = (req.model or "").strip()
+    api_key = (req.api_key or "").strip()
+    if not provider or not model or not api_key:
+        raise HTTPException(status_code=422, detail="provider, model, and api_key are required")
+    store = get_store()
+    record = store.set_llm_key(claims["sub"], provider, model, api_key, active=True, actor=claims["sub"])
+    return record.to_public()
+
+
+@app.post("/api/account/llm-keys/{key_id}/activate")
+def activate_own_llm_key(
+    key_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims, _token = _verified_member(authorization)
+    store = get_store()
+    try:
+        store.activate_llm_key(claims["sub"], key_id, actor=claims["sub"])
+    except MemberError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "activated", "id": key_id}
+
+
+@app.delete("/api/account/llm-keys/{key_id}")
+def delete_own_llm_key(
+    key_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims, _token = _verified_member(authorization)
+    store = get_store()
+    try:
+        store.delete_llm_key(claims["sub"], key_id, actor=claims["sub"])
+    except MemberError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "deleted", "id": key_id}
+
+
+@app.get("/api/members/{username}/llm-keys")
+def get_member_llm_keys(
+    username: str,
+    authorization: str | None = Header(default=None),
+) -> list[dict[str, Any]]:
+    _verify_admin(authorization)
+    store = get_store()
+    if store.get(username) is None:
+        raise HTTPException(status_code=404, detail=f"member {username!r} not found")
+    return [k.to_public() for k in store.list_llm_keys(username)]
+
+
+@app.post("/api/members/{username}/llm-keys")
+def set_member_llm_key(
+    username: str,
+    req: LLMKeyRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims = _verify_admin(authorization)
+    store = get_store()
+    if store.get(username) is None:
+        raise HTTPException(status_code=404, detail=f"member {username!r} not found")
+    provider = (req.provider or "").strip()
+    model = (req.model or "").strip()
+    api_key = (req.api_key or "").strip()
+    if not provider or not model or not api_key:
+        raise HTTPException(status_code=422, detail="provider, model, and api_key are required")
+    record = store.set_llm_key(username, provider, model, api_key, active=True, actor=claims["sub"])
+    return record.to_public()
+
+
+@app.post("/api/members/{username}/llm-keys/{key_id}/activate")
+def activate_member_llm_key(
+    username: str,
+    key_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims = _verify_admin(authorization)
+    store = get_store()
+    try:
+        store.activate_llm_key(username, key_id, actor=claims["sub"])
+    except MemberError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "activated", "id": key_id}
+
+
+@app.delete("/api/members/{username}/llm-keys/{key_id}")
+def delete_member_llm_key(
+    username: str,
+    key_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims = _verify_admin(authorization)
+    store = get_store()
+    try:
+        store.delete_llm_key(username, key_id, actor=claims["sub"])
+    except MemberError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "deleted", "id": key_id}
+
+
 @app.get("/api/ops/runs/{run_id}/evals")
 def ops_run_evals(
     run_id: str,
@@ -816,3 +941,4 @@ def ops_run_evals(
     if not tree:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
     return [dict(e) for e in tree if e["type"] == "eval"]
+
