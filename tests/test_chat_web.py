@@ -47,7 +47,7 @@ def _member_token(member_store, username: str) -> str:
 
 
 def _fake_sender():
-    def sender(token: str, message: str, thread_id: str | None):
+    def sender(token: str, message: str, thread_id: str | None, key_id: str | None = None):
         return {
             "reply": "echo: " + message,
             "run_id": "r-web",
@@ -73,11 +73,11 @@ def _integration_sender(tmp_path, provider, executor, enforcer, audit_log):
     checkpointer = InMemorySaver()
     recall = RecallService(episodic, enforcer, get_settings().memory)
 
-    def runner(claims, msg, thread_id=None):
+    def runner(claims, msg, thread_id=None, key_id=None):
         return run_agent(
             claims, msg, thread_id=thread_id, provider=provider, executor=executor,
             trace=trace, enforcer=enforcer, audit=audit_log, store=store, episodic=episodic,
-            approvals=approvals, recall=recall, checkpointer=checkpointer,
+            approvals=approvals, recall=recall, checkpointer=checkpointer, key_id=key_id,
         )
 
     def resumer(approval_id):
@@ -90,8 +90,8 @@ def _integration_sender(tmp_path, provider, executor, enforcer, audit_log):
     gclient = TestClient(gateway_app)
     gateway_app.dependency_overrides[gw_get_runner] = lambda: runner
 
-    def sender(token: str, message: str, thread_id: str | None):
-        resp = gclient.post("/chat", json={"token": token, "message": message, "thread_id": thread_id})
+    def sender(token: str, message: str, thread_id: str | None, key_id: str | None = None):
+        resp = gclient.post("/chat", json={"token": token, "message": message, "thread_id": thread_id, "key_id": key_id})
         assert resp.status_code == 200, resp.text
         return resp.json()
 

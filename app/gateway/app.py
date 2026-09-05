@@ -68,11 +68,11 @@ def _get_components() -> dict[str, Any]:
 
 @dataclass
 class Runner:
-    def __call__(self, claims: dict, message: str, thread_id: str | None = None) -> AgentResult:
+    def __call__(self, claims: dict, message: str, thread_id: str | None = None, key_id: str | None = None) -> AgentResult:
         if thread_id is None:
             thread_id = f"user:{claims['sub']}"
         c = _get_components()
-        return run_agent(claims, message, thread_id=thread_id, **c)
+        return run_agent(claims, message, thread_id=thread_id, key_id=key_id, **c)
 
 
 def get_runner() -> Runner:
@@ -98,6 +98,11 @@ class ChatRequest(BaseModel):
     token: str
     message: str
     thread_id: str | None = None
+    key_id: str | None = None
+
+
+class ThreadListRequest(BaseModel):
+    token: str
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -145,7 +150,10 @@ def hello(req: HelloRequest) -> dict:
 @app.post("/chat")
 def chat(req: ChatRequest, runner: Annotated[Runner, Depends(get_runner)]) -> dict:
     claims = _verified_active(req.token)
-    result = runner(claims, req.message, req.thread_id)
+    try:
+        result = runner(claims, req.message, req.thread_id, key_id=req.key_id)
+    except TypeError:
+        result = runner(claims, req.message, req.thread_id)
     return {
         "reply": result.reply,
         "run_id": result.run_id,
@@ -155,6 +163,26 @@ def chat(req: ChatRequest, runner: Annotated[Runner, Depends(get_runner)]) -> di
         "interrupted": result.interrupted,
         "approval_id": result.approval_id,
     }
+
+
+@app.post("/chat/threads")
+def list_threads(req: ThreadListRequest) -> list[str]:
+    claims = _verified_active(req.token)
+    username = claims["sub"]
+    conn = sqlite3.connect(settings.services.checkpoint_path, check_same_thread=False)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT thread_id FROM checkpoints WHERE thread_id LIKE ? OR thread_id LIKE ?",
+            (f"user:{username}", f"user:{username}:%"),
+        ).fetchall()
+        threads = [r[0] for r in rows]
+    except sqlite3.Error:
+        threads = []
+    finally:
+        conn.close()
+    if f"user:{username}" not in threads:
+        threads.insert(0, f"user:{username}")
+    return threads
 
 
 @app.post("/approvals/{approval_id}/decide")

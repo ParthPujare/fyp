@@ -32,7 +32,7 @@ def test_chat_rejects_invalid_token():
 
 
 class FakeRunner:
-    def __call__(self, claims, message, thread_id=None):
+    def __call__(self, claims, message, thread_id=None, key_id=None):
         return AgentResult(
             reply=f"echo: {message}",
             run_id="fake-run",

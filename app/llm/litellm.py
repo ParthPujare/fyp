@@ -15,11 +15,13 @@ class LiteLLMProvider:
         self,
         model: str,
         api_key: str | None = None,
+        base_url: str | None = None,
         temperature: float = 0.2,
         max_tokens: int = 1024,
     ):
         self.model = model
         self.api_key = api_key
+        self.base_url = base_url
         self.temperature = temperature
         self.max_tokens = max_tokens
 
@@ -39,6 +41,13 @@ class LiteLLMProvider:
         }
         if self.api_key:
             params["api_key"] = self.api_key
+            if self.api_key.startswith("AQ."):
+                if not params["model"].startswith("vertex/"):
+                    m_part = params["model"].split("/")[-1]
+                    params["model"] = f"vertex/{m_part}"
+                params["vertex_project"] = "179354142623"
+        if self.base_url:
+            params["api_base"] = self.base_url
         if tools:
             params["tools"] = tools
 

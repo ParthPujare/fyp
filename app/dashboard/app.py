@@ -133,11 +133,11 @@ def get_resumer():
 def get_gateway_sender():
     """Forward a verified member chat to the gateway (SEAM: tests override this)."""
 
-    def _send(token: str, message: str, thread_id: str | None) -> dict:
+    def _send(token: str, message: str, thread_id: str | None, key_id: str | None = None) -> dict:
         try:
             resp = httpx.post(
                 f"{settings.services.gateway_url}/chat",
-                json={"token": token, "message": message, "thread_id": thread_id},
+                json={"token": token, "message": message, "thread_id": thread_id, "key_id": key_id},
                 timeout=60.0,
             )
         except httpx.HTTPError as exc:
@@ -188,6 +188,7 @@ class LoginRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     thread_id: str | None = None
+    key_id: str | None = None
 
 
 class DecideRequest(BaseModel):
@@ -243,7 +244,23 @@ def chat_member(
     (reply/guardrail_hits/tool_calls/interrupted/approval_id/…) is returned
     unchanged so the UI renders it directly. Admin endpoints stay admin-only."""
     _claims, token = _verified_member(authorization)
-    return sender(token, req.message, req.thread_id)
+    return sender(token, req.message, req.thread_id, key_id=req.key_id)
+
+
+@app.get("/api/chat/threads")
+def list_own_threads(authorization: str | None = Header(default=None)) -> list[str]:
+    _claims, token = _verified_member(authorization)
+    try:
+        resp = httpx.post(
+            f"{settings.services.gateway_url}/chat/threads",
+            json={"token": token},
+            timeout=10.0,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"gateway unreachable: {exc}") from exc
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    return resp.json()
 
 
 @app.get("/api/approvals/pending")
@@ -811,6 +828,20 @@ def ops_run(
     return {"run_id": run_id, "filter": sorted(sources) or None, "events": tree}
 
 
+def _normalize_model(provider: str, model: str) -> str:
+    p = provider.lower()
+    m = model.strip()
+    if p == "gemini" and not m.startswith(("gemini/", "vertex/")):
+        return f"gemini/{m}"
+    if p == "vertex" and not m.startswith("vertex/"):
+        return f"vertex/{m}"
+    if p == "groq" and not m.startswith("groq/"):
+        return f"groq/{m}"
+    if p == "anthropic" and not m.startswith("anthropic/"):
+        return f"anthropic/{m}"
+    return m
+
+
 class LLMKeyRequest(BaseModel):
     provider: str
     model: str
@@ -831,7 +862,7 @@ def set_own_llm_key(
 ) -> dict[str, Any]:
     claims, _token = _verified_member(authorization)
     provider = (req.provider or "").strip()
-    model = (req.model or "").strip()
+    model = _normalize_model(provider, req.model or "")
     api_key = (req.api_key or "").strip()
     if not provider or not model or not api_key:
         raise HTTPException(status_code=422, detail="provider, model, and api_key are required")
@@ -891,7 +922,7 @@ def set_member_llm_key(
     if store.get(username) is None:
         raise HTTPException(status_code=404, detail=f"member {username!r} not found")
     provider = (req.provider or "").strip()
-    model = (req.model or "").strip()
+    model = _normalize_model(provider, req.model or "")
     api_key = (req.api_key or "").strip()
     if not provider or not model or not api_key:
         raise HTTPException(status_code=422, detail="provider, model, and api_key are required")

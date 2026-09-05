@@ -67,6 +67,7 @@ def _build_deps(
     run_id: str,
     thread_id: str,
     checkpointer: Any,
+    key_id: str | None = None,
 ) -> tuple[AgentDeps, Any]:
     if store is None:
         store = SqliteBaseStore(settings.services.memory_path)
@@ -76,7 +77,7 @@ def _build_deps(
         enforcer = PolicyEnforcer()
     if audit is None:
         audit = AuditLog(settings.services.audit_path)
-    provider = provider or get_provider_for_user(settings, claims.get("sub"), store)
+    provider = provider or get_provider_for_user(settings, claims.get("sub"), store, key_id=key_id)
     executor = executor or ToolExecutor(settings=settings)
     if episodic is None:
         episodic = EpisodicStore(settings.services.memory_path)
@@ -154,6 +155,7 @@ def run_agent(
     thread_id: str | None = None,
     evals_enabled: bool = True,
     judge_provider: LLMProvider | None = None,
+    key_id: str | None = None,
 ) -> AgentResult:
     settings = settings or get_settings()
     if thread_id is None:
@@ -180,6 +182,7 @@ def run_agent(
         run_id=run_id,
         thread_id=thread_id,
         checkpointer=checkpointer,
+        key_id=key_id,
     )
     trace = deps.trace
     actor = deps.actor

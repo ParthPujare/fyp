@@ -47,6 +47,12 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
                padding:8px 12px; max-width:75%; }
   .chat-assistant { align-self:flex-start; background:#0b1220; border:1px solid var(--line);
                     border-radius:10px; padding:8px 12px; max-width:85%; }
+  #chat-layout { display: flex; gap: 16px; align-items: flex-start; }
+  #chat-sidebar { width: 220px; flex-shrink: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; max-height: 55vh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  #chat-main { flex: 1; display: flex; flex-direction: column; }
+  .thread-item { padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; word-break: break-all; }
+  .thread-item:hover { background: var(--line); }
+  .thread-item.active { background: var(--accent); color: #062a3a; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -70,13 +76,29 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
 
   <section id="content-view" class="hidden">
     <div id="chat-view">
-      <h2>Chat <span class="muted" style="font-weight:normal;font-size:13px" id="chat-identity"></span></h2>
-      <div id="chat-transcript"></div>
-      <div class="row">
-        <input type="text" id="chat-msg" placeholder="message…" style="flex:1">
-        <button id="chat-send">Send</button>
+      <div class="row" style="margin-bottom:12px; justify-content:space-between;">
+        <h2>Chat <span class="muted" style="font-weight:normal;font-size:13px" id="chat-identity"></span></h2>
+        <div class="row">
+          <span class="muted" style="font-size:12px">Model:</span>
+          <select id="chat-model-select">
+            <option value="">Default (Active Key / Global)</option>
+          </select>
+        </div>
       </div>
-      <div class="status muted" id="chat-status"></div>
+      <div id="chat-layout">
+        <div id="chat-sidebar">
+          <button id="new-thread" class="ghost" style="width:100%; margin-bottom:6px;">+ New Chat</button>
+          <div id="threads-list"></div>
+        </div>
+        <div id="chat-main">
+          <div id="chat-transcript"></div>
+          <div class="row">
+            <input type="text" id="chat-msg" placeholder="message…" style="flex:1">
+            <button id="chat-send">Send</button>
+          </div>
+          <div class="status muted" id="chat-status"></div>
+        </div>
+      </div>
       <div class="card" id="my-memory" style="margin-top:16px">
         <div class="row">
           <h3 style="flex:1;margin:0;font-size:14px">My memory
@@ -95,14 +117,16 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
           <select id="acc-provider">
             <option value="openai">OpenAI</option>
             <option value="anthropic">Anthropic</option>
-            <option value="gemini">Gemini</option>
+            <option value="gemini">Gemini (AI Studio)</option>
+            <option value="vertex">Vertex AI (GCP)</option>
             <option value="groq">Groq</option>
             <option value="other">Other</option>
           </select>
-          <input type="text" id="acc-model" placeholder="Model string (e.g. openai/gpt-4o-mini)" style="flex:1" autocomplete="off">
+          <input type="text" id="acc-model" placeholder="Model string (e.g. gpt-4o-mini)" value="gpt-4o-mini" style="flex:1" autocomplete="off">
           <input type="password" id="acc-key" placeholder="API key (never shown back)" autocomplete="current-password">
           <button id="acc-save">Save key</button>
         </div>
+        <div class="muted" style="margin-top:6px;font-size:12px">Tip: Recommended models — OpenAI: <code>gpt-4o-mini</code> | Gemini: <code>gemini/gemini-2.0-flash</code> | Groq: <code>groq/llama-3.3-70b-versatile</code> | Anthropic: <code>anthropic/claude-3-5-sonnet-20241022</code></div>
         <div class="status" id="acc-status"></div>
       </div>
       <h3>Your API Key Configurations</h3>
@@ -413,6 +437,20 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
   }
 
   $("acc-save")?.addEventListener("click", saveAccountKey);
+  const MODEL_PRESETS = {
+    openai: "gpt-4o-mini",
+    anthropic: "anthropic/claude-3-5-sonnet-20241022",
+    gemini: "gemini/gemini-2.0-flash",
+    vertex: "vertex/gemini-2.0-flash",
+    groq: "groq/llama-3.3-70b-versatile",
+    other: "openai/"
+  };
+  $("acc-provider")?.addEventListener("change", (e) => {
+    const p = e.target.value;
+    if (MODEL_PRESETS[p] && $("acc-model")) {
+      $("acc-model").value = MODEL_PRESETS[p];
+    }
+  });
 
   function loadCurrent() { if (active) load(currentTab); }
 
@@ -440,6 +478,54 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
   }
 
   // ---- Chat ------------------------------------------------------------------
+  let currentThreadId = null;
+
+  async function loadChatThreads() {
+    const list = $("threads-list");
+    if (!list) return;
+    try {
+      const threads = await api("/api/chat/threads");
+      list.innerHTML = "";
+      if (!currentThreadId && threads.length) currentThreadId = threads[0];
+      threads.forEach((t) => {
+        const div = document.createElement("div");
+        div.className = "thread-item" + (t === currentThreadId ? " active" : "");
+        div.textContent = t;
+        div.addEventListener("click", () => {
+          currentThreadId = t;
+          $("chat-transcript").innerHTML = "";
+          loadChatThreads();
+        });
+        list.appendChild(div);
+      });
+    } catch (e) {
+      list.innerHTML = '<span class="muted" style="font-size:12px">Could not load threads</span>';
+    }
+  }
+
+  async function loadChatModels() {
+    const sel = $("chat-model-select");
+    if (!sel) return;
+    try {
+      const keys = await api("/api/account/llm-keys");
+      sel.innerHTML = '<option value="">Default (Active Key / Global)</option>';
+      keys.forEach((k) => {
+        const opt = document.createElement("option");
+        opt.value = k.id;
+        opt.textContent = `${k.provider} / ${k.model}` + (k.active ? " (Active)" : "");
+        if (k.active) opt.selected = true;
+        sel.appendChild(opt);
+      });
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  $("new-thread")?.addEventListener("click", () => {
+    currentThreadId = "user:" + (identities[active]?.claims?.sub || "user") + ":" + Math.random().toString(36).substring(2, 8);
+    $("chat-transcript").innerHTML = "";
+    loadChatThreads();
+  });
 
   async function sendChat() {
     const msg = $("chat-msg").value.trim();
@@ -447,12 +533,15 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
     if (!msg || !id) return;
     pushTranscript("user", esc(msg));
     $("chat-status").textContent = "working…";
+    const keyId = $("chat-model-select")?.value || null;
     try {
       const out = await api("/api/chat", { method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: msg }) });
+        body: JSON.stringify({ message: msg, thread_id: currentThreadId, key_id: keyId }) });
+      if (out.thread_id) currentThreadId = out.thread_id;
       pushTranscript("assistant", renderChatTurn(out));
       $("chat-status").textContent = "";
+      loadChatThreads();
       loadMyMemory();
     } catch (e) { $("chat-status").textContent = "error: " + e.message; }
     $("chat-msg").value = "";
@@ -487,7 +576,11 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
     $("chat-transcript").scrollTop = $("chat-transcript").scrollHeight;
   }
 
-  function loadChat() { loadMyMemory(); }
+  function loadChat() {
+    loadChatThreads();
+    loadChatModels();
+    loadMyMemory();
+  }
 
   // ---- My memory (plan_mk2 Phase 5) ----
   let myMemoryCollapsed = false;

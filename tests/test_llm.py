@@ -2,8 +2,9 @@
 
 from app.config import Settings
 from app.llm.factory import get_provider
-from app.llm.litellm import LiteLLMProvider
+from app.llm.gemini_provider import GeminiProvider
 from app.llm.mock import MockLLM
+from app.llm.openai_provider import OpenAIProvider
 
 
 def test_mock_echo_default():
@@ -39,9 +40,17 @@ def test_factory_defaults_to_mock():
     assert isinstance(get_provider(Settings()), MockLLM)
 
 
-def test_factory_routes_to_litellm():
-    settings = Settings(llm={"provider": "litellm", "model": "gpt-4o-mini"})
+def test_factory_routes_to_openai():
+    settings = Settings(llm={"provider": "openai", "model": "gpt-4o-mini", "api_key": "sk-test"})
     provider = get_provider(settings)
-    assert isinstance(provider, LiteLLMProvider)
+    assert isinstance(provider, OpenAIProvider)
     assert provider.model == "gpt-4o-mini"
-    assert provider.temperature == settings.llm.temperature
+
+
+def test_gemini_aq_token_provider():
+    provider = GeminiProvider(
+        api_key="AQ.dummy_key_for_testing",
+        model="gemini-2.0-flash",
+    )
+    assert provider.model == "gemini-2.0-flash"
+    assert provider.api_key.startswith("AQ.")

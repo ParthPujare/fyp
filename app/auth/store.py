@@ -689,6 +689,23 @@ class MemberStore:
         decrypted = decrypt_secret(row["api_key_encrypted"])
         return row["provider"], row["model"], decrypted
 
+    def get_llm_key_by_id(self, username: str, key_id: str) -> tuple[str, str, str] | None:
+        """Returns (provider, model, decrypted_api_key) for user's specific key id, or None."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT provider, model, api_key_encrypted FROM member_llm_keys WHERE id = ? AND username = ?",
+                (key_id, username),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None
+        from app.auth.crypto import decrypt_secret
+
+        decrypted = decrypt_secret(row["api_key_encrypted"])
+        return row["provider"], row["model"], decrypted
+
     def _audit_key(self, actor: str, action: str, username: str) -> None:
         self._audit_entry(actor, action, "llm_key", username)
 

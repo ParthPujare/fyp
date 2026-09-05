@@ -82,7 +82,7 @@ class WebHarness:
         )
         self.provider: MockLLM | None = None
 
-    def run(self, claims, message, thread_id=None):
+    def run(self, claims, message, thread_id=None, key_id=None):
         c = self.components
         return run_agent(
             claims,
@@ -98,11 +98,12 @@ class WebHarness:
             approvals=c["approvals"],
             recall=c["recall"],
             checkpointer=c["checkpointer"],
+            key_id=key_id,
         )
 
     def caller(self):
-        def runner(claims, message, thread_id=None):
-            return self.run(claims, message, thread_id)
+        def runner(claims, message, thread_id=None, key_id=None):
+            return self.run(claims, message, thread_id, key_id=key_id)
 
         return runner
 
@@ -117,9 +118,9 @@ def web(executor, tmp_path):
     gateway_app.dependency_overrides[gw_get_runner] = lambda: harness.caller()
     gclient = TestClient(gateway_app)
 
-    def sender(token, message, thread_id=None):
+    def sender(token, message, thread_id=None, key_id=None):
         resp = gclient.post(
-            "/chat", json={"token": token, "message": message, "thread_id": thread_id}
+            "/chat", json={"token": token, "message": message, "thread_id": thread_id, "key_id": key_id}
         )
         assert resp.status_code == 200, resp.text
         return resp.json()
