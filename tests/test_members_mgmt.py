@@ -23,6 +23,7 @@ from app.auth.jwt import create_token
 from app.auth.store import SEED_DEPARTMENTS, DepartmentExistsError
 from app.auth.users import USERS
 from app.config import get_settings
+from app.dashboard.app import _append_policy_row
 from app.dashboard.app import app as dashboard_app
 from app.harness.enforcer import POLICY_PATH, PolicyEnforcer
 
@@ -44,12 +45,20 @@ def client():
 
 @pytest.fixture
 def tmp_policy(tmp_path):
-    """A copy of the real policy.csv that dashboard writes may safely mutate."""
+    """A copy of the real policy.csv that dashboard writes may safely mutate.
+
+    The assert is load-bearing: if the redirect ever fails to take effect, these
+    tests append department rows to the REAL repo policy.csv instead. Fail here
+    rather than silently mutating tracked policy.
+    """
+    from app.dashboard.app import _policy_csv
+
     dst = tmp_path / "policy.csv"
     shutil.copy(POLICY_PATH, dst)
     settings = get_settings()
     original = settings.services.policy_path
     settings.services.policy_path = dst
+    assert _policy_csv() == dst, "policy redirect not visible to the dashboard"
     try:
         yield dst
     finally:
@@ -237,8 +246,9 @@ def test_register_department_through_api(client, tmp_policy, member_store):
     body = resp.json()
     assert body["name"] == "legal"
     assert body["role"] == "legal_agent"
-    # p row appended to the (temp) policy file
-    assert "p, legal_agent, legal, *, *" in tmp_policy.read_text()
+    # p row present in the (temp) policy file — exactly once, never duplicated
+    rows = tmp_policy.read_text(encoding="utf-8").splitlines()
+    assert rows.count("p, legal_agent, legal, *, *") == 1
     # department visible in the list with members + resources
     depts = client.get("/api/departments", headers=AUTH).json()
     legal = next(d for d in depts if d["name"] == "legal")
@@ -276,6 +286,26 @@ def test_register_department_default_role_and_errors(client, tmp_policy):
     assert client.post(
         "/api/departments", json={"name": "Has Spaces", "service": "c", "service_url": ""}, headers=AUTH
     ).status_code == 422
+
+
+def test_register_department_appends_new_row_once(client, tmp_policy):
+    """A department absent from policy.csv gets its `p` row appended — and a
+    repeat append is a no-op, so re-registration can't grow the file forever."""
+    def lines() -> list[str]:
+        return tmp_policy.read_text(encoding="utf-8").splitlines()
+
+    assert not any("research_agent" in line for line in lines())
+
+    resp = client.post(
+        "/api/departments",
+        json={"name": "research", "service": "research", "service_url": ""},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200
+    assert lines().count("p, research_agent, research, *, *") == 1
+
+    _append_policy_row("research_agent", "research")
+    assert lines().count("p, research_agent, research, *, *") == 1
 
 
 def test_departments_unchanged_for_seeds(client):

@@ -1,7 +1,7 @@
 """Judge evals — LLM-as-judge over a completed run (plan_mk1_core_harness.md §8).
 
-Same provider abstraction as the agent itself (LiteLLM in dev, a scripted
-MockLLM in tests/demo so CI stays deterministic). The judge rates three
+Same provider abstraction as the agent itself (the configured direct provider in
+dev, a scripted MockLLM in tests/demo so CI stays deterministic). The judge rates three
 dimensions (response_quality, injection_resistance, skill_faithfulness) on a
 0–5 scale and returns strict JSON; a parse failure produces a failing check
 with a clear reason rather than silently passing.

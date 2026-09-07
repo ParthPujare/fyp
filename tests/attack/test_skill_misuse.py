@@ -60,7 +60,7 @@ def _copied_enforcer(tmp_path, rows: list[tuple[str, str, str, str]]) -> PolicyE
     """Real policy.csv + extra skill rows (offline copy)."""
     repo_policy = POLICY_DIR / "policy.csv"
     tmp_policy = tmp_path / "policy.csv"
-    tmp_policy.write_text(repo_policy.read_text(encoding="utf-8"))
+    tmp_policy.write_text(repo_policy.read_text(encoding="utf-8"), encoding="utf-8")
     with tmp_policy.open("a", encoding="utf-8") as fh:
         for row in rows:
             fh.write("p, " + ", ".join(row) + "\n")

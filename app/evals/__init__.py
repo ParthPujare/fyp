@@ -1,9 +1,9 @@
 """Evals — auto-eval hook after every completed agent run (plan_mk1_core_harness.md §8).
 
 `evaluate_run` runs the deterministic suite always, and the LLM-as-judge suite
-when a judge provider is available (injected in tests/demo, or when the app
-runs on a real LiteLLM backend). Every result is written back to the trace as
-an `EVAL` event, so scores live alongside the run they grade.
+when a judge provider is available (injected in tests/demo, or when the app is
+configured with a real LLM backend). Every result is written back to the trace
+as an `EVAL` event, so scores live alongside the run they grade.
 """
 
 from __future__ import annotations
@@ -18,12 +18,21 @@ from app.llm.base import LLMProvider
 from app.ops.schema import TraceEventType
 from app.ops.store import TraceStore
 
+OFFLINE_PROVIDERS = frozenset({"", "mock"})
+
 
 def eval_enabled_for_judge(*, judge_provider: LLMProvider | None, llm_provider_name: str) -> bool:
     """Judge runs only when verdicts are meaningful: a provider was injected
     (tests/demo use a scripted MockLLM) or the app is on a real LLM backend.
-    A bare offline MockLLM would just echo the prompt — not a verdict."""
-    return judge_provider is not None or llm_provider_name == "litellm"
+    A bare offline MockLLM would just echo the prompt — not a verdict.
+
+    Any configured backend counts, not one hardcoded name — keying this on
+    ``"litellm"`` meant the judge never ran once the direct providers landed
+    (plan mk5).
+    """
+    if judge_provider is not None:
+        return True
+    return (llm_provider_name or "").strip().lower() not in OFFLINE_PROVIDERS
 
 
 def evaluate_run(

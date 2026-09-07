@@ -14,7 +14,9 @@ class JWTSettings(BaseModel):
 
 
 class LLMSettings(BaseModel):
-    provider: str = "mock"  # "mock" (offline/CI) | "litellm" (real model)
+    # "mock" (offline/CI) | openai | gemini | anthropic | groq | openrouter | custom_openai
+    # ("litellm" is accepted as a legacy alias and resolved from the model prefix)
+    provider: str = "mock"
     model: str = "gemini/gemini-2.0-flash"
     api_key: str | None = None
     base_url: str | None = None

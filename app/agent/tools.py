@@ -32,6 +32,11 @@ class ToolSpec:
     query_params: tuple[str, ...] = ()
     body_fields: tuple[str, ...] = ()
     handler: str = "http"  # "http" | "recall" — routes execution (memory tools have no HTTP endpoint)
+    # (arg name -> wire name) for query params whose service-side name differs from
+    # the LLM-facing arg, e.g. the readable `query` arg -> the services' `q` param.
+    # Without the mapping the param is sent under a name the service ignores, and
+    # the search silently degrades to "return everything".
+    param_aliases: tuple[tuple[str, str], ...] = ()
 
 
 def _t(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -50,6 +55,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {t.name: t for t in [
         required_scope="crm:read",
         risk_level="read",
         query_params=("query",),
+        param_aliases=(("query", "q"),),
     ),
     ToolSpec(
         name="crm_get_customer",
@@ -102,6 +108,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {t.name: t for t in [
         required_scope="hr:read",
         risk_level="read",
         query_params=("query",),
+        param_aliases=(("query", "q"),),
     ),
     ToolSpec(
         name="hr_get_employee",
@@ -323,7 +330,8 @@ class ToolExecutor:
         except ValueError as exc:
             return ToolResult(ok=False, reason="args", content=str(exc))
 
-        params = {k: args[k] for k in tool.query_params if k in args}
+        aliases = dict(tool.param_aliases)
+        params = {aliases.get(k, k): args[k] for k in tool.query_params if k in args}
         body = {k: args[k] for k in tool.body_fields if k in args}
 
         started = time.monotonic()

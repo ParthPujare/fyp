@@ -13,6 +13,7 @@ so tests can override them with in-process components.
 
 from __future__ import annotations
 
+import inspect
 import sqlite3
 from dataclasses import dataclass
 from typing import Annotated, Any
@@ -147,13 +148,38 @@ def hello(req: HelloRequest) -> dict:
     }
 
 
+def _call_runner(runner: Any, claims: dict, message: str, thread_id: str | None, key_id: str | None):
+    """Invoke a runner, passing `key_id` only if it accepts one.
+
+    Tests override `get_runner` with 3-argument callables. Deciding by signature
+    rather than catching TypeError matters: a TypeError raised *inside* the agent
+    would otherwise be swallowed and the whole turn silently re-run without the
+    caller's selected model.
+    """
+    try:
+        params = inspect.signature(runner).parameters
+    except (TypeError, ValueError):  # builtins / C callables have no signature
+        params = {}
+    accepts_key_id = "key_id" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    if accepts_key_id:
+        return runner(claims, message, thread_id, key_id=key_id)
+    return runner(claims, message, thread_id)
+
+
 @app.post("/chat")
 def chat(req: ChatRequest, runner: Annotated[Runner, Depends(get_runner)]) -> dict:
     claims = _verified_active(req.token)
     try:
-        result = runner(claims, req.message, req.thread_id, key_id=req.key_id)
-    except TypeError:
-        result = runner(claims, req.message, req.thread_id)
+        result = _call_runner(runner, claims, req.message, req.thread_id, req.key_id)
+    except (RuntimeError, ValueError) as exc:
+        # Providers raise RuntimeError carrying a classified, sanitized message
+        # (bad key / quota / model not found / upstream 4xx) and ValueError for an
+        # unusable provider config (unknown type, custom endpoint with no base_url).
+        # Surfacing those as 502 keeps the cause visible in the UI instead of a
+        # bare 500 whose only trace is the gateway console.
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {
         "reply": result.reply,
         "run_id": result.run_id,

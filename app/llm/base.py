@@ -69,7 +69,37 @@ class LLMProvider(ABC):
         return self.chat(messages=messages, tools=tools, **kwargs)
 
 
-def classify_llm_error(exc: Exception) -> str:
+def strip_routing_prefix(model: str, *prefixes: str) -> str:
+    """Drop a `<provider>/` routing prefix from a stored model id.
+
+    Saved keys carry LiteLLM-style prefixes (`groq/llama-3.3-70b-versatile`,
+    `anthropic/claude-…`) because that is what the dashboard's model
+    normalization writes. The provider APIs themselves want the bare id. Only the
+    listed prefixes are stripped — OpenRouter slugs are `vendor/model` and must
+    be sent whole.
+    """
+    for prefix in prefixes:
+        if model.startswith(f"{prefix}/"):
+            return model.split("/", 1)[1]
+    return model
+
+
+def classify_llm_error(exc: Exception, *, provider: str = "", model: str = "") -> str:
+    """A short, sanitized reason for a provider failure.
+
+    `provider`/`model` are appended when known: "model not found" is unactionable
+    without saying which model was asked for.
+    """
+    return f"{_classify(exc)}{_error_context(provider, model)}"
+
+
+def _error_context(provider: str, model: str) -> str:
+    if not provider and not model:
+        return ""
+    return f" [provider={provider or 'unknown'}, model={model or 'unknown'}]"
+
+
+def _classify(exc: Exception) -> str:
     msg = str(exc).lower()
     if any(k in msg for k in ["auth", "api key", "unauthorized", "invalid key", "authentication", "401", "incorrect api key"]):
         return "LLM provider authentication failed: invalid API key."

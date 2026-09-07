@@ -36,7 +36,7 @@ def _enforcer_with_skill_rows(tmp_path: Path, rows: list[list[str]]) -> PolicyEn
     """PolicyEnforcer over a copy of the real policy.csv plus extra skill rows."""
     policy = POLICY_DIR / "policy.csv"
     tmp_policy = tmp_path / "policy.csv"
-    with open(policy) as fh:
+    with open(policy, encoding="utf-8") as fh:
         text = fh.read()
     for row in rows:
         text += ",".join(["p"] + row) + "\n"

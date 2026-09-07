@@ -4,7 +4,8 @@ Graph: START → load_memory → agent ⇄ execute_tools → finalize → reflec
 
 - `load_memory` (graph start): asks Casbin which memory scopes this caller may READ,
   distils a frozen snapshot, and injects it as a system message (frozen per session).
-- `agent` calls the LLMProvider protocol (MockLLM/LiteLLM stay as-is).
+- `agent` calls the LLMProvider protocol (MockLLM offline; the caller's BYOK
+  provider otherwise — the graph never knows which).
 - `execute_tools` applies the Casbin intercept, routes memory tools (`recall`) to the
   RecallService, and calls dept services over HTTP. Guardrails bound the loop.
 - `reflect` (graph end, post-response): appends the episodic transcript, extracts

@@ -3,18 +3,25 @@
 A zero-trust security gateway & harness middleware for an Enterprise AI Personal Assistant.
 Every resource — **tools, memory, skills** — is policy-enforced by role, not by what the LLM happens to decide.
 
-> **Status: Milestone 7 (Week 12)** — trajectory viewer + evals harness on top of every milestone before it: **the trace now records everything the model saw** (`PROMPT` / `REASONING` / `CONTEXT_INJECTION` events with a per-event `source`, PII-sanitized before persist), a dashboard **Ops tab** shows run trajectories filterable by source (admin-JWT), and an **auto-eval hook** scores every completed run (deterministic RBAC/trace-completeness checks + optional LLM-as-judge). Deliverables: *"ops tab shows run trajectories filterable by source; eval scores per run"*. See `ref_docs/plans/plan_mk1_core_harness.md` §7–§8.
-
-> **Status (mk2): Phases 1–5 DONE (sessions 010–014)** — store-driven identity + enforcement, any-user web chat, Members/Departments admin UI, and the **browser memory-test** (3-tier scoping walkthrough clickable in the UI via the member "My memory" panel + `GET /api/memory/me`). Phase 6 (report + recorded web demo) is next. See `ref_docs/plans/plan_mk2_web_ui_members.md`.
-
-> **Plans & traceability:** every plan (Mk1 = the original 16-week core, Mk2 = web-UI demo + member management) is indexed in `ref_docs/plans/INDEX.md`; sessions map to plans via `agent_history/INDEX.md`.
+> **Status**
+>
+> | Plan | Scope | State |
+> |---|---|---|
+> | **Mk1** | Core harness — RBAC + intercept, 3-tier memory, HITL, PII sanitizer, skills, trajectory + evals, attack suites A1–A8 | Milestones 1–8 (weeks 1–14) **done**; stretch + report (15–16) open |
+> | **Mk2** | Web UI + member management — any-user chat, Members/Departments admin, browser memory-test | Phases 1–5 **done** (sessions 010–014); Phase 6 (report + recorded demo) open |
+> | **Mk3** | BYOK — per-user LLM API keys, Fernet-encrypted at rest, admin sees status only | **done** (session 015) |
+> | **Mk4** | ChatGPT/Hermes-style chat window — model selector per request, thread sidebar, memory auto-learning | **done** (session 016) |
+> | **Mk5** | Direct provider layer (OpenAI / Gemini / Anthropic / OpenRouter / custom OpenAI-compatible), LiteLLM removed | **in progress** |
+>
+> **Plans & traceability:** every plan is indexed in `ref_docs/plans/INDEX.md`; sessions map to plans via `agent_history/INDEX.md`. Mk1 is the original 16-week plan and is frozen — append-only history, never rewritten.
 
 ## Repo layout
 
 ```
 app/
 ├── auth/       mock JWT login + verify (:8000)
-├── llm/        LiteLLMProvider + MockLLM (script + sequence modes) + factory
+├── llm/        provider ABC + MockLLM (script + sequence modes) + direct providers
+│              (openai/gemini/anthropic/groq/openrouter/custom) + registry + BYOK factory
 ├── ops/        SQLite trace store (append-only, integrity-hashed, per-event source)
 ├── memory/     SqliteBaseStore + scopes, fact extraction, editor (budget), episodic FTS5 recall, approvals, snapshot
 ├── agent/      LangGraph graph (load_memory/agent/tools/finalize/reflect) + HTTP tool registry + skills executor + guardrails + critical-tool HITL gate
@@ -193,8 +200,10 @@ curl -s -X POST localhost:8001/chat \
   decision), **audit pairing** (every audit entry maps to a trace event), and
   guardrail compliance. The **judge suite** (LLM-as-judge over
   response quality / injection resistance / skill faithfulness, 0–5 each) runs
-  when a judge provider is injected (tests/demo = scripted MockLLM) or the app
-  is on a real LiteLLM backend. Every result is written back as an `EVAL` event
+  when a judge provider is injected (tests/demo = scripted MockLLM) or the app is
+  configured with a real backend (any `LLM__PROVIDER` other than `mock`, with a
+  key — a keyless config falls back to mock and the judge is skipped rather than
+  scored on an echo). Every result is written back as an `EVAL` event
   with per-run score; suspended (pre-approval) runs are evaluated only after
   they complete/resume.
 
@@ -309,18 +318,35 @@ member reads `dept/marketing`) and the cross-dept gap (an HR member sees no
 ## Configuration
 
 Copy `.env.example` to `.env` to override settings. Defaults are fully offline:
-`LLM__PROVIDER=mock` (no API key needed). Set `LLM__PROVIDER=litellm` and `LLM__MODEL`/`LLM__API_KEY`
-to use a real model (Gemini free tier default).
+`LLM__PROVIDER=mock` (no API key needed).
+
+For a real model, either:
+
+- **per member (preferred, Mk3)** — sign in and add a key in the dashboard **Account**
+  tab. It is Fernet-encrypted at rest (`LLM__FERNET_KEY`), used server-side only, and
+  never returned by any API; admins see provider/model status, never key material.
+  A member's own key wins over the global config for their runs, and the chat model
+  selector picks between their saved keys per message.
+- **globally** — set `LLM__PROVIDER` (`openai` | `gemini` | `anthropic` | `groq` |
+  `openrouter` | `custom_openai`), `LLM__MODEL`, and `LLM__API_KEY`. `LLM__TEMPERATURE` /
+  `LLM__MAX_TOKENS` apply to both paths. Without a key the app stays on `MockLLM`,
+  so the offline demo never breaks.
+
+`custom_openai` points at any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, a
+gateway) and needs a base URL — `LLM__BASE_URL` globally, or the Base URL field that
+appears in the Account tab when you pick it. The Account dropdown offers exactly the
+providers the registry can build, so an unsupported provider is rejected at save time
+instead of failing on the first message.
 
 ## Tests
 
 `uv run pytest` — all offline:
 - auth: JWT round-trip, expiry, tamper detection, login/me endpoints
 - members: MemberStore seeding, scrypt hashing (no plaintext), create-then-login (molly), `/auth/me` reflects store edits, inactive login 401, lockout guard (last admin / self), reset password, audit logging, `USERS`/`claims_for` read the store
-- llm: MockLLM determinism (script + sequence), factory routing (mock vs litellm)
+- llm: MockLLM determinism (script + sequence), factory routing (mock vs configured provider), the saved BYOK model + decoding settings reaching the request for openai/gemini/anthropic, per-call model override, namespaced OpenRouter default, `anthropic/` prefix stripped
 - trace: chain building, tamper/truncation detection via SHA-256 integrity chain, per-event `source` derivation/override, `list_runs` summaries + legacy-DB migration
 - services: seeded data, CRUD, field validation, PII present for the later sanitize milestone
-- tools: registry ↔ service route mapping, HTTP calls, Casbin gate, call timeout
+- tools: registry ↔ service route mapping, HTTP calls (incl. `param_aliases` — the `query` arg reaches the services as `q`, so a search actually filters), Casbin gate, call timeout
 - agent: single/multi-step runs, cross-dept denial, deny-storm bounded, budget/max-steps/timeouts, critical-tool HITL (suspend → approve/reject, deny-retry), recall PII masking, trace written + integrity + trajectory (PROMPT/REASONING/CONTEXT_INJECTION recorded + sanitized)
 - chat: `/chat` 200/401 + real agent path via dependency override, `/approvals/{id}/decide` 200/401/403/404/409 (admin JWT)
 - policy: Casbin policy matrix (role × dept × resource), deny-by-default, admin wildcard, `pii_*` matrix, `filter_tools` visibility, `intercept` gate + audit, audit determinism
@@ -338,5 +364,7 @@ to use a real model (Gemini free tier default).
 
 ## Next milestones
 
-1. **Plan Mk2** (`ref_docs/plans/plan_mk2_web_ui_members.md`): web-UI demo + member management — chat + any-user login, dynamic members/departments from the dashboard, and the browser memory test are **done (Phases 1–5)**; only the **report + recorded web demo (Phase 6, session 015)** remains.
-2. Mk1 stretch (weeks 15–16): `learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter; trajectory search / replay / fork — remains optional.
+1. **Plan Mk5** (`ref_docs/plans/plan_mk5_custom_byot.md`): finish the direct provider layer. Note the two Mk5 docs currently disagree — `plan_mk5_custom_byot.md` keeps the multi-tenant encrypted vault, `plan_mk5_local_byok.md` replaces it with single-user `.env` config. Pick one before building further.
+2. **Plan Mk2 Phase 6** (`ref_docs/plans/plan_mk2_web_ui_members.md`): report + recorded web demo — the only open Mk2 item.
+3. Mk1 stretch (weeks 15–16): `learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter; trajectory search / replay / fork — remains optional.
+4. Backlog in `ref_docs/todo.md`: dept-head approval role for dept-tier writes, real external tools behind skills (Composio-style), per-user auto-generated skills, admin-only dual-session login.

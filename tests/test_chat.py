@@ -58,6 +58,56 @@ def test_chat_returns_reply_shape():
         gateway_app.dependency_overrides.clear()
 
 
+def test_chat_maps_provider_failure_to_502():
+    """A provider error (bad key / quota / upstream 4xx) must reach the UI with its
+    classified message, not as an opaque 500 whose cause is only in the console."""
+    def failing_runner(claims, message, thread_id=None, key_id=None):
+        raise RuntimeError("LLM provider authentication failed: invalid API key.")
+
+    token = login_token("alice@acme.com")
+    gateway = TestClient(gateway_app)
+    gateway_app.dependency_overrides[get_runner] = lambda: failing_runner
+    try:
+        resp = gateway.post("/chat", json={"token": token, "message": "hi"})
+        assert resp.status_code == 502
+        assert "invalid API key" in resp.json()["detail"]
+    finally:
+        gateway_app.dependency_overrides.clear()
+
+
+def test_chat_passes_key_id_only_to_runners_that_accept_it():
+    """The selected model must reach a key_id-aware runner; a legacy 3-arg runner
+    must still be called (once — the old TypeError fallback re-ran the whole turn)."""
+    seen: dict = {"calls": 0}
+
+    def modern(claims, message, thread_id=None, key_id=None):
+        seen["calls"] += 1
+        seen["key_id"] = key_id
+        return AgentResult(reply="ok", run_id="r", guardrail_hits=[], tool_calls=[])
+
+    def legacy(claims, message, thread_id=None):
+        seen["calls"] += 1
+        return AgentResult(reply="ok", run_id="r", guardrail_hits=[], tool_calls=[])
+
+    token = login_token("alice@acme.com")
+    gateway = TestClient(gateway_app)
+    try:
+        gateway_app.dependency_overrides[get_runner] = lambda: modern
+        assert gateway.post(
+            "/chat", json={"token": token, "message": "hi", "key_id": "key-123"}
+        ).status_code == 200
+        assert seen["key_id"] == "key-123"
+
+        seen["calls"] = 0
+        gateway_app.dependency_overrides[get_runner] = lambda: legacy
+        assert gateway.post(
+            "/chat", json={"token": token, "message": "hi", "key_id": "key-123"}
+        ).status_code == 200
+        assert seen["calls"] == 1
+    finally:
+        gateway_app.dependency_overrides.clear()
+
+
 def test_approval_decision_requires_admin_token(tmp_path, dept_apps, executor, enforcer, audit_log):
     """A non-admin JWT is rejected from /approvals/{id}/decide (403), invalid JWT is 401."""
     from app.memory.approvals import ApprovalStore

@@ -37,6 +37,8 @@ from app.config import get_settings
 from app.harness.audit import AuditLog
 from app.harness.enforcer import PolicyEnforcer
 from app.harness.sanitize import MASK
+from app.llm.base import strip_routing_prefix
+from app.llm.registry import PROVIDERS, is_supported, normalize_provider_type
 from app.memory.approvals import ApprovalStore
 from app.memory.edit import MemoryEditor
 from app.memory.episodic import EpisodicStore
@@ -143,10 +145,26 @@ def get_gateway_sender():
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"gateway unreachable: {exc}") from exc
         if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+            raise HTTPException(status_code=resp.status_code, detail=_gateway_detail(resp))
         return resp.json()
 
     return _send
+
+
+def _gateway_detail(resp: httpx.Response) -> str:
+    """The gateway's own error message, unwrapped from its JSON envelope.
+
+    Without this the browser gets `{"detail": "{\\"detail\\": \\"…\\"}"}` — or, for an
+    unhandled 500, the opaque string "Internal Server Error" with the real cause
+    left behind in the gateway's console.
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return resp.text
+    if isinstance(body, dict) and isinstance(body.get("detail"), str):
+        return body["detail"]
+    return resp.text
 
 
 def _verified_member(authorization: str | None) -> tuple[dict[str, Any], str]:
@@ -441,7 +459,7 @@ def departments(
     # policy.csv `p` rows can still introduce/denote knowable objects per domain;
     # merge them so the resource list stays accurate even before registration.
     policy_objs: dict[str, list[str]] = {}
-    with open(_policy_csv()) as fh:
+    with open(_policy_csv(), encoding="utf-8") as fh:
         for line in fh:
             parts = [p.strip() for p in line.split(",")]
             if len(parts) == 5 and parts[0] == "p" and parts[3] != "*":
@@ -515,15 +533,40 @@ def register_department(
 def _append_policy_row(role: str, dept: str) -> None:
     """Append `p, <role>, <dept>, *, *` to policy.csv so the role is grantable.
     `_build`/`load_policy` re-reads the file on the next version guard rebuild,
-    so the newly-registered role takes effect without a restart."""
-    line = f"p, {role}, {dept}, *, *\n"
-    with open(_policy_csv(), "a") as fh:
-        fh.write(line)
+    so the newly-registered role takes effect without a restart.
+
+    Idempotent: an equivalent row already in the file is left alone. Casbin
+    ignores duplicate rows, but an unconditional append grows the file without
+    bound every time a department is re-registered.
+    """
+    row = ("p", role, dept, "*", "*")
+    if _policy_has_row(row):
+        return
+    with open(_policy_csv(), "a", encoding="utf-8") as fh:
+        fh.write(f"p, {role}, {dept}, *, *\n")
+
+
+def _policy_has_row(row: tuple[str, ...]) -> bool:
+    """True iff policy.csv already carries this row (whitespace-insensitive)."""
+    with open(_policy_csv(), encoding="utf-8") as fh:
+        for line in fh:
+            if line.lstrip().startswith("#"):
+                continue
+            if tuple(p.strip() for p in line.split(",")) == row:
+                return True
+    return False
 
 
 def _policy_csv() -> Path:
-    """Policy file — settings-driven so tests can point at a temp copy."""
-    return settings.services.policy_path
+    """Policy file — settings-driven so tests can point at a temp copy.
+
+    Resolved through `get_settings()` on every call, not through this module's
+    import-time `settings` snapshot: any test that calls `get_settings.cache_clear()`
+    (the BYOK suites do, to reload `LLM__FERNET_KEY`) replaces the cached Settings
+    instance, and a redirect applied to the new instance would not be seen here —
+    so department registration would append to the REAL repo policy.csv.
+    """
+    return get_settings().services.policy_path
 
 
 def _skill_registry() -> SkillRegistry:
@@ -547,7 +590,7 @@ def _skill_summary(skill: Any) -> dict[str, Any]:
 def _has_policy_row(skill_name: str) -> bool:
     """True iff policy.csv has a non-admin `p, role, dom, skill_<name>, use` row."""
     needle = f"skill_{skill_name}"
-    with open(_policy_csv()) as fh:
+    with open(_policy_csv(), encoding="utf-8") as fh:
         for line in fh:
             parts = [p.strip() for p in line.split(",")]
             if len(parts) == 5 and parts[0] == "p" and parts[1] != "admin" and parts[3] == needle:
@@ -829,23 +872,44 @@ def ops_run(
 
 
 def _normalize_model(provider: str, model: str) -> str:
-    p = provider.lower()
-    m = model.strip()
-    if p == "gemini" and not m.startswith(("gemini/", "vertex/")):
-        return f"gemini/{m}"
-    if p == "vertex" and not m.startswith("vertex/"):
-        return f"vertex/{m}"
-    if p == "groq" and not m.startswith("groq/"):
-        return f"groq/{m}"
-    if p == "anthropic" and not m.startswith("anthropic/"):
-        return f"anthropic/{m}"
-    return m
+    """Store the model id exactly as that provider's API expects it.
+
+    This used to ADD a LiteLLM routing prefix (`groq/`, `gemini/`, `anthropic/`).
+    The direct providers reject those, and the prefix corrupts ids that carry a
+    real vendor namespace of their own: Groq serves GPT-OSS as
+    `openai/gpt-oss-20b`, which became `groq/openai/gpt-oss-20b` and 404'd. Now it
+    only removes a prefix that redundantly repeats the selected provider, so both
+    `groq/llama-3.3-70b-versatile` and `openai/gpt-oss-20b` end up correct.
+    """
+    return strip_routing_prefix((model or "").strip(), normalize_provider_type(provider))
 
 
 class LLMKeyRequest(BaseModel):
     provider: str
     model: str
     api_key: str
+    base_url: str = ""  # required for custom_openai; blank = the provider's default
+
+
+def _validated_key_fields(req: LLMKeyRequest) -> tuple[str, str, str, str]:
+    """Normalize + validate a BYOK submission (shared by the member and admin routes)."""
+    provider = (req.provider or "").strip()
+    model = _normalize_model(provider, req.model or "")
+    api_key = (req.api_key or "").strip()
+    base_url = (req.base_url or "").strip()
+    if not provider or not model or not api_key:
+        raise HTTPException(status_code=422, detail="provider, model, and api_key are required")
+    if not is_supported(provider):
+        raise HTTPException(
+            status_code=422,
+            detail=f"unsupported provider {provider!r}; supported: {sorted(PROVIDERS)}",
+        )
+    if normalize_provider_type(provider) == "custom_openai" and not base_url:
+        raise HTTPException(
+            status_code=422,
+            detail="base_url is required for a custom OpenAI-compatible endpoint",
+        )
+    return provider, model, api_key, base_url
 
 
 @app.get("/api/account/llm-keys")
@@ -861,13 +925,10 @@ def set_own_llm_key(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     claims, _token = _verified_member(authorization)
-    provider = (req.provider or "").strip()
-    model = _normalize_model(provider, req.model or "")
-    api_key = (req.api_key or "").strip()
-    if not provider or not model or not api_key:
-        raise HTTPException(status_code=422, detail="provider, model, and api_key are required")
-    store = get_store()
-    record = store.set_llm_key(claims["sub"], provider, model, api_key, active=True, actor=claims["sub"])
+    provider, model, api_key, base_url = _validated_key_fields(req)
+    record = get_store().set_llm_key(
+        claims["sub"], provider, model, api_key, active=True, actor=claims["sub"], base_url=base_url
+    )
     return record.to_public()
 
 
@@ -921,12 +982,10 @@ def set_member_llm_key(
     store = get_store()
     if store.get(username) is None:
         raise HTTPException(status_code=404, detail=f"member {username!r} not found")
-    provider = (req.provider or "").strip()
-    model = _normalize_model(provider, req.model or "")
-    api_key = (req.api_key or "").strip()
-    if not provider or not model or not api_key:
-        raise HTTPException(status_code=422, detail="provider, model, and api_key are required")
-    record = store.set_llm_key(username, provider, model, api_key, active=True, actor=claims["sub"])
+    provider, model, api_key, base_url = _validated_key_fields(req)
+    record = store.set_llm_key(
+        username, provider, model, api_key, active=True, actor=claims["sub"], base_url=base_url
+    )
     return record.to_public()
 
 

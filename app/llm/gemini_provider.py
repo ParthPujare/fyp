@@ -8,10 +8,40 @@ import httpx
 from app.llm.base import LLMProvider, LLMResponse, Message, ToolCall, ToolSchema, classify_llm_error
 
 
+def _function_declaration(
+    name: str | None, description: str | None, parameters: dict[str, Any] | None
+) -> dict[str, Any]:
+    """One Gemini functionDeclaration from an OpenAI-style tool schema.
+
+    Gemini rejects an OBJECT-typed `parameters` with no properties
+    ("should be non-empty for OBJECT type", HTTP 400) — and it rejects the whole
+    request, not just that declaration, so a single no-argument tool in the list
+    (`crm_list_campaigns`, `finance_list_accounts`, …) breaks every call. For a
+    tool that takes no arguments the field is omitted entirely.
+    """
+    declaration: dict[str, Any] = {"name": name, "description": description}
+    params = parameters or {}
+    if params.get("properties"):
+        declaration["parameters"] = params
+    return declaration
+
+
 class GeminiProvider(LLMProvider):
-    def __init__(self, api_key: str, base_url: str | None = None, model: str | None = None, **kwargs: Any):
+    DEFAULT_MODEL = "gemini-2.0-flash"
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        **kwargs: Any,
+    ):
         self.api_key = api_key
-        self.model = model or "gemini-2.0-flash"
+        self.model = model or self.DEFAULT_MODEL
+        self.temperature = temperature
+        self.max_tokens = max_tokens
         self.base_url = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
 
     def chat(
@@ -24,10 +54,16 @@ class GeminiProvider(LLMProvider):
         top_p: float | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        model_name = model or "gemini-2.0-flash"
+        # The caller's saved model/decoding settings are the defaults; a per-call
+        # argument overrides them (never the other way round).
+        model_name = model or self.model
         # Strip model prefix if passed (e.g. "gemini/gemini-2.0-flash" -> "gemini-2.0-flash")
         if "/" in model_name:
             model_name = model_name.split("/")[-1]
+        if temperature is None:
+            temperature = self.temperature
+        if max_tokens is None:
+            max_tokens = self.max_tokens
 
         system_instruction = None
         contents = []
@@ -77,18 +113,14 @@ class GeminiProvider(LLMProvider):
             declarations = []
             for t in tools:
                 if isinstance(t, ToolSchema):
-                    declarations.append({
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    })
+                    declarations.append(_function_declaration(t.name, t.description, t.parameters))
                 else:
                     fn = t.get("function", t)
-                    declarations.append({
-                        "name": fn.get("name"),
-                        "description": fn.get("description"),
-                        "parameters": fn.get("parameters", {}),
-                    })
+                    declarations.append(
+                        _function_declaration(
+                            fn.get("name"), fn.get("description"), fn.get("parameters")
+                        )
+                    )
             if declarations:
                 body["tools"] = [{"functionDeclarations": declarations}]
 
@@ -106,7 +138,9 @@ class GeminiProvider(LLMProvider):
                     raise RuntimeError(f"Gemini API error ({res.status_code}): {res.text}")
                 data = res.json()
         except Exception as exc:
-            raise RuntimeError(classify_llm_error(exc)) from exc
+            raise RuntimeError(
+                classify_llm_error(exc, provider="gemini", model=model_name)
+            ) from exc
 
         candidates = data.get("candidates", [])
         if not candidates:

@@ -251,12 +251,14 @@ class LLMKeyRecord:
     active: bool
     created_at: str
     updated_at: str
+    base_url: str = ""  # required for custom_openai; blank = the provider default
 
     def to_public(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "provider": self.provider,
             "model": self.model,
+            "base_url": self.base_url,
             "active": self.active,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -328,6 +330,7 @@ class MemberStore:
                     provider          TEXT NOT NULL,
                     model             TEXT NOT NULL,
                     api_key_encrypted TEXT NOT NULL,
+                    base_url          TEXT NOT NULL DEFAULT '',
                     active            INTEGER NOT NULL DEFAULT 0,
                     created_at        TEXT NOT NULL,
                     updated_at        TEXT NOT NULL,
@@ -335,6 +338,14 @@ class MemberStore:
                 )
                 """
             )
+            # Migration: DBs created before custom OpenAI-compatible endpoints
+            # predate `base_url`. SQLite has no ADD COLUMN IF NOT EXISTS.
+            try:
+                conn.execute(
+                    "ALTER TABLE member_llm_keys ADD COLUMN base_url TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass
             conn.commit()
         finally:
             conn.close()
@@ -563,7 +574,7 @@ class MemberStore:
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT id, username, provider, model, active, created_at, updated_at "
+                "SELECT id, username, provider, model, base_url, active, created_at, updated_at "
                 "FROM member_llm_keys WHERE username = ? ORDER BY provider, model",
                 (username,),
             ).fetchall()
@@ -575,6 +586,7 @@ class MemberStore:
                 username=r["username"],
                 provider=r["provider"],
                 model=r["model"],
+                base_url=r["base_url"] or "",
                 active=bool(r["active"]),
                 created_at=r["created_at"],
                 updated_at=r["updated_at"],
@@ -590,6 +602,7 @@ class MemberStore:
         api_key_plaintext: str,
         active: bool = True,
         actor: str | None = None,
+        base_url: str = "",
     ) -> LLMKeyRecord:
         if self.get(username) is None:
             raise MemberError(f"member {username!r} not found")
@@ -612,15 +625,17 @@ class MemberStore:
                 if existing:
                     key_id = existing["id"]
                     conn.execute(
-                        "UPDATE member_llm_keys SET api_key_encrypted = ?, active = ?, updated_at = ? WHERE id = ?",
-                        (encrypted, 1 if active else 0, now, key_id),
+                        "UPDATE member_llm_keys SET api_key_encrypted = ?, base_url = ?, active = ?,"
+                        " updated_at = ? WHERE id = ?",
+                        (encrypted, base_url, 1 if active else 0, now, key_id),
                     )
                 else:
                     key_id = str(uuid.uuid4())
                     conn.execute(
-                        "INSERT INTO member_llm_keys (id, username, provider, model, api_key_encrypted, active, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (key_id, username, provider, model, encrypted, 1 if active else 0, now, now),
+                        "INSERT INTO member_llm_keys (id, username, provider, model, api_key_encrypted,"
+                        " base_url, active, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (key_id, username, provider, model, encrypted, base_url, 1 if active else 0, now, now),
                     )
         finally:
             conn.close()
@@ -672,14 +687,26 @@ class MemberStore:
             conn.close()
         self._audit_key(actor or username, f"delete_key:{key_id}", username)
 
-    def get_active_llm_key(self, username: str) -> tuple[str, str, str] | None:
-        """Returns (provider, model, decrypted_api_key) for user's active key, or None."""
+    def get_active_llm_key(self, username: str) -> tuple[str, str, str, str] | None:
+        """(provider, model, decrypted_api_key, base_url) for the user's active key."""
+        return self._llm_key_row(
+            "SELECT provider, model, api_key_encrypted, base_url FROM member_llm_keys"
+            " WHERE username = ? AND active = 1",
+            (username,),
+        )
+
+    def get_llm_key_by_id(self, username: str, key_id: str) -> tuple[str, str, str, str] | None:
+        """(provider, model, decrypted_api_key, base_url) for one of the user's keys."""
+        return self._llm_key_row(
+            "SELECT provider, model, api_key_encrypted, base_url FROM member_llm_keys"
+            " WHERE id = ? AND username = ?",
+            (key_id, username),
+        )
+
+    def _llm_key_row(self, query: str, params: tuple[Any, ...]) -> tuple[str, str, str, str] | None:
         conn = self._connect()
         try:
-            row = conn.execute(
-                "SELECT provider, model, api_key_encrypted FROM member_llm_keys WHERE username = ? AND active = 1",
-                (username,),
-            ).fetchone()
+            row = conn.execute(query, params).fetchone()
         finally:
             conn.close()
         if not row:
@@ -687,24 +714,7 @@ class MemberStore:
         from app.auth.crypto import decrypt_secret
 
         decrypted = decrypt_secret(row["api_key_encrypted"])
-        return row["provider"], row["model"], decrypted
-
-    def get_llm_key_by_id(self, username: str, key_id: str) -> tuple[str, str, str] | None:
-        """Returns (provider, model, decrypted_api_key) for user's specific key id, or None."""
-        conn = self._connect()
-        try:
-            row = conn.execute(
-                "SELECT provider, model, api_key_encrypted FROM member_llm_keys WHERE id = ? AND username = ?",
-                (key_id, username),
-            ).fetchone()
-        finally:
-            conn.close()
-        if not row:
-            return None
-        from app.auth.crypto import decrypt_secret
-
-        decrypted = decrypt_secret(row["api_key_encrypted"])
-        return row["provider"], row["model"], decrypted
+        return row["provider"], row["model"], decrypted, row["base_url"] or ""
 
     def _audit_key(self, actor: str, action: str, username: str) -> None:
         self._audit_entry(actor, action, "llm_key", username)

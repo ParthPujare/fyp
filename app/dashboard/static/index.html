@@ -118,15 +118,18 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
             <option value="openai">OpenAI</option>
             <option value="anthropic">Anthropic</option>
             <option value="gemini">Gemini (AI Studio)</option>
-            <option value="vertex">Vertex AI (GCP)</option>
             <option value="groq">Groq</option>
-            <option value="other">Other</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="custom_openai">Custom (OpenAI-compatible)</option>
           </select>
           <input type="text" id="acc-model" placeholder="Model string (e.g. gpt-4o-mini)" value="gpt-4o-mini" style="flex:1" autocomplete="off">
           <input type="password" id="acc-key" placeholder="API key (never shown back)" autocomplete="current-password">
           <button id="acc-save">Save key</button>
         </div>
-        <div class="muted" style="margin-top:6px;font-size:12px">Tip: Recommended models — OpenAI: <code>gpt-4o-mini</code> | Gemini: <code>gemini/gemini-2.0-flash</code> | Groq: <code>groq/llama-3.3-70b-versatile</code> | Anthropic: <code>anthropic/claude-3-5-sonnet-20241022</code></div>
+        <div class="row hidden" id="acc-base-url-row" style="margin-top:8px">
+          <input type="text" id="acc-base-url" placeholder="Base URL — e.g. http://localhost:1234/v1" style="flex:1" autocomplete="off">
+        </div>
+        <div class="muted" style="margin-top:6px;font-size:12px">Tip: Recommended models — OpenAI: <code>gpt-4o-mini</code> | Gemini: <code>gemini-2.0-flash</code> | Groq: <code>llama-3.3-70b-versatile</code> | Anthropic: <code>claude-3-5-sonnet-20241022</code> | OpenRouter: <code>openai/gpt-4o-mini</code></div>
         <div class="status" id="acc-status"></div>
       </div>
       <h3>Your API Key Configurations</h3>
@@ -293,13 +296,23 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
 
   // ---- api ----------------------------------------------------------------
 
+  // FastAPI errors arrive as {"detail": "..."}; show the message, not the envelope.
+  async function errorMessage(resp) {
+    const body = await resp.text();
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed && typeof parsed.detail === "string") return parsed.detail;
+    } catch (e) { /* not JSON — fall through to the raw body */ }
+    return body || (resp.status + " " + resp.statusText);
+  }
+
   async function api(path, opts = {}) {
     const headers = Object.assign({}, opts.headers || {});
     const id = identities[active];
     if (id && id.token) headers["Authorization"] = "Bearer " + id.token;
     const resp = await fetch(path, Object.assign({}, opts, { headers }));
     if (resp.status === 401 || resp.status === 403) { invalidate(active); throw new Error("unauthorized"); }
-    if (!resp.ok) { const body = await resp.text(); throw new Error(body); }
+    if (!resp.ok) { throw new Error(await errorMessage(resp)); }
     return resp.json();
   }
 
@@ -389,7 +402,7 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td><code>${esc(k.provider)}</code></td>
-          <td><code>${esc(k.model)}</code></td>
+          <td><code>${esc(k.model)}</code>${k.base_url ? `<div class="muted" style="font-size:11px">${esc(k.base_url)}</div>` : ""}</td>
           <td>${k.active ? '<span class="pill active">Active</span>' : '<span class="muted">Inactive</span>'}</td>
           <td><span class="muted">${esc((k.created_at || "").slice(0, 19).replace("T", " "))}</span></td>
           <td style="text-align:right">
@@ -402,20 +415,34 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
     } catch (e) { list.innerHTML = `<tr><td colspan="5" style="color:var(--bad)">error: ${esc(e.message)}</td></tr>`; }
   }
 
+  // Only a custom OpenAI-compatible endpoint needs its URL supplied; every other
+  // provider has a fixed one.
+  function syncBaseUrlField() {
+    const sel = $("acc-provider"), row = $("acc-base-url-row");
+    if (!sel || !row) return;
+    row.classList.toggle("hidden", sel.value !== "custom_openai");
+  }
+
   async function saveAccountKey() {
     const provider = $("acc-provider").value;
     const model = $("acc-model").value.trim();
     const apiKey = $("acc-key").value.trim();
+    const baseUrl = $("acc-base-url").value.trim();
     const status = $("acc-status");
     if (!model || !apiKey) { status.textContent = "Model and API key are required."; return; }
+    if (provider === "custom_openai" && !baseUrl) {
+      status.textContent = "Base URL is required for a custom OpenAI-compatible endpoint.";
+      return;
+    }
     try {
       await api("/api/account/llm-keys", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ provider, model, api_key: apiKey }),
+        body: JSON.stringify({ provider, model, api_key: apiKey, base_url: baseUrl }),
       });
       $("acc-model").value = "";
       $("acc-key").value = "";
+      $("acc-base-url").value = "";
       status.textContent = "API key saved and set active successfully.";
       loadAccount();
     } catch (e) { status.textContent = "error: " + e.message; }
@@ -437,20 +464,23 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
   }
 
   $("acc-save")?.addEventListener("click", saveAccountKey);
+  // One preset per supported provider — the ids each API actually expects.
   const MODEL_PRESETS = {
     openai: "gpt-4o-mini",
-    anthropic: "anthropic/claude-3-5-sonnet-20241022",
-    gemini: "gemini/gemini-2.0-flash",
-    vertex: "vertex/gemini-2.0-flash",
-    groq: "groq/llama-3.3-70b-versatile",
-    other: "openai/"
+    anthropic: "claude-3-5-sonnet-20241022",
+    gemini: "gemini-2.0-flash",
+    groq: "llama-3.3-70b-versatile",
+    openrouter: "openai/gpt-4o-mini",
+    custom_openai: ""
   };
   $("acc-provider")?.addEventListener("change", (e) => {
     const p = e.target.value;
-    if (MODEL_PRESETS[p] && $("acc-model")) {
+    if ($("acc-model") && MODEL_PRESETS[p] !== undefined) {
       $("acc-model").value = MODEL_PRESETS[p];
     }
+    syncBaseUrlField();
   });
+  syncBaseUrlField();
 
   function loadCurrent() { if (active) load(currentTab); }
 

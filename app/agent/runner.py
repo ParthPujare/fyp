@@ -24,6 +24,7 @@ from app.harness.enforcer import PolicyEnforcer
 from app.harness.filter import filter_tools
 from app.llm.base import LLMProvider
 from app.llm.factory import get_provider, get_provider_for_user
+from app.llm.mock import MockLLM
 from app.memory.approvals import ApprovalStore
 from app.memory.episodic import EpisodicStore
 from app.memory.recall import RecallService
@@ -126,7 +127,14 @@ def _fire_evals(
         judge_provider=judge_provider, llm_provider_name=settings.llm.provider
     )
     if run_judge and judge_provider is None:
-        judge_provider = get_provider(settings)
+        resolved = get_provider(settings)
+        # A configured backend can still fall back to MockLLM (e.g. no API key).
+        # An un-scripted mock produces an unparseable verdict, so skip the judge
+        # rather than record a bogus failing suite.
+        if isinstance(resolved, MockLLM):
+            run_judge = False
+        else:
+            judge_provider = resolved
     return evaluate_run(
         run_id=run_id,
         actor=deps.actor,

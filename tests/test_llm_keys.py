@@ -53,10 +53,11 @@ def test_store_llm_keys_crud_and_active_switching(member_store, monkeypatch):
     keys = member_store.list_llm_keys(username)
     assert len(keys) == 1
 
-    prov, model, decrypted = member_store.get_active_llm_key(username)
+    prov, model, decrypted, base_url = member_store.get_active_llm_key(username)
     assert prov == "openai"
     assert model == "gpt-4o"
     assert decrypted == "sk-openai-abc"
+    assert base_url == ""
 
     # Set second key (active=True should deactivate first)
     k2 = member_store.set_llm_key(username, "anthropic", "claude-3-5-sonnet", "sk-ant-xyz", active=True)
@@ -72,14 +73,14 @@ def test_store_llm_keys_crud_and_active_switching(member_store, monkeypatch):
             assert k.active is True
 
     # Active key should be anthropic
-    prov, model, decrypted = member_store.get_active_llm_key(username)
+    prov, model, decrypted, _ = member_store.get_active_llm_key(username)
     assert prov == "anthropic"
     assert model == "claude-3-5-sonnet"
     assert decrypted == "sk-ant-xyz"
 
     # Switch active back to k1
     member_store.activate_llm_key(username, k1.id)
-    prov, model, decrypted = member_store.get_active_llm_key(username)
+    prov, model, decrypted, _ = member_store.get_active_llm_key(username)
     assert prov == "openai"
     assert decrypted == "sk-openai-abc"
 
@@ -106,8 +107,33 @@ def test_set_llm_key_duplicate_updates_secret(member_store, monkeypatch):
     # Should update in place (same provider + model)
     assert k1.id == k2.id
     assert len(member_store.list_llm_keys(username)) == 1
-    _, _, decrypted = member_store.get_active_llm_key(username)
+    _, _, decrypted, _ = member_store.get_active_llm_key(username)
     assert decrypted == "new-key"
+
+
+def test_custom_openai_key_round_trips_base_url(member_store, monkeypatch):
+    """A custom OpenAI-compatible endpoint is only usable if its URL is stored."""
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("LLM__FERNET_KEY", Fernet.generate_key().decode("ascii"))
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    record = member_store.set_llm_key(
+        "alice@acme.com",
+        "custom_openai",
+        "local-model",
+        "sk-local",
+        active=True,
+        base_url="http://localhost:1234/v1",
+    )
+    assert record.base_url == "http://localhost:1234/v1"
+    assert record.to_public()["base_url"] == "http://localhost:1234/v1"
+
+    prov, model, decrypted, base_url = member_store.get_active_llm_key("alice@acme.com")
+    assert (prov, model, decrypted) == ("custom_openai", "local-model", "sk-local")
+    assert base_url == "http://localhost:1234/v1"
 
 
 def test_llm_keys_audit_logged(member_store, monkeypatch):

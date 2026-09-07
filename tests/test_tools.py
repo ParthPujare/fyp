@@ -50,6 +50,21 @@ def test_executor_search_customer(dept_apps, executor):
     assert result.data and any(c["id"] == 1 and "Acme" in c["company"] for c in result.data)
 
 
+def test_executor_search_actually_filters(dept_apps, executor):
+    """The `query` arg must reach the service as its `q` param — otherwise the
+    filter is dropped and every row comes back (param_aliases in ToolSpec)."""
+    hit = executor.execute(TOOL_REGISTRY["crm_search_customer"], {"query": "acme"})
+    every = executor.execute(TOOL_REGISTRY["crm_search_customer"], {"query": ""})
+    assert [c["company"] for c in hit.data] == ["Acme Corp"]
+    assert len(every.data) > len(hit.data)
+
+
+def test_executor_search_employees_filters(dept_apps, executor):
+    result = executor.execute(TOOL_REGISTRY["hr_search_employees"], {"query": "devops"})
+    assert result.ok
+    assert [row["name"] for row in result.data] == ["Dave Kumar"]
+
+
 def test_executor_get_customer(dept_apps, executor):
     result = executor.execute(TOOL_REGISTRY["crm_get_customer"], {"id": 1})
     assert result.ok and result.data["name"] == "Alice Zhang"

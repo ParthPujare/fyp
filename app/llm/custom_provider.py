@@ -6,6 +6,8 @@ from app.llm.openai_provider import OpenAIProvider
 
 
 class CustomOpenAICompatibleProvider(OpenAIProvider):
+    PROVIDER_NAME = "custom_openai"
+
     def __init__(self, api_key: str, base_url: str | None = None, **kwargs: Any):
         if not base_url:
             raise ValueError("base_url is required for CustomOpenAICompatibleProvider")
