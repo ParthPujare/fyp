@@ -1,5 +1,6 @@
 """LLM provider ABC, message structures, tool schemas, and response types (Hermes-style, no LiteLLM)."""
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -88,9 +89,28 @@ def classify_llm_error(exc: Exception, *, provider: str = "", model: str = "") -
     """A short, sanitized reason for a provider failure.
 
     `provider`/`model` are appended when known: "model not found" is unactionable
-    without saying which model was asked for.
+    without saying which model was asked for. The upstream SDK message is also
+    preserved (key material redacted, truncated) because it carries the real
+    cause — e.g. "no longer available to new users, use models/gemini-3.6-flash"
+    or "project has been denied access" — which a generic label would hide.
     """
-    return f"{_classify(exc)}{_error_context(provider, model)}"
+    return f"{_classify(exc)}{_error_context(provider, model)}{_upstream_detail(exc)}"
+
+
+def _upstream_detail(exc: Exception) -> str:
+    detail = _sanitize_upstream(str(exc))
+    if not detail:
+        return ""
+    return f" (upstream: {detail})"
+
+
+def _sanitize_upstream(msg: str) -> str:
+    """Redact credential-looking material, then truncate to one useful snippet."""
+    redacted = re.sub(r"AIza[0-9A-Za-z_\-]{10,}", "***REDACTED_API_KEY***", msg)
+    redacted = re.sub(r"AQ\.[0-9A-Za-z_\-.]{10,}", "***REDACTED_API_KEY***", redacted)
+    redacted = re.sub(r"(?i)(api[_-]?key\s*[:=]\s*)([^\s&;'\"]+)", r"\1***REDACTED***", redacted)
+    single_line = " ".join(redacted.split())
+    return single_line[:400]
 
 
 def _error_context(provider: str, model: str) -> str:
@@ -111,4 +131,4 @@ def _classify(exc: Exception) -> str:
         return "LLM provider model not found (404): the requested model name is invalid or deprecated."
     if any(k in msg for k in ["timeout", "timed out", "deadline"]):
         return "LLM provider request timed out."
-    return f"LLM provider error: {exc.__class__.__name__} - {exc}"
+    return f"LLM provider error: {exc.__class__.__name__} - {_sanitize_upstream(str(exc)) or 'unknown error'}"

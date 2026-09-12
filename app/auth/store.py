@@ -646,6 +646,67 @@ class MemberStore:
                 return k
         raise MemberError("Failed to store LLM key")
 
+    def update_llm_key(
+        self,
+        username: str,
+        key_id: str,
+        model: str | None = None,
+        base_url: str | None = None,
+        active: bool | None = None,
+        actor: str | None = None,
+    ) -> LLMKeyRecord:
+        if self.get(username) is None:
+            raise MemberError(f"member {username!r} not found")
+        now = _now()
+        conn = self._connect()
+        try:
+            with conn:
+                row = conn.execute(
+                    "SELECT id, provider, model, base_url, active FROM member_llm_keys WHERE id = ? AND username = ?",
+                    (key_id, username),
+                ).fetchone()
+                if not row:
+                    raise MemberError("LLM key not found")
+
+                new_model = model.strip() if model is not None else row["model"]
+                new_base_url = base_url.strip() if base_url is not None else (row["base_url"] or "")
+                new_active = active if active is not None else bool(row["active"])
+
+                if not new_model:
+                    raise MemberError("model cannot be empty")
+
+                if new_model != row["model"]:
+                    conflict = conn.execute(
+                        "SELECT id FROM member_llm_keys WHERE username = ? AND provider = ? AND model = ? AND id != ?",
+                        (username, row["provider"], new_model, key_id),
+                    ).fetchone()
+                    if conflict:
+                        raise MemberError(
+                            f"LLM key configuration for provider {row['provider']!r} and model {new_model!r} already exists"
+                        )
+
+                if new_active and not row["active"]:
+                    conn.execute(
+                        "UPDATE member_llm_keys SET active = 0, updated_at = ? WHERE username = ?",
+                        (now, username),
+                    )
+
+                conn.execute(
+                    "UPDATE member_llm_keys SET model = ?, base_url = ?, active = ?, updated_at = ? WHERE id = ?",
+                    (new_model, new_base_url, 1 if new_active else 0, now, key_id),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise MemberError(f"Failed to update LLM key: {exc}") from exc
+        finally:
+            conn.close()
+
+        self._audit_key(actor or username, f"update_key:{key_id}:{new_model}", username)
+        keys = self.list_llm_keys(username)
+        for k in keys:
+            if k.id == key_id:
+                return k
+        raise MemberError("Failed to retrieve updated LLM key")
+
     def activate_llm_key(self, username: str, key_id: str, actor: str | None = None) -> None:
         now = _now()
         conn = self._connect()

@@ -891,6 +891,12 @@ class LLMKeyRequest(BaseModel):
     base_url: str = ""  # required for custom_openai; blank = the provider's default
 
 
+class LLMKeyUpdateRequest(BaseModel):
+    model: str | None = None
+    base_url: str | None = None
+    active: bool | None = None
+
+
 def _validated_key_fields(req: LLMKeyRequest) -> tuple[str, str, str, str]:
     """Normalize + validate a BYOK submission (shared by the member and admin routes)."""
     provider = (req.provider or "").strip()
@@ -944,6 +950,40 @@ def activate_own_llm_key(
     except MemberError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"status": "activated", "id": key_id}
+
+
+@app.patch("/api/account/llm-keys/{key_id}")
+def update_own_llm_key(
+    key_id: str,
+    req: LLMKeyUpdateRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims, _token = _verified_member(authorization)
+    store = get_store()
+    keys = [k for k in store.list_llm_keys(claims["sub"]) if k.id == key_id]
+    if not keys:
+        raise HTTPException(status_code=404, detail="LLM key not found")
+    current_key = keys[0]
+
+    normalized_model = None
+    if req.model is not None:
+        model_str = req.model.strip()
+        if not model_str:
+            raise HTTPException(status_code=422, detail="model cannot be empty")
+        normalized_model = _normalize_model(current_key.provider, model_str)
+
+    try:
+        record = store.update_llm_key(
+            claims["sub"],
+            key_id,
+            model=normalized_model,
+            base_url=req.base_url,
+            active=req.active,
+            actor=claims["sub"],
+        )
+    except MemberError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return record.to_public()
 
 
 @app.delete("/api/account/llm-keys/{key_id}")
@@ -1002,6 +1042,43 @@ def activate_member_llm_key(
     except MemberError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"status": "activated", "id": key_id}
+
+
+@app.patch("/api/members/{username}/llm-keys/{key_id}")
+def update_member_llm_key(
+    username: str,
+    key_id: str,
+    req: LLMKeyUpdateRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims = _verify_admin(authorization)
+    store = get_store()
+    if store.get(username) is None:
+        raise HTTPException(status_code=404, detail=f"member {username!r} not found")
+    keys = [k for k in store.list_llm_keys(username) if k.id == key_id]
+    if not keys:
+        raise HTTPException(status_code=404, detail="LLM key not found")
+    current_key = keys[0]
+
+    normalized_model = None
+    if req.model is not None:
+        model_str = req.model.strip()
+        if not model_str:
+            raise HTTPException(status_code=422, detail="model cannot be empty")
+        normalized_model = _normalize_model(current_key.provider, model_str)
+
+    try:
+        record = store.update_llm_key(
+            username,
+            key_id,
+            model=normalized_model,
+            base_url=req.base_url,
+            active=req.active,
+            actor=claims["sub"],
+        )
+    except MemberError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return record.to_public()
 
 
 @app.delete("/api/members/{username}/llm-keys/{key_id}")

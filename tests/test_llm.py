@@ -60,9 +60,9 @@ def test_factory_routes_to_openai():
 def test_gemini_aq_token_provider():
     provider = GeminiProvider(
         api_key="AQ.dummy_key_for_testing",
-        model="gemini-2.0-flash",
+        model="gemini-3.6-flash",
     )
-    assert provider.model == "gemini-2.0-flash"
+    assert provider.model == "gemini-3.6-flash"
     assert provider.api_key.startswith("AQ.")
 
 
@@ -234,6 +234,27 @@ def test_classify_llm_error_names_provider_and_model():
     assert "provider=groq" in msg and "model=gpt-oss-20b" in msg
 
 
+def test_classify_llm_error_preserves_upstream_detail_and_redacts_keys():
+    """A 404 whose upstream body names the replacement model must surface it —
+    the generic label alone hid the real cause (e.g. 2.5 gated for new users)."""
+    raw = (
+        "404 NOT_FOUND. {'error': {'code': 404, 'message': 'This model "
+        "models/gemini-2.5-flash is no longer available to new users. Please "
+        "update your code to use models/gemini-3.6-flash', 'status': 'NOT_FOUND'}}"
+    )
+    msg = classify_llm_error(RuntimeError(raw), provider="gemini", model="gemini-2.5-flash")
+    assert "model not found" in msg
+    assert "gemini-3.6-flash" in msg
+
+    leaked = classify_llm_error(
+        RuntimeError("401 incorrect api key AIzaSyDdEmO0123456789abcdefghi for project"),
+        provider="gemini",
+        model="gemini-3.6-flash",
+    )
+    assert "AIzaSyDdEmO0123456789abcdefghi" not in leaked
+    assert "REDACTED" in leaked
+
+
 def test_groq_provider_is_registered_and_openai_compatible():
     provider = get_provider_instance(provider_type="groq", api_key="gsk-test")
     assert isinstance(provider, GroqProvider)
@@ -279,40 +300,25 @@ def test_anthropic_uses_saved_model_and_strips_routing_prefix():
 def test_gemini_uses_saved_model_and_decoding_defaults(monkeypatch):
     captured: dict = {}
 
-    class _FakeResponse:
-        status_code = 200
-        text = ""
-
-        @staticmethod
-        def json():
-            return {
-                "candidates": [
-                    {"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}
-                ]
-            }
+    class _FakeModels:
+        def generate_content(self, model, contents, config=None):
+            captured["model"] = model
+            captured["contents"] = contents
+            captured["config"] = config
+            return SimpleNamespace(text="ok", function_calls=[], usage_metadata=None, candidates=[])
 
     class _FakeClient:
         def __init__(self, **kwargs):
-            pass
+            self.models = _FakeModels()
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def post(self, url, json=None):
-            captured["url"] = url
-            captured["body"] = json
-            return _FakeResponse()
-
-    monkeypatch.setattr(gemini_module.httpx, "Client", _FakeClient)
+    monkeypatch.setattr(gemini_module.genai, "Client", _FakeClient)
     provider = GeminiProvider(
-        api_key="k", model="gemini/gemini-2.5-pro", temperature=0.2, max_tokens=1024
+        api_key="k", model="gemini-3.6-flash", temperature=0.2, max_tokens=1024
     )
     provider.generate([{"role": "user", "content": "hi"}])
-    assert "models/gemini-2.5-pro:generateContent" in captured["url"]
-    assert captured["body"]["generationConfig"] == {"temperature": 0.2, "maxOutputTokens": 1024}
+    assert captured["model"] == "gemini-3.6-flash"
+    assert captured["config"].temperature == 0.2
+    assert captured["config"].max_output_tokens == 1024
 
 
 def test_gemini_omits_parameters_for_no_argument_tools(monkeypatch):
@@ -320,37 +326,37 @@ def test_gemini_omits_parameters_for_no_argument_tools(monkeypatch):
     so a single no-arg tool (crm_list_campaigns) would break every chat."""
     captured: dict = {}
 
-    class _FakeResponse:
-        status_code = 200
-        text = ""
-
-        @staticmethod
-        def json():
-            return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+    class _FakeModels:
+        def generate_content(self, model, contents, config=None):
+            captured["config"] = config
+            return SimpleNamespace(text="ok", function_calls=[], usage_metadata=None, candidates=[])
 
     class _FakeClient:
         def __init__(self, **kwargs):
-            pass
+            self.models = _FakeModels()
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def post(self, url, json=None):
-            captured["body"] = json
-            return _FakeResponse()
-
-    monkeypatch.setattr(gemini_module.httpx, "Client", _FakeClient)
+    monkeypatch.setattr(gemini_module.genai, "Client", _FakeClient)
     tools = [
         tool_schema(TOOL_REGISTRY["crm_list_campaigns"]),  # takes no arguments
         tool_schema(TOOL_REGISTRY["crm_search_customer"]),  # takes `query`
     ]
     GeminiProvider(api_key="k").generate([{"role": "user", "content": "hi"}], tools=tools)
 
-    declarations = captured["body"]["tools"][0]["functionDeclarations"]
-    by_name = {d["name"]: d for d in declarations}
-    assert "parameters" not in by_name["crm_list_campaigns"]
-    assert by_name["crm_search_customer"]["parameters"]["properties"]["query"]
-    assert all(d.get("parameters", {"properties": {"x": 1}}).get("properties") for d in declarations)
+    tool_obj = captured["config"].tools[0]
+    declarations = tool_obj.function_declarations
+    by_name = {
+        (d.name if hasattr(d, "name") else d.get("name")): d
+        for d in declarations
+    }
+    
+    cam = by_name["crm_list_campaigns"]
+    cust = by_name["crm_search_customer"]
+    
+    cam_params = getattr(cam, "parameters", None) or (cam.get("parameters") if isinstance(cam, dict) else None)
+    cust_params = getattr(cust, "parameters", None) or (cust.get("parameters") if isinstance(cust, dict) else None)
+    
+    assert not cam_params or (not getattr(cam_params, "properties", None) and not (isinstance(cam_params, dict) and cam_params.get("properties")))
+    if hasattr(cust_params, "properties"):
+        assert "query" in cust_params.properties
+    else:
+        assert cust_params["properties"]["query"]

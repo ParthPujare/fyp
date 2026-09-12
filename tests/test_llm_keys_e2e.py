@@ -148,7 +148,7 @@ def test_model_ids_are_stored_as_the_provider_expects():
     assert _normalize_model("groq", "groq/llama-3.3-70b-versatile") == "llama-3.3-70b-versatile"
     assert _normalize_model("groq", "openai/gpt-oss-20b") == "openai/gpt-oss-20b"
     assert _normalize_model("groq", "llama-3.3-70b-versatile") == "llama-3.3-70b-versatile"
-    assert _normalize_model("gemini", "gemini/gemini-2.0-flash") == "gemini-2.0-flash"
+    assert _normalize_model("gemini", "gemini/gemini-3.6-flash") == "gemini-3.6-flash"
     assert _normalize_model("anthropic", "anthropic/claude-3-5-sonnet") == "claude-3-5-sonnet"
     assert _normalize_model("openrouter", "openai/gpt-4o-mini") == "openai/gpt-4o-mini"
     assert _normalize_model("openai", "  gpt-4o-mini  ") == "gpt-4o-mini"

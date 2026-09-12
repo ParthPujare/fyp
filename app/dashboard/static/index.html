@@ -129,7 +129,7 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
         <div class="row hidden" id="acc-base-url-row" style="margin-top:8px">
           <input type="text" id="acc-base-url" placeholder="Base URL — e.g. http://localhost:1234/v1" style="flex:1" autocomplete="off">
         </div>
-        <div class="muted" style="margin-top:6px;font-size:12px">Tip: Recommended models — OpenAI: <code>gpt-4o-mini</code> | Gemini: <code>gemini-2.0-flash</code> | Groq: <code>llama-3.3-70b-versatile</code> | Anthropic: <code>claude-3-5-sonnet-20241022</code> | OpenRouter: <code>openai/gpt-4o-mini</code></div>
+        <div class="muted" style="margin-top:6px;font-size:12px">Tip: Recommended models — OpenAI: <code>gpt-4o-mini</code> | Gemini: <code>gemini-3.6-flash</code> / <code>gemini-3.5-flash-lite</code> | Groq: <code>llama-3.3-70b-versatile</code> | Anthropic: <code>claude-3-5-sonnet-20241022</code> | OpenRouter: <code>openai/gpt-4o-mini</code></div>
         <div class="status" id="acc-status"></div>
       </div>
       <h3>Your API Key Configurations</h3>
@@ -402,12 +402,31 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td><code>${esc(k.provider)}</code></td>
-          <td><code>${esc(k.model)}</code>${k.base_url ? `<div class="muted" style="font-size:11px">${esc(k.base_url)}</div>` : ""}</td>
+          <td>
+            ${k.active ? `
+              <span class="model-display" data-id="${k.id}" data-model="${esc(k.model)}">${esc(k.model)}${k.base_url ? `<div class="muted" style="font-size:11px">${esc(k.base_url)}</div>` : ""}</span>
+              <span class="model-edit hidden" data-id="${k.id}">
+                <input type="text" class="model-input" value="${esc(k.model)}" style="width:100%;padding:4px;font-size:12px">
+                <button class="ghost ml-2" onclick="saveModel('${k.id}')">Save</button>
+                <button class="ghost" onclick="cancelModel('${k.id}')">Cancel</button>
+              </span>
+            ` : `
+              <span class="model-display hidden" data-id="${k.id}" data-model="${esc(k.model)}">${esc(k.model)}${k.base_url ? `<div class="muted" style="font-size:11px">${esc(k.base_url)}</div>` : ""}</span>
+              <span class="model-edit" data-id="${k.id}">
+                <input type="text" class="model-input" value="${esc(k.model)}" style="width:100%;padding:4px;font-size:12px">
+                <button class="ghost ml-2" onclick="saveModel('${k.id}')">Save</button>
+                <button class="ghost" onclick="cancelModel('${k.id}')">Cancel</button>
+              </span>
+            `
+            }
+            }
+          </td>
           <td>${k.active ? '<span class="pill active">Active</span>' : '<span class="muted">Inactive</span>'}</td>
           <td><span class="muted">${esc((k.created_at || "").slice(0, 19).replace("T", " "))}</span></td>
           <td style="text-align:right">
             ${!k.active ? `<button class="ghost" onclick="activateAccountKey('${k.id}')">Activate</button>` : ""}
             <button class="bad" onclick="deleteAccountKey('${k.id}')">Delete</button>
+            ${k.active ? `<button class="ghost" onclick="editModel('${k.id}')">Edit</button>` : ""}
           </td>
         `;
         list.appendChild(tr);
@@ -448,6 +467,60 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
     } catch (e) { status.textContent = "error: " + e.message; }
   }
 
+  // --- Inline model editing for saved keys ---
+
+  function editModel(keyId) {
+    const display = $(`#acc-keys span.model-display[data-id="${keyId}"]`);
+    const edit = $(`#acc-keys span.model-edit[data-id="${keyId}"]`);
+    if (display && edit) {
+      display.classList.add("hidden");
+      edit.classList.remove("hidden");
+      const input = edit.querySelector("input.model-input");
+      if (input) input.focus();
+    }
+  }
+
+  function saveModel(keyId) {
+    const input = $(`#acc-keys span.model-edit[data-id="${keyId}"] input.model-input`);
+    const buttonSave = $(`#acc-keys span.model-edit[data-id="${keyId}"] button:first-child`);
+    const buttonCancel = $(`#acc-keys span.model-edit[data-id="${keyId}"] button:last-child`);
+    if (!input || !buttonSave) return;
+    const newModel = input.value.trim();
+    if (!newModel) { alert("Model name cannot be empty"); cancelModel(keyId); return; }
+    // Send PATCH to update the model
+    api("/api/account/llm-keys/" + keyId, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: newModel })
+    }).then(() => {
+      loadAccount();
+      // Re-select the row to update display
+      const row = $(`#acc-keys tr`).filter((i, el) => el.dataset.id === keyId);
+      if (row) {
+        const display = row.querySelector("span.model-display");
+        const edit = row.querySelector("span.model-edit");
+        if (display) display.textContent = newModel;
+        if (edit) edit.querySelector("input.model-input").value = newModel;
+        display.classList.remove("hidden");
+        edit.classList.add("hidden");
+      }
+    }).catch(e => {
+      alert("Failed to save model: " + e.message);
+      cancelModel(keyId);
+    });
+  }
+
+  function cancelModel(keyId) {
+    const display = $(`#acc-keys span.model-display[data-id="${keyId}"]`);
+    const edit = $(`#acc-keys span.model-edit[data-id="${keyId}"]`);
+    if (display && edit) {
+      display.classList.remove("hidden");
+      edit.classList.add("hidden");
+      const input = edit.querySelector("input.model-input");
+      if (input) input.value = display.getAttribute("data-model") || "";
+    }
+  }
+
   async function activateAccountKey(id) {
     try {
       await api(`/api/account/llm-keys/${id}/activate`, { method: "POST" });
@@ -468,7 +541,7 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
   const MODEL_PRESETS = {
     openai: "gpt-4o-mini",
     anthropic: "claude-3-5-sonnet-20241022",
-    gemini: "gemini-2.0-flash",
+    gemini: "gemini-3.6-flash",
     groq: "llama-3.3-70b-versatile",
     openrouter: "openai/gpt-4o-mini",
     custom_openai: ""
