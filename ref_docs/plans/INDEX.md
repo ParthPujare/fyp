@@ -16,6 +16,7 @@ original 16-week plan** (`ref_docs/plans/plan_mk1_core_harness.md`) and is froze
 | Mk5 | Custom Hermes-style BYOT LLM layer (no LiteLLM, direct SDKs + HTTP, multi-user encrypted storage & UI management) | In Progress | 2026-09-05 → | Direct SDK & HTTP provider implementations (OpenAI, Gemini AI Studio, Anthropic, OpenRouter, Custom OpenAI) replacing LiteLLM | [./plan_mk5_custom_byot.md](./plan_mk5_custom_byot.md) |
 | Mk6 | Official Google GenAI SDK Integration for Gemini Provider (`google-genai`) | **DONE 2026-09-09 (session 017)** | 2026-09-09 → | Migrate GeminiProvider from direct httpx to official `google-genai` SDK while keeping other providers fully isolated | [./plan_mk6_google_sdk.md](./plan_mk6_google_sdk.md) |
 | Mk7 | Gemini provider hardening + editable BYOK key models | **Phase 1 DONE 2026-09-12 (session 018)**; Phase 2 (key replacement + live verify) open | 2026-09-12 → | Editable saved-key models, sanitized upstream error detail, defaults on `gemini-3.6-flash` | [./plan_mk7_gemini_hardening.md](./plan_mk7_gemini_hardening.md) |
+| Mk8 | Chat UI declutter + correct memory learning (separate memory tab, title/error/input fixes, LLM extraction) | In Progress | 2026-09-12 → | Uncluttered chat (no inline memory, no `user:` noise, multiline, first-message titles) + memory stores only relevant facts | [./plan_mk8_chat_cleanup.md](./plan_mk8_chat_cleanup.md) |
 
 ## Rules
 

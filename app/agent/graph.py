@@ -115,6 +115,27 @@ def _sanitize_messages(
     return out
 
 
+def _relevant_facts(
+    messages: list[dict[str, Any]], claims: dict[str, Any], deps: AgentDeps
+) -> list[Any]:
+    """Mk8 #6: prefer LLM relevance extraction; heuristic fallback offline."""
+    from app.llm.mock import MockLLM
+
+    user_texts = [str(m.get("content", "")) for m in messages if m.get("role") == "user"]
+    asst_texts = [str(m.get("content", "")) for m in messages if m.get("role") == "assistant"]
+    user_msg = user_texts[-1] if user_texts else ""
+    assistant_reply = asst_texts[-1] if asst_texts else ""
+    if not isinstance(deps.provider, MockLLM) and len(user_msg.strip()) >= 8:
+        try:
+            from app.memory.llm_extract import build_messages, parse_response
+
+            resp = deps.provider.generate(build_messages(user_msg, assistant_reply), tools=[])
+            return parse_response(getattr(resp, "text", "") or "", claims)
+        except Exception:  # noqa: BLE001 - LLM extract failure falls back to heuristics
+            return extract_facts(messages, claims)
+    return extract_facts(messages, claims)
+
+
 def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
     def load_memory(state: AgentState) -> dict[str, Any]:
         claims = state["claims"]
@@ -431,7 +452,17 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
             )
 
         editor = MemoryEditor(deps.store, deps.memory)
-        for fact in extract_facts(messages, claims):
+        # Mk8 #6: LLM relevance extraction first (durable prefs only); heuristic
+        # fallback keeps offline/Mock runs deterministic.
+        facts = _relevant_facts(messages, claims, deps)
+        if not facts:
+            deps.trace.add_event(
+                deps.run_id,
+                TraceEventType.MEMORY_WRITE,
+                actor,
+                {"decision": "skipped", "reason": "no-relevant-facts"},
+            )
+        for fact in facts:
             resource = {"type": "memory", "id": fact.scope}
             if not deps.enforcer.memory_allowed(fact.scope, "write", claims):
                 deps.audit.log(decision="DENY", resource=resource, actor=actor, run_id=deps.run_id, reason="rbac")

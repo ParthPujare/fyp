@@ -265,6 +265,48 @@ def chat_member(
     return sender(token, req.message, req.thread_id, key_id=req.key_id)
 
 
+def get_dashboard_checkpointer() -> Any:
+    return _get_components()["checkpointer"]
+
+
+def _thread_messages_local(checkpointer: Any, thread_id: str, limit: int = 50) -> list[dict[str, str]]:
+    """Same extraction as the gateway (Mk8 #4); empty on any failure."""
+    try:
+        tuples = list(checkpointer.list({"configurable": {"thread_id": thread_id}}, limit=1))
+    except Exception:  # noqa: BLE001 - history is best-effort, never fail the request
+        return []
+    if not tuples:
+        return []
+    try:
+        values = tuples[0].checkpoint.get("channel_values", {}) if hasattr(tuples[0], "checkpoint") else {}
+    except Exception:  # noqa: BLE001 - malformed checkpoint yields empty history
+        return []
+    raw = values.get("messages", []) if isinstance(values, dict) else []
+    out: list[dict[str, str]] = []
+    for m in raw:
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "type", None)
+        content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+        if role == "human":
+            role = "user"
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            continue
+        out.append({"role": role, "content": content})
+    return out[-limit:]
+
+
+@app.get("/api/chat/threads/{thread_id:path}/history")
+def own_thread_history(
+    thread_id: str,
+    checkpointer: Annotated[Any, Depends(get_dashboard_checkpointer)],
+    authorization: str | None = Header(default=None),
+) -> dict:
+    claims, _token = _verified_member(authorization)
+    username = str(claims.get("sub", ""))
+    if thread_id != f"user:{username}" and not thread_id.startswith(f"user:{username}:"):
+        raise HTTPException(status_code=403, detail="not your thread")
+    return {"thread_id": thread_id, "messages": _thread_messages_local(checkpointer, thread_id)}
+
+
 @app.get("/api/chat/threads")
 def list_own_threads(authorization: str | None = Header(default=None)) -> list[str]:
     _claims, token = _verified_member(authorization)

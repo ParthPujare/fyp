@@ -32,8 +32,9 @@
   th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
   code { background:#0b1220; border:1px solid var(--line); border-radius:4px; padding:1px 5px;
          font-size:12px; }
-input[type=text], input[type=password] { background:#0b1220; border:1px solid var(--line);
+input[type=text], input[type=password], textarea { background:#0b1220; border:1px solid var(--line);
           color:var(--fg); border-radius:6px; padding:7px 10px; }
+  #chat-msg { flex:1; resize:vertical; min-height:44px; max-height:160px; font:14px/1.5 system-ui, sans-serif; }
    select { background:#0b1220; border:1px solid var(--line); color:var(--fg);
             border-radius:6px; padding:7px 10px; }
   .status { margin-top:8px; font-size:13px; }
@@ -44,7 +45,7 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
   #chat-transcript { max-height:60vh; overflow-y:auto; display:flex; flex-direction:column; gap:10px;
                      margin-bottom:12px; }
   .chat-user { align-self:flex-end; background:var(--accent); color:#062a3a; border-radius:10px;
-               padding:8px 12px; max-width:75%; }
+               padding:8px 12px; max-width:75%; white-space:pre-wrap; word-break:break-word; }
   .chat-assistant { align-self:flex-start; background:#0b1220; border:1px solid var(--line);
                     border-radius:10px; padding:8px 12px; max-width:85%; }
   #chat-layout { display: flex; gap: 16px; align-items: flex-start; }
@@ -92,21 +93,12 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
         </div>
         <div id="chat-main">
           <div id="chat-transcript"></div>
-          <div class="row">
-            <input type="text" id="chat-msg" placeholder="message…" style="flex:1">
+          <div class="row" style="align-items:flex-end">
+            <textarea id="chat-msg" placeholder="message… (Enter to send, Shift+Enter for newline)"></textarea>
             <button id="chat-send">Send</button>
           </div>
           <div class="status muted" id="chat-status"></div>
         </div>
-      </div>
-      <div class="card" id="my-memory" style="margin-top:16px">
-        <div class="row">
-          <h3 style="flex:1;margin:0;font-size:14px">My memory
-            <span class="muted" style="font-weight:normal;font-size:12px">(the readable scopes the agent injects — central, own dept, own user)</span></h3>
-          <button class="ghost" id="memory-refresh">Refresh</button>
-          <button class="ghost" id="memory-toggle">Collapse</button>
-        </div>
-        <div id="my-memory-body" style="margin-top:8px"></div>
       </div>
     </div>
     <div id="account-view" class="hidden">
@@ -320,7 +312,9 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
 
   function tabsForRole() {
     if (!active || !identities[active]) return [];
-    return identities[active].claims.role === "admin" ? ADMIN_TABS : [];
+    // Mk8: members get a read-only Memory tab (own scopes via /api/memory/me);
+    // admins keep the full browser.
+    return identities[active].claims.role === "admin" ? ADMIN_TABS : ["memory"];
   }
 
   function render() {
@@ -583,27 +577,86 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
   // ---- Chat ------------------------------------------------------------------
   let currentThreadId = null;
 
+  // Mk8: strip storage prefix `user:<sub>:` for display; raw id stays in `title` attr.
+  function displayThread(t) {
+    const s = String(t || "");
+    const m = s.match(/^user:[^:]+(?::(.*))?$/);
+    if (m) return m[1] ? m[1] : "default";
+    return s;
+  }
+
+  const threadTitles = {}; // thread_id -> first-message snippet (Mk8 #4 cache)
+
+  function threadLabel(t) {
+    if (threadTitles[t]) return threadTitles[t];
+    const short = displayThread(t);
+    return short === "default" ? "New chat" : short;
+  }
+
+  // Unsent new chat, shown optimistically until the server confirms it.
+  let pendingNewThread = null;
+
   async function loadChatThreads() {
     const list = $("threads-list");
     if (!list) return;
     try {
       const threads = await api("/api/chat/threads");
+      // Server now knows about a previously-pending chat — no longer pending.
+      if (pendingNewThread && threads.includes(pendingNewThread)) pendingNewThread = null;
+      const visible = [...threads];
+      if (pendingNewThread && !visible.includes(pendingNewThread)) visible.unshift(pendingNewThread);
       list.innerHTML = "";
-      if (!currentThreadId && threads.length) currentThreadId = threads[0];
-      threads.forEach((t) => {
+      if (!currentThreadId && visible.length) currentThreadId = visible[0];
+      visible.forEach((t) => {
         const div = document.createElement("div");
         div.className = "thread-item" + (t === currentThreadId ? " active" : "");
-        div.textContent = t;
-        div.addEventListener("click", () => {
+        div.textContent = threadLabel(t);
+        div.title = t;
+        div.addEventListener("click", async () => {
+          // Switching away abandons an unsent pending chat (server has nothing).
+          if (pendingNewThread && t !== pendingNewThread) {
+            delete threadTitles[pendingNewThread];
+            pendingNewThread = null;
+          }
           currentThreadId = t;
           $("chat-transcript").innerHTML = "";
+          $("chat-status").textContent = "";
+          if (t !== pendingNewThread) await loadThreadHistory(t);
           loadChatThreads();
         });
         list.appendChild(div);
       });
+      // Best-effort title resolution (server threads only, non-blocking).
+      threads.forEach((t) => { if (!threadTitles[t]) resolveThreadTitle(t); });
     } catch (e) {
       list.innerHTML = '<span class="muted" style="font-size:12px">Could not load threads</span>';
     }
+  }
+
+  async function loadThreadHistory(t) {
+    try {
+      const hist = await api("/api/chat/threads/" + encodeURIComponent(t) + "/history");
+      $("chat-transcript").innerHTML = "";
+      (hist.messages || []).forEach((m) => {
+        if (m.role === "user") pushTranscript("user", esc(m.content));
+        else if (m.role === "assistant") pushTranscript("assistant", `<div>${esc(m.content)}</div>`);
+      });
+    } catch (e) { /* leave transcript empty on history failure */ }
+  }
+
+  async function resolveThreadTitle(t) {
+    try {
+      const hist = await api("/api/chat/threads/" + encodeURIComponent(t) + "/history");
+      const first = (hist.messages || []).find((m) => m.role === "user" && (m.content || "").trim());
+      if (first) {
+        const snippet = first.content.trim().replace(/\s+/g, " ").slice(0, 40);
+        threadTitles[t] = snippet;
+        const list = $("threads-list");
+        if (list) [...list.children].forEach((el) => {
+          if (el.title === t) el.textContent = snippet;
+        });
+      }
+    } catch (e) { /* keep short-id fallback */ }
   }
 
   async function loadChatModels() {
@@ -625,15 +678,25 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
   }
 
   $("new-thread")?.addEventListener("click", () => {
-    currentThreadId = "user:" + (identities[active]?.claims?.sub || "user") + ":" + Math.random().toString(36).substring(2, 8);
+    // Client-generated id so the row appears immediately; the server persists
+    // it on the first send by echoing the same thread_id back.
+    const sub = identities[active]?.claims?.sub || "user";
+    const nid = "user:" + sub + ":" + Math.random().toString(36).substring(2, 8);
+    pendingNewThread = nid;
+    currentThreadId = nid;
+    threadTitles[nid] = "New chat";
     $("chat-transcript").innerHTML = "";
+    $("chat-status").textContent = "";
+    $("chat-msg").value = "";
     loadChatThreads();
+    $("chat-msg").focus();
   });
 
   async function sendChat() {
     const msg = $("chat-msg").value.trim();
     const id = identities[active];
     if (!msg || !id) return;
+    $("chat-status").textContent = "";
     pushTranscript("user", esc(msg));
     $("chat-status").textContent = "working…";
     const keyId = $("chat-model-select")?.value || null;
@@ -641,19 +704,23 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
       const out = await api("/api/chat", { method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ message: msg, thread_id: currentThreadId, key_id: keyId }) });
-      if (out.thread_id) currentThreadId = out.thread_id;
+      if (out.thread_id) {
+        currentThreadId = out.thread_id;
+        if (!threadTitles[out.thread_id] || threadTitles[out.thread_id] === "New chat") {
+          threadTitles[out.thread_id] = msg.replace(/\s+/g, " ").slice(0, 40);
+        }
+      }
       pushTranscript("assistant", renderChatTurn(out));
       $("chat-status").textContent = "";
       loadChatThreads();
-      loadMyMemory();
     } catch (e) { $("chat-status").textContent = "error: " + e.message; }
     $("chat-msg").value = "";
     $("chat-msg").focus();
   }
 
   function renderChatTurn(out) {
-    let html = `<div class="row"><strong style="white-space:pre-wrap">${esc(out.reply)}</strong>` +
-      (out.thread_id ? `<span class="pill">${esc(out.thread_id)}</span>` : "") + `</div>`;
+    // Mk8 #2: no raw thread_id pill — storage id stays internal only.
+    let html = `<div style="white-space:pre-wrap">${esc(out.reply)}</div>`;
     if (out.tool_calls && out.tool_calls.length) {
       html += `<div class="row" style="margin-top:8px">` + out.tool_calls.map((t) =>
         `<span class="badge ${t.outcome === "allowed" ? "approved" : "rejected"}">${esc(t.outcome)}</span>` +
@@ -682,40 +749,7 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
   function loadChat() {
     loadChatThreads();
     loadChatModels();
-    loadMyMemory();
   }
-
-  // ---- My memory (plan_mk2 Phase 5) ----
-  let myMemoryCollapsed = false;
-
-  async function loadMyMemory() {
-    const body = $("my-memory-body");
-    if (!body) return;
-    try {
-      const scopes = await api("/api/memory/me");
-      body.innerHTML = "";
-      if (!scopes.length) {
-        body.innerHTML = '<p class="muted">No readable memory scopes for this identity.</p>';
-        return;
-      }
-      scopes.forEach((s) => {
-        const card = elm(`<div class="card" style="margin-bottom:8px">
-          <h4 style="margin:0 0 4px"><code>${esc(s.scope)}</code> <span class="pill">${s.items.length} facts</span></h4>
-          ${s.items.length
-            ? s.items.map((it) => `<div class="row" style="margin:2px 0"><span class="muted">•</span> <span>${esc(it.text)}</span></div>`).join("")
-            : '<span class="muted">(no facts)</span>'}
-        </div>`);
-        body.appendChild(card);
-      });
-    } catch (e) { body.textContent = "error: " + e.message; }
-  }
-
-  $("memory-refresh").addEventListener("click", loadMyMemory);
-  $("memory-toggle").addEventListener("click", () => {
-    myMemoryCollapsed = !myMemoryCollapsed;
-    $("my-memory-body").classList.toggle("hidden", myMemoryCollapsed);
-    $("memory-toggle").textContent = myMemoryCollapsed ? "Expand" : "Collapse";
-  });
 
   // ---- Approvals --------------------------------------------------------------
 
@@ -1002,34 +1036,41 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
     } catch (e) { $("skill-status").textContent = "error: " + e.message; }
   }
 
-  // ---- Memory ----
+  // ---- Memory (Mk8: admin CRUD, member read-only via /api/memory/me) ----
+  function isAdmin() { return active && identities[active] && identities[active].claims.role === "admin"; }
+
   async function loadMemory() {
     $("memory").textContent = "loading...";
     try {
-      const scopes = await api("/api/memory");
+      const scopes = await api(isAdmin() ? "/api/memory" : "/api/memory/me");
       $("memory").innerHTML = "";
-      scopes.forEach((s) => $("memory").appendChild(memoryScope(s)));
+      if (!scopes.length) { $("memory").innerHTML = '<p class="muted">No readable memory scopes for this identity.</p>'; return; }
+      scopes.forEach((s) => $("memory").appendChild(memoryScope(s, isAdmin())));
     } catch (e) { $("memory").textContent = "error: " + e.message; }
   }
 
-  function memoryScope(s) {
+  function memoryScope(s, editable) {
     const card = elm(`<div class="card">
       <h3><code>${esc(s.scope)}</code> <span class="pill">${s.items.length} facts</span></h3>
       <div id="facts-${esc(cssEsc(s.scope))}"></div>
-      <div class="row" style="margin-top:8px">
+      ${editable ? `<div class="row" style="margin-top:8px">
         <input type="text" id="add-${esc(cssEsc(s.scope))}" placeholder="new fact..." style="flex:1">
         <button data-add="${esc(cssEsc(s.scope))}">Add</button>
       </div>
-      <div class="status" data-mem-status="${esc(cssEsc(s.scope))}"></div>
+      <div class="status" data-mem-status="${esc(cssEsc(s.scope))}"></div>` : ""}
     </div>`);
-    const box = card.querySelector(`[data-add="${esc(cssEsc(s.scope))}"]`);
-    box.addEventListener("click", () => addFact(s.scope));
+    if (editable) {
+      card.querySelector(`[data-add="${esc(cssEsc(s.scope))}"]`).addEventListener("click", () => addFact(s.scope));
+    }
     const factsHost = card.querySelector("[id^=facts-]");
-    s.items.forEach((it) => factsHost.appendChild(memoryItem(s.scope, it)));
+    s.items.forEach((it) => factsHost.appendChild(memoryItem(s.scope, it, editable)));
     return card;
   }
 
-  function memoryItem(scope, it) {
+  function memoryItem(scope, it, editable) {
+    if (!editable) {
+      return elm(`<div class="row" style="margin:6px 0"><span class="muted">•</span><span>${esc(it.text)}</span></div>`);
+    }
     const row = elm(`<div class="row" style="margin:6px 0;align-items:flex-start">
       <input type="text" value="${esc(it.text)}" data-text="${esc(cssEsc(scope))}/${esc(cssEsc(it.key))}" style="flex:1">
       <button class="ok" data-save="${esc(cssEsc(scope))}/${esc(cssEsc(it.key))}">Save</button>
@@ -1195,7 +1236,11 @@ input[type=text], input[type=password] { background:#0b1220; border:1px solid va
   $("pass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
   $("login-cancel").addEventListener("click", () => { loginMode = null; render(); });
   $("chat-send").addEventListener("click", sendChat);
-  $("chat-msg").addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
+  $("chat-msg").addEventListener("keydown", (e) => {
+    // Mk8 #5: Enter sends, Shift/Ctrl+Enter inserts a newline.
+    if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); sendChat(); }
+  });
+  $("chat-msg").addEventListener("input", () => { $("chat-status").textContent = ""; });
 
   restoreSessions();
   if (active) { render(); loadCurrent(); }

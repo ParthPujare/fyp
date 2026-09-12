@@ -191,6 +191,50 @@ def chat(req: ChatRequest, runner: Annotated[Runner, Depends(get_runner)]) -> di
     }
 
 
+def _thread_messages(checkpointer: Any, thread_id: str, limit: int = 50) -> list[dict[str, str]]:
+    """Latest checkpoint's user/assistant messages (Mk8 #4). Best-effort: [] on any failure."""
+    try:
+        tuples = list(checkpointer.list({"configurable": {"thread_id": thread_id}}, limit=1))
+    except Exception:  # noqa: BLE001 - history is best-effort, never fail the request
+        return []
+    if not tuples:
+        return []
+    try:
+        values = tuples[0].checkpoint.get("channel_values", {}) if hasattr(tuples[0], "checkpoint") else {}
+    except Exception:  # noqa: BLE001 - malformed checkpoint yields empty history
+        return []
+    raw = values.get("messages", []) if isinstance(values, dict) else []
+    out: list[dict[str, str]] = []
+    for m in raw:
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "type", None)
+        content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+        if role == "human":
+            role = "user"
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            continue
+        out.append({"role": role, "content": content})
+    return out[-limit:]
+
+
+def get_checkpointer_obj() -> Any:
+    return _get_components()["checkpointer"]
+
+
+class ThreadHistoryRequest(BaseModel):
+    token: str
+
+
+@app.post("/chat/threads/{thread_id:path}/history")
+def thread_history(
+    thread_id: str, req: ThreadHistoryRequest, checkpointer: Annotated[Any, Depends(get_checkpointer_obj)]
+) -> dict:
+    claims = _verified_active(req.token)
+    username = str(claims.get("sub", ""))
+    if thread_id != f"user:{username}" and not thread_id.startswith(f"user:{username}:"):
+        raise HTTPException(status_code=403, detail="not your thread")
+    return {"thread_id": thread_id, "messages": _thread_messages(checkpointer, thread_id)}
+
+
 @app.post("/chat/threads")
 def list_threads(req: ThreadListRequest) -> list[str]:
     claims = _verified_active(req.token)
