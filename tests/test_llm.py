@@ -360,3 +360,88 @@ def test_gemini_omits_parameters_for_no_argument_tools(monkeypatch):
         assert "query" in cust_params.properties
     else:
         assert cust_params["properties"]["query"]
+
+
+def _gemini_capture(monkeypatch, captured):
+    class _FakeModels:
+        def generate_content(self, model, contents, config=None):
+            captured["model"] = model
+            captured["contents"] = contents
+            captured["config"] = config
+            return SimpleNamespace(text="ok", function_calls=[], usage_metadata=None, candidates=[])
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            self.models = _FakeModels()
+
+    monkeypatch.setattr(gemini_module.genai, "Client", _FakeClient)
+
+
+def test_gemini_maps_dict_tool_round_trip_and_ends_on_user(monkeypatch):
+    """Dict-shape harness history (the shape graph.py actually appends) must map
+    to user/model/user — a `tool` dict sent as a "model" turn ends the history
+    on a model turn and Gemini 400s ("Requests ending with a model turn are
+    not supported"), breaking every multi-step run."""
+    captured: dict = {}
+    _gemini_capture(monkeypatch, captured)
+    GeminiProvider(api_key="k").generate(TOOL_CONVERSATION)
+
+    contents = captured["contents"]
+    assert [c["role"] for c in contents] == ["user", "model", "user"]
+    assert contents[-1]["role"] == "user"
+
+    assistant = contents[1]
+    calls = [p["functionCall"] for p in assistant["parts"] if "functionCall" in p]
+    assert [(c["name"], c["args"]) for c in calls] == [
+        ("crm_search_customer", {"query": "acme"})
+    ]
+
+    result = contents[2]
+    responses = [p["functionResponse"] for p in result["parts"] if "functionResponse" in p]
+    assert [(r["name"], r["response"]) for r in responses] == [
+        ("crm_search_customer", {"result": '[{"id": 1}]'})
+    ]
+
+
+def test_gemini_strips_trailing_unanswered_calls(monkeypatch):
+    """A guardrail ending a run mid-batch leaves declared calls with no result;
+    replaying that thread would end on a "model" turn and Gemini would 400 every
+    later turn — the orphaned calls are stripped (mirrors the OpenAI/Anthropic
+    providers), and a turn left empty is dropped."""
+    captured: dict = {}
+    _gemini_capture(monkeypatch, captured)
+    truncated = [
+        {"role": "user", "content": "find acme"},
+        {
+            "role": "assistant",
+            "content": "searching",
+            "tool_calls": [
+                {"name": "crm_search_customer", "args": {"query": "acme"}},
+                {"name": "crm_list_campaigns", "args": {}},  # budget hit; never ran
+            ],
+        },
+        {"role": "tool", "content": "[]", "name": "crm_search_customer"},
+        {"role": "user", "content": "and now?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"name": "crm_list_campaigns", "args": {}}],  # never ran
+        },
+    ]
+    GeminiProvider(api_key="k").generate(truncated)
+
+    contents = captured["contents"]
+    # The orphaned trailing call turn is dropped; history ends on a user turn.
+    assert [c["role"] for c in contents] == ["user", "model", "user", "user"]
+    assert contents[-1] == {"role": "user", "parts": [{"text": "and now?"}]}
+    # The answered call in the middle survives with its result intact.
+    calls = [
+        p["functionCall"]
+        for c in contents
+        if c["role"] == "model"
+        for p in c["parts"]
+        if "functionCall" in p
+    ]
+    assert ("crm_search_customer", {"query": "acme"}) in [
+        (c["name"], c["args"]) for c in calls
+    ]

@@ -27,6 +27,31 @@ def _function_declaration(
     return declaration
 
 
+def _is_function_call(part: dict[str, Any]) -> bool:
+    return isinstance(part, dict) and "functionCall" in part
+
+
+def _drop_trailing_unanswered_calls(contents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip trailing model turns left with calls but no results.
+
+    Gemini rejects a history ending on a "model" turn (400: "Requests ending
+    with a model turn are not supported"). A guardrail ending a run mid-batch
+    leaves exactly that: an assistant turn declaring calls whose results never
+    came, which would then poison every later turn replaying the thread. This
+    mirrors the OpenAI/Anthropic providers' unanswered-call cleanup — strip
+    the orphaned calls (responses always follow their calls, so a *trailing*
+    call is by definition unanswered) and drop turns left empty.
+    """
+    while contents and contents[-1].get("role") == "model":
+        last = contents[-1]
+        kept = [p for p in last.get("parts", []) if not _is_function_call(p)]
+        if kept:
+            last["parts"] = kept
+            break
+        contents.pop()
+    return contents
+
+
 class GeminiProvider(LLMProvider):
     DEFAULT_MODEL = "gemini-3.6-flash"
 
@@ -76,95 +101,88 @@ class GeminiProvider(LLMProvider):
         contents = []
 
         for m in messages:
-            role = m.role if isinstance(m, Message) else m.get("role")
-            content = m.content if isinstance(m, Message) else m.get("content")
+            if isinstance(m, Message):
+                role = m.role
+                content = m.content
+                raw_calls = list(m.tool_calls or [])
+                name = str(getattr(m, "name", "") or "")
+            else:
+                role = str(m.get("role", ""))
+                content = m.get("content")
+                raw_calls = list(m.get("tool_calls") or [])
+                name = str(m.get("name", "") or "")
 
             if role == "system":
                 if content:
                     system_instruction = content
                 continue
 
-            # Determine the Gemini role: tool results are always sent as "user" role.
-            # Regular user/assistant turns keep their role; Gemini maps "assistant" -> "model".
-            is_tool_result = isinstance(m, Message) and m.tool_calls is not None and any(
-                tc.get("type") == "tool_result" if isinstance(tc, dict) else hasattr(tc, "type") and tc.type == "tool_result"
-                for tc in (m.tool_calls or [])
-            )
-
-            gemini_role = "user" if is_tool_result or role == "user" else "model"
-            parts = []
-            if content:
-                parts.append({"text": content})
-
-            # Handle tool calls / responses if present
-            if isinstance(m, Message) and m.tool_calls:
-                for tc in m.tool_calls:
-                    # tc may be a dict with {"type": "tool_result", "name": ..., "args": ..., "content": ...}
-                    # or {"name": ..., "args": ..., "type": "function", ...}
-                    if isinstance(tc, dict) and tc.get("type") == "tool_result":
-                        # This is a tool result from the agent; send as functionResponse under "user" role
-                        parts.append({
-                            "functionResponse": {
-                                "name": tc["name"],
-                                "response": {"result": tc["content"]},
-                            }
-                        })
-                    else:
-                        # Regular function call from the assistant
-                        parts.append({
-                            "functionCall": {
-                                "name": tc.get("name") if isinstance(tc, dict) else tc.name,
-                                "args": tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {}),
-                            }
-                        })
-
-                    if parts:
-                        contents.append({"role": gemini_role, "parts": parts})
-            elif isinstance(m, Message) and hasattr(m, "tool_calls") and m.tool_calls is not None:
-                # Legacy/alternative path: treat as function calls only
-                for tc in m.tool_calls:
-                    if hasattr(tc, "type") and tc.type == "tool_result":
-                        parts.append({
-                            "functionResponse": {
-                                "name": getattr(tc, "name", ""),
-                                "response": {"result": getattr(tc, "content", "") or ""},
-                            }
-                        })
-                    else:
-                        parts.append({
-                            "functionCall": {
-                                "name": getattr(tc, "name", ""),
-                                "args": getattr(tc, "args", {}),
-                            }
-                        })
-                    if parts:
-                        contents.append({"role": gemini_role, "parts": parts})
-            elif isinstance(m, Message) and getattr(m, "role", None) == "tool":
-                # Backwards-compat: treat a Message with role="tool" as a function result response
-                name = getattr(m, "name", "")
-                tool_content = m.content or ""
+            if role == "tool":
+                # Tool execution result is always a "user" turn for Gemini:
+                # a named result becomes a functionResponse, an unnamed one
+                # plain text. (A previous mapping sent these as "model"
+                # turns, and a history ending on one fails with 400
+                # "Requests ending with a model turn are not supported".)
+                parts = []
                 if name:
                     parts.append({
                         "functionResponse": {
                             "name": name,
-                            "response": {"result": tool_content},
+                            "response": {"result": content or ""},
                         }
                     })
-                else:
-                    parts.append({"text": tool_content})
+                elif content:
+                    parts.append({"text": content})
                 if parts:
                     contents.append({"role": "user", "parts": parts})
-            else:
-                # Regular user/assistant message (dict or Message without tool calls):
-                # parts was already set up with content at lines 106-108 above.
-                # Append to contents now if parts has content.
-                if parts:
-                    contents.append({"role": gemini_role, "parts": parts})
+                continue
 
-            if parts and gemini_role == "model" and not is_tool_result:
-                # Regular assistant turn with content + possible function_calls already appended above
-                # No extra append needed; parts were already added inside the loop per message.
-                pass
+            if role == "assistant" and raw_calls:
+                # Assistant tool calls become functionCall parts on a "model"
+                # turn (plus any text). Entries typed as tool results are
+                # routed to a following "user" turn instead.
+                call_parts = []
+                result_parts = []
+                if content:
+                    call_parts.append({"text": content})
+                for tc in raw_calls:
+                    if isinstance(tc, dict):
+                        if tc.get("type") == "tool_result":
+                            result_parts.append({
+                                "functionResponse": {
+                                    "name": str(tc.get("name", "")),
+                                    "response": {"result": tc.get("content") or ""},
+                                }
+                            })
+                            continue
+                        tc_name = str(tc.get("name", ""))
+                        tc_args = tc.get("args") or tc.get("input") or {}
+                    else:
+                        if getattr(tc, "type", None) == "tool_result":
+                            result_parts.append({
+                                "functionResponse": {
+                                    "name": str(getattr(tc, "name", "")),
+                                    "response": {"result": getattr(tc, "content", "") or ""},
+                                }
+                            })
+                            continue
+                        tc_name = str(getattr(tc, "name", ""))
+                        tc_args = getattr(tc, "args", {}) or {}
+                    call_parts.append({"functionCall": {"name": tc_name, "args": tc_args}})
+                if call_parts:
+                    contents.append({"role": "model", "parts": call_parts})
+                if result_parts:
+                    contents.append({"role": "user", "parts": result_parts})
+                continue
+
+            # Plain user/assistant turns. Gemini names the assistant role "model".
+            if content:
+                contents.append({
+                    "role": "user" if role == "user" else "model",
+                    "parts": [{"text": content}],
+                })
+
+        contents = _drop_trailing_unanswered_calls(contents)
 
         if not contents:
             raise ValueError(
