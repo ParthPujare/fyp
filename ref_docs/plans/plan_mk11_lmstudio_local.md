@@ -2,7 +2,7 @@
 
 ## Metadata
 - Date: 2026-09-13
-- Status: In Progress (Phase 1 implementation)
+- Status: Phase 1 DONE (session 020); Phase 2 (live verify) open
 - Follows: Mk3 (BYOK keys), Mk5 (direct providers), Mk10 (zen provider + model dropdown)
 - Scope lock (user, 2026-09-13):
   1. First-class LM Studio support (user has LM Studio running).

@@ -91,3 +91,18 @@ p, devops_agent, devops, skill_triage_incident, use
 # idempotent — re-registering never duplicates a row. Empty until a department is
 # registered: the legal/compliance rows that used to live here were written by the
 # test suite leaking onto this file (see `_policy_csv`), not by a real registration.
+
+# ---- External tools (Mk9: hybrid Composio + direct, Gmail + GitHub MVP) ----
+p, marketing_agent, marketing, gmail, read
+p, marketing_agent, marketing, gmail, send
+p, devops_agent, devops, github, read
+p, devops_agent, devops, github, create
+p, marketing_agent, marketing, skill_send_campaign_email, use
+p, devops_agent, devops, skill_triage_github_issue, use
+p, marketing_agent, marketing, gmail, write
+p, hr_agent, hr, gmail, read
+p, hr_agent, hr, gmail, write
+p, finance_agent, finance, gmail, read
+p, finance_agent, finance, gmail, write
+p, devops_agent, devops, gmail, read
+p, devops_agent, devops, gmail, write

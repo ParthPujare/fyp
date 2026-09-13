@@ -2,7 +2,7 @@
 
 - **Plan id:** `mk9`
 - **Scope:** Turn the chatbot into a real harness: connect external apps per-user (BYO Composio) and call them through the existing zero-trust pipeline (filter → intercept → HITL → sanitize → audit → trace). MVP apps: Gmail + GitHub. Skills become the abstraction over connected tools.
-- **Status:** Planned (2026-09-13).
+- **Status:** Phases 0–6 DONE 2026-09-13 (333 offline tests green; `make demo-external`).
 - **Registry:** `ref_docs/plans/INDEX.md`
 - **Predecessors:** Mk1 (harness), Mk2 (dashboard/members), Mk3/Mk5 (BYOK + direct providers), Mk4/Mk8 (chat)
 - **Backlog sources:** `ref_docs/todo.md` #4 (skills over real tools + own LLM) and #7 (direct + Composio real tool-calling). Does **not** cover todo #5 (auto-generated per-user skills), #9 (self-edit via chat), #10 (external DB request-access flow) — noted as follow-ups.

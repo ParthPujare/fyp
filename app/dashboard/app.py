@@ -140,7 +140,9 @@ def get_gateway_sender():
             resp = httpx.post(
                 f"{settings.services.gateway_url}/chat",
                 json={"token": token, "message": message, "thread_id": thread_id, "key_id": key_id},
-                timeout=60.0,
+                # Local reasoning models (Gemma via LM Studio) take minutes per
+                # turn (agent + memory-extract calls); don't cut them off at 60s.
+                timeout=300.0,
             )
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"gateway unreachable: {exc}") from exc
@@ -191,7 +193,7 @@ def _mask_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Mask sensitive tool args (e.g. finance transfer memo) in the UI list."""
     if "args" in payload and isinstance(payload["args"], dict):
         args = dict(payload["args"])
-        for key in ("memo", "from_account", "to_account"):
+        for key in ("memo", "from_account", "to_account", "body", "subject", "to", "title"):
             if key in args:
                 args[key] = MASK
         payload = {**payload, "args": args}
@@ -1223,4 +1225,316 @@ def ops_run_evals(
     if not tree:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
     return [dict(e) for e in tree if e["type"] == "eval"]
+
+
+# ---- Integrations (Mk9: per-user BYO Composio + connected apps) ----
+
+
+class ComposioKeyRequest(BaseModel):
+    api_key: str
+
+
+class IntegrationConnectRequest(BaseModel):
+    app: str  # any admin-enabled toolkit: gmail, github, slack, notion, ...
+
+
+class ToolkitAddRequest(BaseModel):
+    toolkit: str
+
+
+class ToolkitEnableRequest(BaseModel):
+    enabled: bool
+
+
+def _catalog_toolkits(enabled_only: bool = True) -> list[dict[str, Any]]:
+    try:
+        return get_store().list_toolkits(enabled_only=enabled_only)
+    except Exception:  # noqa: BLE001 - fall back to seeds offline
+        return [{"toolkit": t, "label": t, "enabled": True, "auth_config_id": ""} for t in ("gmail", "github")]
+
+
+def _validate_integration_app(app: str) -> str:
+    name = (app or "").strip().lower()
+    if not name:
+        raise HTTPException(status_code=422, detail="app is required")
+    known = {t["toolkit"] for t in _catalog_toolkits(enabled_only=False)}
+    if name not in known:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown app {app!r} — ask an admin to add it under Integrations → Catalog",
+        )
+    return name
+
+
+def _require_enabled_app(app: str) -> str:
+    name = _validate_integration_app(app)
+    enabled = {t["toolkit"] for t in _catalog_toolkits(enabled_only=True)}
+    if name not in enabled:
+        raise HTTPException(status_code=422, detail=f"{app!r} is disabled by your admin")
+    return name
+
+
+@app.post("/api/integrations/key")
+def set_own_composio_key(
+    req: ComposioKeyRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Key wizard step 1: validate (friendly, no leak) then save per-user BYO key."""
+    claims, _token = _verified_member(authorization)
+    api_key = (req.api_key or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=422, detail="paste your Composio API key first")
+    from app.integrations.client import build_client
+
+    client = build_client(api_key, settings.composio.base_url, settings.composio.timeout_seconds)
+    if hasattr(client, "validate_key"):
+        ok, note = client.validate_key()  # type: ignore[union-attr]
+        if not ok:
+            raise HTTPException(status_code=502, detail=note)
+    get_store().set_composio_key(claims["sub"], api_key, actor=claims["sub"])
+    return {"status": "saved", "note": note if hasattr(client, "validate_key") else "saved"}
+
+
+@app.delete("/api/integrations/key")
+def delete_own_composio_key(
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims, _token = _verified_member(authorization)
+    get_store().delete_composio_key(claims["sub"], actor=claims["sub"])
+    return {"status": "deleted"}
+
+
+@app.get("/api/integrations/status")
+def integration_status(
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Metadata-only: enabled-catalog apps + per-user status (never raw key)."""
+    claims, _token = _verified_member(authorization)
+    store = get_store()
+    connected = {c["app"]: c for c in store.list_connected_accounts(claims["sub"])}
+    apps = [
+        {
+            "app": t["toolkit"],
+            "label": t.get("label", t["toolkit"]),
+            "status": connected.get(t["toolkit"], {}).get("status", "disconnected"),
+            "updated_at": connected.get(t["toolkit"], {}).get("updated_at", ""),
+        }
+        for t in _catalog_toolkits(enabled_only=True)
+    ]
+    return {"apps": apps, "has_key": store.get_composio_key(claims["sub"]) is not None}
+
+
+def _auth_config_for(app_name: str) -> str | None:
+    """Catalog DB first (auto-provisioned); legacy .env as fallback. No pasting by members."""
+    try:
+        for t in get_store().list_toolkits(enabled_only=False):
+            if t["toolkit"] == app_name and t.get("auth_config_id"):
+                return str(t["auth_config_id"])
+    except Exception:  # noqa: BLE001, S110 - fall through to settings
+        pass
+    return {
+        "gmail": settings.composio.gmail_auth_config,
+        "github": settings.composio.github_auth_config,
+    }.get(app_name)
+
+
+@app.post("/api/integrations/connect")
+def integration_connect(
+    req: IntegrationConnectRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims, _token = _verified_member(authorization)
+    app_name = _require_enabled_app(req.app)
+    from app.integrations.client import build_client
+    from app.integrations.vault import get_composio_key
+
+    api_key = get_composio_key(claims["sub"], settings.composio.api_key)
+    if not api_key:
+        raise HTTPException(
+            status_code=422,
+            detail="save your Composio API key in Account → Integrations first",
+        )
+    auth_config = _auth_config_for(app_name)
+    provision_note = ""
+    if not auth_config:
+        # Auto-provision managed auth config so nobody edits .env.
+        probe = build_client(api_key, settings.composio.base_url, settings.composio.timeout_seconds)
+        if hasattr(probe, "ensure_auth_config"):
+            new_id, provision_note = probe.ensure_auth_config(app_name)  # type: ignore[union-attr]
+            print(f"[integrations] auto-provision {app_name}: id={new_id} note={provision_note}")
+            if new_id:
+                get_store().upsert_toolkit(app_name, enabled=True, auth_config_id=new_id, actor=claims["sub"])
+                auth_config = new_id
+    if not auth_config:
+        detail = f"{app_name!r} is not ready yet — ask an admin to enable it under Integrations → Catalog"
+        if provision_note:
+            detail += f" (auto-setup said: {provision_note})"
+        raise HTTPException(status_code=422, detail=detail)
+    client = build_client(api_key, settings.composio.base_url, settings.composio.timeout_seconds)
+    try:
+        url = client.get_connect_url(app_name, claims["sub"], auth_config)  # type: ignore[union-attr]
+    except RuntimeError as exc:
+        msg = str(exc).lower()
+        if "auth_config_notfound" in msg or "auth config not found" in msg or "code': 302" in msg:
+            # Stale ID (pasted from another project, deleted, or wrong value) — self-heal.
+            if hasattr(client, "ensure_auth_config"):
+                new_id, _note = client.ensure_auth_config(app_name)  # type: ignore[union-attr]
+                if new_id and new_id != auth_config:
+                    get_store().upsert_toolkit(
+                        app_name, enabled=True, auth_config_id=new_id, actor=claims["sub"]
+                    )
+                    try:
+                        url = client.get_connect_url(app_name, claims["sub"], new_id)  # type: ignore[union-attr]
+                    except RuntimeError as exc2:
+                        raise HTTPException(status_code=502, detail=str(exc2)) from exc2
+                    get_store().set_connected_account(
+                        claims["sub"], app_name, account_id="", status="pending"
+                    )
+                    return {"app": app_name, "redirectUrl": url, "status": "pending"}
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"the saved login setup for {app_name!r} does not exist in this Composio project. "
+                    "It was likely copied from a different project, deleted, or is not the Auth Config ID. "
+                    "Ask an admin to re-add it under Integrations → Catalog (auto-creates a fresh one)."
+                ),
+            ) from exc
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    # Remember the working ID in the catalog so the next Connect skips the fallback.
+    if auth_config:
+        try:
+            get_store().upsert_toolkit(app_name, enabled=True, auth_config_id=auth_config, actor=claims["sub"])
+        except Exception:  # noqa: BLE001, S110 - cache sync is best-effort
+            pass
+    get_store().set_connected_account(claims["sub"], app_name, account_id="", status="pending")
+    return {"app": app_name, "redirectUrl": url, "status": "pending"}
+
+
+@app.post("/api/integrations/refresh")
+def integration_refresh(
+    req: IntegrationConnectRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Manual sync (user choice): check Composio for ACTIVE connection, flip pending→active."""
+    claims, _token = _verified_member(authorization)
+    app_name = _validate_integration_app(req.app)
+    from app.integrations.client import build_client
+    from app.integrations.vault import get_composio_key
+
+    api_key = get_composio_key(claims["sub"], settings.composio.api_key)
+    if not api_key:
+        raise HTTPException(status_code=422, detail="save your Composio API key first")
+    client = build_client(api_key, settings.composio.base_url, settings.composio.timeout_seconds)
+    if hasattr(client, "list_for_user"):
+        for item in client.list_for_user(claims["sub"]):  # type: ignore[union-attr]
+            toolkit = str(item.get("toolkit", "")).lower()
+            status = str(item.get("status", "")).upper()
+            if app_name in toolkit and status == "ACTIVE":
+                get_store().set_connected_account(
+                    claims["sub"], app_name,
+                    account_id=str(item.get("id", "")), status="active",
+                )
+                return {"app": app_name, "status": "active"}
+    entry = [c for c in get_store().list_connected_accounts(claims["sub"]) if c["app"] == app_name]
+    return {"app": app_name, "status": entry[0]["status"] if entry else "disconnected"}
+
+
+@app.post("/api/integrations/disconnect")
+def integration_disconnect(
+    req: IntegrationConnectRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims, _token = _verified_member(authorization)
+    app_name = _validate_integration_app(req.app)
+    get_store().set_connected_account(claims["sub"], app_name, account_id="", status="revoked")
+    return {"app": app_name, "status": "revoked"}
+
+
+# ---- Integrations catalog (admin-curated toolkits, Mk9 simplified) ----
+
+
+def _ensure_toolkit_policy_rows(toolkit: str) -> None:
+    """Grant every agent role read+write on a newly enabled toolkit (writes still HITL-gated by risk)."""
+    rows = []
+    for role, dept in (
+        ("marketing_agent", "marketing"), ("hr_agent", "hr"),
+        ("finance_agent", "finance"), ("devops_agent", "devops"),
+    ):
+        rows.append(("p", role, dept, toolkit, "read"))
+        rows.append(("p", role, dept, toolkit, "write"))
+    for row in rows:
+        if not _policy_has_row(row):
+            with open(_policy_csv(), "a", encoding="utf-8") as fh:
+                fh.write(f"p, {row[1]}, {row[2]}, {row[3]}, {row[4]}\n")
+
+
+@app.get("/api/integrations/catalog")
+def integration_catalog(
+    authorization: str | None = Header(default=None),
+) -> list[dict[str, Any]]:
+    claims, _token = _verified_member(authorization)
+    store = get_store()
+    items = store.list_toolkits(enabled_only=False)
+    if claims.get("role") != "admin":
+        return [t for t in items if t["enabled"]]
+    return items
+
+
+@app.post("/api/integrations/catalog")
+def integration_catalog_add(
+    req: ToolkitAddRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Admin adds a toolkit: validate → auto-provision auth config → discover tools → enable + policy."""
+    claims = _verify_admin(authorization)
+    toolkit = (req.toolkit or "").strip().lower()
+    if not toolkit:
+        raise HTTPException(status_code=422, detail="toolkit is required (e.g. slack, notion)")
+    store = get_store()
+    admin_key_enc = store.get_composio_key(claims["sub"])
+    admin_key = None
+    if admin_key_enc:
+        from app.auth.crypto import decrypt_secret
+
+        try:
+            admin_key = decrypt_secret(admin_key_enc)
+        except Exception:  # noqa: BLE001 - fall back to global
+            admin_key = None
+    admin_key = admin_key or settings.composio.api_key
+    if not admin_key:
+        raise HTTPException(
+            status_code=422,
+            detail="save your Composio key first (Account → Integrations), then add the toolkit",
+        )
+    from app.integrations.client import build_client
+
+    client = build_client(admin_key, settings.composio.base_url, settings.composio.timeout_seconds)
+    ok, note = client.toolkit_exists(toolkit) if hasattr(client, "toolkit_exists") else (True, "")  # type: ignore[union-attr]
+    if not ok:
+        raise HTTPException(status_code=422, detail=note)
+    auth_id, auth_note = client.ensure_auth_config(toolkit) if hasattr(client, "ensure_auth_config") else (None, "")  # type: ignore[union-attr]
+    tools, _tnote = client.discover_tools(toolkit) if hasattr(client, "discover_tools") else ([], "")  # type: ignore[union-attr]
+    item = store.upsert_toolkit(toolkit, enabled=True, auth_config_id=auth_id or "", actor=claims["sub"])
+    if tools:
+        store.cache_toolkit_tools(toolkit, tools)
+    _ensure_toolkit_policy_rows(toolkit)
+    return {**item, "tools": len(tools), "note": f"{note}; {auth_note}"}
+
+
+@app.patch("/api/integrations/catalog/{toolkit}")
+def integration_catalog_toggle(
+    toolkit: str,
+    req: ToolkitEnableRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    claims = _verify_admin(authorization)
+    name = (toolkit or "").strip().lower()
+    try:
+        store = get_store()
+        store.set_toolkit_enabled(name, req.enabled, actor=claims["sub"])
+        if req.enabled:
+            _ensure_toolkit_policy_rows(name)
+    except MemberError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"toolkit": name, "enabled": req.enabled}
 

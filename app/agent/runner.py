@@ -92,6 +92,20 @@ def _build_deps(
     actor = {"sub": claims["sub"], "role": claims["role"], "dept": claims["dept"]}
     skills = SkillRegistry(settings.skills.skills_dir)
     visible_skills = [s for s in skills.load_all() if enforcer.skill_allowed(s.name, claims)]
+    internal_schemas = [tool_schema(t) for t in filter_tools(TOOL_REGISTRY.values(), enforcer, claims)]
+    try:
+        from app.integrations.adapter import all_specs as _ext_specs
+        from app.integrations.service import visible_external_tools as _ext_visible
+
+        _ext_names = {t.name for t in _ext_visible(claims)}
+        external_schemas = [
+            tool_schema(t)
+            for t in filter_tools(
+                [s for s in _ext_specs() if s.name in _ext_names], enforcer, claims
+            )
+        ]
+    except Exception:  # noqa: BLE001 - integrations optional/offline
+        external_schemas = []
     deps = AgentDeps(
         provider=provider,
         executor=executor,
@@ -101,9 +115,8 @@ def _build_deps(
         audit=audit,
         run_id=run_id,
         actor=actor,
-        tool_schemas=[
-            tool_schema(t) for t in filter_tools(TOOL_REGISTRY.values(), enforcer, claims)
-        ] + [SkillRegistry.schema_for(s) for s in visible_skills],
+        tool_schemas=internal_schemas
+        + external_schemas + [SkillRegistry.schema_for(s) for s in visible_skills],
         store=store,
         episodic=episodic,
         approvals=approvals,

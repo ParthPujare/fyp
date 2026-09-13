@@ -121,6 +121,11 @@ def _relevant_facts(
     """Mk8 #6: prefer LLM relevance extraction; heuristic fallback offline."""
     from app.llm.mock import MockLLM
 
+    # Local models (LM Studio/Ollama/llama.cpp, e.g. Gemma reasoning) spend
+    # hundreds of tokens on this background task — heuristics are fine there
+    # and keep chat latency to one model call per turn instead of two.
+    if getattr(deps.provider, "PROVIDER_NAME", "") in ("lmstudio", "ollama", "llamacpp"):
+        return extract_facts(messages, claims)
     user_texts = [str(m.get("content", "")) for m in messages if m.get("role") == "user"]
     asst_texts = [str(m.get("content", "")) for m in messages if m.get("role") == "assistant"]
     user_msg = user_texts[-1] if user_texts else ""
@@ -326,6 +331,12 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
             tracker.record_tool_call()
             tool = TOOL_REGISTRY.get(name)
             if tool is None:
+                try:
+                    from app.integrations.adapter import spec_for as _ext_spec
+                except Exception:  # noqa: BLE001 - integrations optional
+                    _ext_spec = lambda _n: None  # type: ignore[assignment]
+                tool = _ext_spec(name)
+            if tool is None:
                 skill = deps.skills.get(name)
                 if skill is not None:
                     result, steps = skill_executor.execute(
@@ -360,6 +371,14 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                 if result is None:
                     if tool.handler == "recall":
                         result = deps.recall.recall(str(args.get("query", "")), state["claims"])
+                    elif tool.handler == "external":
+                        from app.integrations.service import execute_external
+
+                        result = sanitize_tool_result(
+                            execute_external(tool.name, args, state["claims"]),
+                            state["claims"],
+                            deps.enforcer,
+                        )
                     else:
                         result = sanitize_tool_result(
                             deps.executor.execute(tool, args),

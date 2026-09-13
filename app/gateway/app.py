@@ -180,6 +180,15 @@ def chat(req: ChatRequest, runner: Annotated[Runner, Depends(get_runner)]) -> di
         # Surfacing those as 502 keeps the cause visible in the UI instead of a
         # bare 500 whose only trace is the gateway console.
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    connect_required: list[str] = []
+    for tc in result.tool_calls or []:
+        if tc.get("outcome") == "denied" and "is not connected" in str(tc.get("content", "")):
+            from app.integrations.service import connect_toolkit_for
+
+            connect_required.append(connect_toolkit_for(str(tc.get("name", ""))))
+    # Deduplicate, keep order; frontend renders inline Connect buttons + auto-retry hint.
+    seen: set[str] = set()
+    connect_required = [t for t in connect_required if t and not (t in seen or seen.add(t))]  # type: ignore[func-returns-value]
     return {
         "reply": result.reply,
         "run_id": result.run_id,
@@ -188,6 +197,7 @@ def chat(req: ChatRequest, runner: Annotated[Runner, Depends(get_runner)]) -> di
         "thread_id": result.thread_id,
         "interrupted": result.interrupted,
         "approval_id": result.approval_id,
+        "connect_required": connect_required,
     }
 
 

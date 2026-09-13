@@ -346,6 +346,52 @@ class MemberStore:
                 )
             except sqlite3.OperationalError:
                 pass
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS member_composio_keys (
+                    username          TEXT PRIMARY KEY,
+                    api_key_encrypted TEXT NOT NULL,
+                    created_at        TEXT NOT NULL,
+                    updated_at        TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS connected_accounts (
+                    username   TEXT NOT NULL,
+                    app        TEXT NOT NULL,
+                    account_id TEXT NOT NULL DEFAULT '',
+                    status     TEXT NOT NULL DEFAULT 'pending',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (username, app)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS toolkit_catalog (
+                    toolkit        TEXT PRIMARY KEY,
+                    label          TEXT NOT NULL DEFAULT '',
+                    enabled        INTEGER NOT NULL DEFAULT 1,
+                    auth_config_id TEXT NOT NULL DEFAULT '',
+                    updated_at     TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS toolkit_tools (
+                    toolkit      TEXT NOT NULL,
+                    slug         TEXT NOT NULL,
+                    description  TEXT NOT NULL DEFAULT '',
+                    input_schema TEXT NOT NULL DEFAULT '{}',
+                    risk         TEXT NOT NULL DEFAULT 'read',
+                    updated_at   TEXT NOT NULL,
+                    PRIMARY KEY (toolkit, slug)
+                )
+                """
+            )
             conn.commit()
         finally:
             conn.close()
@@ -779,6 +825,244 @@ class MemberStore:
 
     def _audit_key(self, actor: str, action: str, username: str) -> None:
         self._audit_entry(actor, action, "llm_key", username)
+
+    # ---- composio keys + connected accounts (Mk9 external tools) ----
+
+    def set_composio_key(self, username: str, api_key_plaintext: str, actor: str | None = None) -> None:
+        if self.get(username) is None:
+            raise MemberError(f"member {username!r} not found")
+        from app.auth.crypto import encrypt_secret
+
+        encrypted = encrypt_secret(api_key_plaintext)
+        now = _now()
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO member_composio_keys (username, api_key_encrypted, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?)"
+                    " ON CONFLICT(username) DO UPDATE SET api_key_encrypted=excluded.api_key_encrypted,"
+                    " updated_at=excluded.updated_at",
+                    (username, encrypted, now, now),
+                )
+        finally:
+            conn.close()
+        self._audit_entry(actor or username, "set_composio_key", "composio_key", username)
+
+    def get_composio_key(self, username: str) -> str | None:
+        """Raw encrypted token (never decrypted here; decrypt at use time)."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT api_key_encrypted FROM member_composio_keys WHERE username = ?",
+                (username,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row["api_key_encrypted"] if row else None
+
+    def delete_composio_key(self, username: str, actor: str | None = None) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "DELETE FROM member_composio_keys WHERE username = ?",
+                    (username,),
+                )
+        finally:
+            conn.close()
+        self._audit_entry(actor or username, "delete_composio_key", "composio_key", username)
+
+    def set_connected_account(
+        self, username: str, app: str, account_id: str = "", status: str = "pending"
+    ) -> dict[str, Any]:
+        now = _now()
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO connected_accounts (username, app, account_id, status, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?)"
+                    " ON CONFLICT(username, app) DO UPDATE SET account_id=excluded.account_id,"
+                    " status=excluded.status, updated_at=excluded.updated_at",
+                    (username, app, account_id, status, now),
+                )
+        finally:
+            conn.close()
+        return {
+            "username": username,
+            "app": app,
+            "account_id": account_id,
+            "status": status,
+            "updated_at": now,
+        }
+
+    def list_connected_accounts(self, username: str) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT app, account_id, status, updated_at FROM connected_accounts"
+                " WHERE username = ? ORDER BY app",
+                (username,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            {
+                "app": r["app"],
+                "account_id": r["account_id"],
+                "status": r["status"],
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+
+    def is_app_connected(self, username: str, app: str) -> bool:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT status FROM connected_accounts WHERE username = ? AND app = ?",
+                (username, app),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None and row["status"] == "active"
+
+    # ---- toolkit catalog (Mk9 simplified: admin-curated, auto auth-config) ----
+
+    _CATALOG_SEEDS = ("gmail", "github")
+
+    def _ensure_catalog_seeds(self) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                for tk in self._CATALOG_SEEDS:
+                    conn.execute(
+                        "INSERT INTO toolkit_catalog (toolkit, label, enabled, auth_config_id, updated_at)"
+                        " VALUES (?, ?, 1, '', ?) ON CONFLICT(toolkit) DO NOTHING",
+                        (tk, tk, _now()),
+                    )
+        finally:
+            conn.close()
+
+    def list_toolkits(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+        self._ensure_catalog_seeds()
+        conn = self._connect()
+        try:
+            q = "SELECT toolkit, label, enabled, auth_config_id, updated_at FROM toolkit_catalog"
+            if enabled_only:
+                q += " WHERE enabled = 1"
+            q += " ORDER BY toolkit"
+            rows = conn.execute(q).fetchall()
+        finally:
+            conn.close()
+        return [
+            {
+                "toolkit": r["toolkit"],
+                "label": r["label"] or r["toolkit"],
+                "enabled": bool(r["enabled"]),
+                "auth_config_id": r["auth_config_id"] or "",
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+
+    def upsert_toolkit(
+        self, toolkit: str, label: str = "", enabled: bool = True,
+        auth_config_id: str = "", actor: str = "admin",
+    ) -> dict[str, Any]:
+        toolkit = (toolkit or "").strip().lower()
+        if not toolkit:
+            raise MemberError("toolkit is required")
+        now = _now()
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO toolkit_catalog (toolkit, label, enabled, auth_config_id, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?)"
+                    " ON CONFLICT(toolkit) DO UPDATE SET label=excluded.label,"
+                    " enabled=excluded.enabled, auth_config_id=excluded.auth_config_id,"
+                    " updated_at=excluded.updated_at",
+                    (toolkit, label or toolkit, 1 if enabled else 0, auth_config_id, now),
+                )
+        finally:
+            conn.close()
+        self._audit_entry(actor, f"toolkit:{toolkit}", "toolkit", toolkit)
+        return {
+            "toolkit": toolkit, "label": label or toolkit, "enabled": enabled,
+            "auth_config_id": auth_config_id, "updated_at": now,
+        }
+
+    def set_toolkit_enabled(self, toolkit: str, enabled: bool, actor: str = "admin") -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "UPDATE toolkit_catalog SET enabled = ?, updated_at = ? WHERE toolkit = ?",
+                    (1 if enabled else 0, _now(), toolkit),
+                )
+                if cur.rowcount == 0:
+                    raise MemberError(f"toolkit {toolkit!r} not in catalog")
+        finally:
+            conn.close()
+        self._audit_entry(actor, f"toolkit:{'enable' if enabled else 'disable'}:{toolkit}", "toolkit", toolkit)
+
+    def cache_toolkit_tools(self, toolkit: str, tools: list[dict[str, Any]]) -> int:
+        from app.integrations.adapter import risk_for_slug
+
+        now = _now()
+        conn = self._connect()
+        try:
+            with conn:
+                for t in tools:
+                    conn.execute(
+                        "INSERT INTO toolkit_tools (toolkit, slug, description, input_schema, risk, updated_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?)"
+                        " ON CONFLICT(toolkit, slug) DO UPDATE SET description=excluded.description,"
+                        " input_schema=excluded.input_schema, risk=excluded.risk,"
+                        " updated_at=excluded.updated_at",
+                        (
+                            toolkit, t.get("slug", ""), str(t.get("description", "")),
+                            json.dumps(t.get("input_schema") or {"type": "object"}),
+                            risk_for_slug(str(t.get("slug", ""))),
+                            now,
+                        ),
+                    )
+        finally:
+            conn.close()
+        return len(tools)
+
+    def list_cached_tools(self, toolkit: str | None = None) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            if toolkit:
+                rows = conn.execute(
+                    "SELECT toolkit, slug, description, input_schema, risk FROM toolkit_tools"
+                    " WHERE toolkit = ? ORDER BY slug",
+                    (toolkit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT toolkit, slug, description, input_schema, risk FROM toolkit_tools"
+                    " ORDER BY toolkit, slug"
+                ).fetchall()
+        finally:
+            conn.close()
+        out = []
+        for r in rows:
+            try:
+                schema = json.loads(r["input_schema"])
+            except ValueError:
+                schema = {"type": "object"}
+            out.append(
+                {
+                    "toolkit": r["toolkit"], "slug": r["slug"],
+                    "description": r["description"], "input_schema": schema,
+                    "risk": r["risk"],
+                }
+            )
+        return out
 
     # ---- writes (admin-only, every change audit-logged) ----
 

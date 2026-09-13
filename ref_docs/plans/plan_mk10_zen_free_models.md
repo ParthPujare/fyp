@@ -2,7 +2,7 @@
 
 ## Metadata
 - Date: 2026-09-13
-- Status: In Progress (Phase 1 implementation)
+- Status: Phase 1 DONE (session 019); Phase 2 (live verify) open
 - Follows: Mk3 (BYOK keys), Mk5 (direct providers), Mk7 (hardening)
 - Scope lock (user, 2026-09-13):
   1. Allow any Zen model IDs (no allow-list reject); free IDs must work without issue.

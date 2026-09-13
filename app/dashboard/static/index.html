@@ -134,6 +134,36 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       <h3>Your API Key Configurations</h3>
       <table><thead><tr><th>Provider</th><th>Model</th><th>Status</th><th>Created</th><th></th></tr></thead>
         <tbody id="acc-keys"></tbody></table>
+      <h2 style="margin-top:24px">Integrations (Composio)</h2>
+      <div class="row" style="margin-bottom:8px">
+        <a href="/static/composio-setup.html" target="_blank"><button class="ghost" type="button">Composio setup guide</button></a>
+        <span class="muted">New here? Open the guide, copy 3 values, paste below.</span>
+      </div>
+      <div class="card">
+        <h3>Step 1 — Paste your Composio key (yours only, never shown back)</h3>
+        <div class="muted" style="font-size:12px">Get it: <a href="/static/composio-setup.html" target="_blank">setup guide</a> → app.composio.dev → API keys → copy → paste here.</div>
+        <div class="row" style="margin-top:8px">
+          <input type="password" id="int-key" placeholder="Composio API key" style="flex:1" autocomplete="off">
+          <button id="int-key-save">Save & check key</button>
+          <button class="bad" id="int-key-delete">Remove</button>
+        </div>
+        <div class="status" id="int-key-status"></div>
+      </div>
+      <h3>Step 2 — Connect your apps</h3>
+      <div class="row" style="margin-bottom:8px">
+        <input type="text" id="int-search" placeholder="Search apps (e.g. slack)" style="flex:1" autocomplete="off">
+      </div>
+      <table><thead><tr><th>App</th><th>Status</th><th>Updated</th><th></th></tr></thead>
+        <tbody id="int-apps"></tbody></table>
+      <div class="status" id="int-status"></div>
+      <div id="int-catalog-admin" class="hidden">
+        <h3>Admin — add app for everyone</h3>
+        <div class="row">
+          <input type="text" id="int-new-toolkit" placeholder="toolkit name, e.g. notion" autocomplete="off">
+          <button id="int-add-toolkit">Add app</button>
+        </div>
+        <div class="status" id="int-catalog-status"></div>
+      </div>
     </div>
     <div id="approvals-view" class="hidden">
       <h2>Pending approvals</h2>
@@ -379,7 +409,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
 
   function load(tab) {
     if (tab === "chat") loadChat();
-    if (tab === "account") loadAccount();
+    if (tab === "account") { loadAccount(); loadIntegrations(); }
     if (tab === "approvals") loadApprovals();
     if (tab === "users") loadUsers();
     if (tab === "depts") loadDepts();
@@ -584,6 +614,136 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
 
   $("acc-save")?.addEventListener("click", saveAccountKey);
   $("acc-detect")?.addEventListener("click", detectLocalModels);
+
+  // ---- Integrations (Mk9 simplified: wizard + catalog + inline connect) ----
+  async function loadIntegrations() {
+    const list = $("int-apps");
+    if (!list) return;
+    try {
+      const out = await api("/api/integrations/status");
+      const keyStatus = $("int-key-status");
+      if (keyStatus) keyStatus.textContent = out.has_key ? "Step 1 done — key saved. Now connect apps below." : "Step 1: paste your Composio key above, then connect apps.";
+      const q = ($("int-search")?.value || "").trim().toLowerCase();
+      list.innerHTML = "";
+      (out.apps || [])
+        .filter((a) => !q || (a.app || "").toLowerCase().includes(q) || ((a.label || "").toLowerCase().includes(q)))
+        .forEach((a) => {
+        const tr = document.createElement("tr");
+        const pill = a.status === "active" ? '<span class="pill active">active</span>'
+          : a.status === "pending" ? '<span class="pill">pending</span>'
+          : '<span class="muted">disconnected</span>';
+        tr.innerHTML = `<td><code>${esc(a.app)}</code></td><td>${pill}</td>`
+          + `<td><span class="muted">${esc((a.updated_at || "").slice(0, 19).replace("T", " "))}</span></td>`
+          + `<td style="text-align:right">`
+          + (a.status === "active"
+            ? `<button class="bad" onclick="disconnectApp('${esc(a.app)}')">Disconnect</button>`
+            : a.status === "pending"
+            ? `<button class="ghost" onclick="refreshApp('${esc(a.app)}')">Refresh</button> <button class="bad" onclick="disconnectApp('${esc(a.app)}')">Disconnect</button>`
+            : `<button onclick="connectApp('${esc(a.app)}')">Connect</button>`)
+          + `</td>`;
+        list.appendChild(tr);
+      });
+      const adminBox = $("int-catalog-admin");
+      if (adminBox) adminBox.classList.toggle("hidden", !identities.admin);
+    } catch (e) {
+      list.innerHTML = `<tr><td colspan="4" style="color:var(--bad)">error: ${esc(e.message)}</td></tr>`;
+    }
+  }
+
+  async function saveIntegrationKey() {
+    const key = $("int-key").value.trim();
+    const status = $("int-status");
+    if (!key) { status.textContent = "Paste your Composio API key first (see setup guide)."; return; }
+    status.textContent = "Checking key…";
+    try {
+      const out = await api("/api/integrations/key", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ api_key: key }),
+      });
+      $("int-key").value = "";
+      status.textContent = out.note ? `Key saved — ${out.note}. Now connect an app below.` : "Key saved. Now connect an app below.";
+      loadIntegrations();
+    } catch (e) { status.textContent = "error: " + e.message; }
+  }
+
+  async function addToolkit() {
+    const input = $("int-new-toolkit");
+    const status = $("int-catalog-status");
+    const toolkit = (input?.value || "").trim().toLowerCase();
+    if (!toolkit) { status.textContent = "Type a toolkit name (e.g. notion)."; return; }
+    status.textContent = `Adding ${toolkit}…`;
+    try {
+      const out = await api("/api/integrations/catalog", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ toolkit }),
+      });
+      input.value = "";
+      status.textContent = `${toolkit} enabled (${out.tools || 0} tools). Members can now connect it.`;
+      loadIntegrations();
+    } catch (e) { status.textContent = "error: " + e.message; }
+  }
+
+  async function deleteIntegrationKey() {
+    const status = $("int-status");
+    try {
+      await api("/api/integrations/key", { method: "DELETE" });
+      status.textContent = "Composio key removed.";
+      loadIntegrations();
+    } catch (e) { status.textContent = "error: " + e.message; }
+  }
+
+  async function connectApp(app) {
+    const status = $("int-status");
+    try {
+      const out = await api("/api/integrations/connect", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ app }),
+      });
+      if (out.redirectUrl) window.open(out.redirectUrl, "_blank");
+      status.textContent = out.status === "pending" ? `Connect started for ${app} — finish Google/GitHub login in the popup, then press Refresh.` : `Connected ${app}.`;
+      loadIntegrations();
+    } catch (e) { status.textContent = "error: " + e.message; }
+  }
+
+  async function refreshApp(app) {
+    const status = $("int-status");
+    try {
+      const out = await api("/api/integrations/refresh", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ app }),
+      });
+      status.textContent = out.status === "active" ? `${app} connected.` : `${app} still ${out.status} — finish the popup login, then Refresh again.`;
+      loadIntegrations();
+    } catch (e) { status.textContent = "error: " + e.message; }
+  }
+
+  async function connectFromChat(app) {
+    await connectApp(app);
+    if (typeof show === "function") { /* stay in chat; user refreshes then re-sends */ }
+  }
+
+  async function disconnectApp(app) {
+    if (!confirm(`Disconnect ${app}?`)) return;
+    const status = $("int-status");
+    try {
+      await api("/api/integrations/disconnect", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ app }),
+      });
+      status.textContent = `Disconnected ${app}.`;
+      loadIntegrations();
+    } catch (e) { status.textContent = "error: " + e.message; }
+  }
+
+  $("int-key-save")?.addEventListener("click", saveIntegrationKey);
+  $("int-key-delete")?.addEventListener("click", deleteIntegrationKey);
+  $("int-search")?.addEventListener("input", loadIntegrations);
+  $("int-add-toolkit")?.addEventListener("click", addToolkit);
   // Default model ids per provider — the ids each API actually expects.
   // The datalist is pick-or-type: any custom id can still be typed in.
   const MODEL_PRESETS = {
@@ -828,6 +988,12 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
         ? "switch to the admin session and open Approvals to approve."
         : "an admin must sign in and approve it in the Approvals tab.";
       html += `<div class="status" style="color:#fef08a">&#9209; run suspended (approval <code>${esc(out.approval_id)}</code>) — ${esc(hint)}</div>`;
+    }
+    if (out.connect_required && out.connect_required.length) {
+      html += `<div class="card" style="margin-top:8px"><b>Connect to continue:</b> `
+        + out.connect_required.map((t) =>
+          `<button class="ghost" onclick="connectFromChat('${esc(t)}')">Connect ${esc(t)}</button>`).join(" ")
+        + `<div class="muted">After connecting, press Refresh in Account → Integrations, then re-send your message.</div></div>`;
     }
     return html;
   }

@@ -67,6 +67,16 @@ class SkillSettings(BaseModel):
     skills_dir: Path = Path("skills")
 
 
+class ComposioSettings(BaseModel):
+    """External tool aggregator (Mk9) — global fallback; per-user BYO key wins."""
+
+    api_key: str | None = None
+    base_url: str | None = None
+    timeout_seconds: float = Field(default=30.0, gt=0)
+    gmail_auth_config: str | None = None
+    github_auth_config: str | None = None
+
+
 class Settings(BaseSettings):
     app_name: str = "fyp-agent-harness"
     env: str = "dev"
@@ -77,6 +87,7 @@ class Settings(BaseSettings):
     guardrails: GuardrailSettings = GuardrailSettings()
     memory: MemorySettings = MemorySettings()
     skills: SkillSettings = SkillSettings()
+    composio: ComposioSettings = ComposioSettings()
 
     model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")
 
