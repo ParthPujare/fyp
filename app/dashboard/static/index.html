@@ -112,16 +112,23 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
             <option value="gemini">Gemini (AI Studio)</option>
             <option value="groq">Groq</option>
             <option value="openrouter">OpenRouter</option>
+            <option value="zen">OpenCode Zen (Free)</option>
+            <option value="lmstudio">LM Studio (Local)</option>
+            <option value="ollama">Ollama (Local)</option>
+            <option value="llamacpp">llama.cpp (Local)</option>
             <option value="custom_openai">Custom (OpenAI-compatible)</option>
           </select>
-          <input type="text" id="acc-model" placeholder="Model string (e.g. gpt-4o-mini)" value="gpt-4o-mini" style="flex:1" autocomplete="off">
+          <input type="text" id="acc-model" list="acc-model-list" placeholder="Model string (e.g. gpt-4o-mini)" value="gpt-4o-mini" style="flex:1" autocomplete="off">
+          <datalist id="acc-model-list"></datalist>
           <input type="password" id="acc-key" placeholder="API key (never shown back)" autocomplete="current-password">
           <button id="acc-save">Save key</button>
         </div>
         <div class="row hidden" id="acc-base-url-row" style="margin-top:8px">
           <input type="text" id="acc-base-url" placeholder="Base URL — e.g. http://localhost:1234/v1" style="flex:1" autocomplete="off">
+          <button id="acc-detect" class="ghost hidden" type="button" title="List models loaded on the local server">Detect</button>
         </div>
-        <div class="muted" style="margin-top:6px;font-size:12px">Tip: Recommended models — OpenAI: <code>gpt-4o-mini</code> | Gemini: <code>gemini-3.6-flash</code> / <code>gemini-3.5-flash-lite</code> | Groq: <code>llama-3.3-70b-versatile</code> | Anthropic: <code>claude-3-5-sonnet-20241022</code> | OpenRouter: <code>openai/gpt-4o-mini</code></div>
+        <div class="muted" style="margin-top:6px;font-size:12px">Tip: pick a model from the dropdown or type any custom id — OpenAI: <code>gpt-4o-mini</code> | Gemini: <code>gemini-3.6-flash</code> / <code>gemini-3.5-flash-lite</code> | Groq: <code>llama-3.3-70b-versatile</code> | Anthropic: <code>claude-3-5-sonnet-20241022</code> | OpenRouter: <code>openai/gpt-4o-mini</code> | Zen free: <code>muse-spark-1.3-contributor-free</code> | Local: pick <code>LM Studio</code>, press <code>Detect</code>, no key needed</div>
+        <div class="muted hidden" id="acc-zen-note" style="margin-top:6px;font-size:12px">Zen <code>contributor-free</code> models are free in exchange for letting Meta train on your prompts/completions.</div>
         <div class="status" id="acc-status"></div>
       </div>
       <h3>Your API Key Configurations</h3>
@@ -428,12 +435,53 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     } catch (e) { list.innerHTML = `<tr><td colspan="5" style="color:var(--bad)">error: ${esc(e.message)}</td></tr>`; }
   }
 
-  // Only a custom OpenAI-compatible endpoint needs its URL supplied; every other
-  // provider has a fixed one.
+  // Custom endpoints and local servers take a base URL; hosted providers have a
+  // fixed one. Local servers (LM Studio / Ollama / llama.cpp) need no API key.
+  const LOCAL_PROVIDERS = ["lmstudio", "ollama", "llamacpp"];
+  const LOCAL_BASE_URLS = {
+    lmstudio: "http://localhost:1234/v1",
+    ollama: "http://localhost:11434/v1",
+    llamacpp: "http://localhost:8080/v1"
+  };
   function syncBaseUrlField() {
-    const sel = $("acc-provider"), row = $("acc-base-url-row");
+    const sel = $("acc-provider"), row = $("acc-base-url-row"), base = $("acc-base-url");
     if (!sel || !row) return;
-    row.classList.toggle("hidden", sel.value !== "custom_openai");
+    const needsUrl = sel.value === "custom_openai" || LOCAL_PROVIDERS.includes(sel.value);
+    row.classList.toggle("hidden", !needsUrl);
+    if (base && LOCAL_PROVIDERS.includes(sel.value) && !base.value.trim()) {
+      base.value = LOCAL_BASE_URLS[sel.value] || "";
+    }
+    const key = $("acc-key");
+    if (key) key.placeholder = LOCAL_PROVIDERS.includes(sel.value)
+      ? "API key (optional for local servers)"
+      : "API key (never shown back)";
+    const detect = $("acc-detect");
+    if (detect) detect.classList.toggle("hidden", !needsUrl);
+  }
+
+  async function detectLocalModels() {
+    const status = $("acc-status");
+    const provider = $("acc-provider").value;
+    const baseUrl = $("acc-base-url").value.trim() || LOCAL_BASE_URLS[provider] || "";
+    try {
+      const out = await api("/api/account/local-models?provider=" + encodeURIComponent(provider)
+        + "&base_url=" + encodeURIComponent(baseUrl));
+      const list = $("acc-model-list");
+      if (list) {
+        list.innerHTML = "";
+        (out.models || []).forEach((m) => {
+          const o = document.createElement("option");
+          o.value = m;
+          list.appendChild(o);
+        });
+      }
+      if (out.models && out.models.length && $("acc-model") && !$("acc-model").value.trim()) {
+        $("acc-model").value = out.models[0];
+      }
+      status.textContent = (out.models || []).length
+        ? ("Found " + out.models.length + " loaded model(s).")
+        : "Server reachable, no models loaded.";
+    } catch (e) { status.textContent = "error: " + e.message; }
   }
 
   async function saveAccountKey() {
@@ -442,7 +490,11 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     const apiKey = $("acc-key").value.trim();
     const baseUrl = $("acc-base-url").value.trim();
     const status = $("acc-status");
-    if (!model || !apiKey) { status.textContent = "Model and API key are required."; return; }
+    const keyOptional = LOCAL_PROVIDERS.includes(provider);
+    if (!model || (!apiKey && !keyOptional)) {
+      status.textContent = keyOptional ? "Model is required." : "Model and API key are required.";
+      return;
+    }
     if (provider === "custom_openai" && !baseUrl) {
       status.textContent = "Base URL is required for a custom OpenAI-compatible endpoint.";
       return;
@@ -531,22 +583,64 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   }
 
   $("acc-save")?.addEventListener("click", saveAccountKey);
-  // One preset per supported provider — the ids each API actually expects.
+  $("acc-detect")?.addEventListener("click", detectLocalModels);
+  // Default model ids per provider — the ids each API actually expects.
+  // The datalist is pick-or-type: any custom id can still be typed in.
   const MODEL_PRESETS = {
     openai: "gpt-4o-mini",
     anthropic: "claude-3-5-sonnet-20241022",
     gemini: "gemini-3.6-flash",
     groq: "llama-3.3-70b-versatile",
     openrouter: "openai/gpt-4o-mini",
+    zen: "muse-spark-1.3-contributor-free",
+    lmstudio: "",
+    ollama: "",
+    llamacpp: "",
     custom_openai: ""
   };
+  const MODEL_OPTIONS = {
+    openai: ["gpt-4o-mini", "gpt-4o"],
+    anthropic: ["claude-3-5-sonnet-20241022"],
+    gemini: ["gemini-3.6-flash", "gemini-3.5-flash-lite"],
+    groq: ["llama-3.3-70b-versatile", "openai/gpt-oss-20b"],
+    openrouter: ["openai/gpt-4o-mini"],
+    zen: [
+      "muse-spark-1.3-contributor-free",
+      "muse-spark-1.2-contributor-free",
+      "big-pickle",
+      "mimo-v2.5-free",
+      "ling-3.0-flash-fin-free",
+      "nemotron-3-ultra-free",
+      "nemotron-3.5-lightning-free",
+      "deepseek-v4-flash-free"
+    ],
+    lmstudio: [],
+    ollama: [],
+    llamacpp: [],
+    custom_openai: []
+  };
+  function syncModelList() {
+    const sel = $("acc-provider"), list = $("acc-model-list");
+    if (!sel || !list) return;
+    const opts = MODEL_OPTIONS[sel.value] || [];
+    list.innerHTML = "";
+    opts.forEach((m) => {
+      const o = document.createElement("option");
+      o.value = m;
+      list.appendChild(o);
+    });
+    const note = $("acc-zen-note");
+    if (note) note.classList.toggle("hidden", sel.value !== "zen");
+  }
   $("acc-provider")?.addEventListener("change", (e) => {
     const p = e.target.value;
     if ($("acc-model") && MODEL_PRESETS[p] !== undefined) {
       $("acc-model").value = MODEL_PRESETS[p];
     }
+    syncModelList();
     syncBaseUrlField();
   });
+  syncModelList();
   syncBaseUrlField();
 
   function loadCurrent() { if (active) load(currentTab); }

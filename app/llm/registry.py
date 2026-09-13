@@ -7,8 +7,10 @@ from app.llm.base import LLMProvider
 from app.llm.custom_provider import CustomOpenAICompatibleProvider
 from app.llm.gemini_provider import GeminiProvider
 from app.llm.groq_provider import GroqProvider
+from app.llm.lmstudio_provider import LlamaCppProvider, LmStudioProvider, OllamaProvider
 from app.llm.openai_provider import OpenAIProvider
 from app.llm.openrouter_provider import OpenRouterProvider
+from app.llm.zen_provider import ZenProvider
 
 PROVIDERS: dict[str, type[LLMProvider]] = {
     "openai": OpenAIProvider,
@@ -17,6 +19,10 @@ PROVIDERS: dict[str, type[LLMProvider]] = {
     "groq": GroqProvider,
     "openrouter": OpenRouterProvider,
     "custom_openai": CustomOpenAICompatibleProvider,
+    "zen": ZenProvider,
+    "lmstudio": LmStudioProvider,
+    "ollama": OllamaProvider,
+    "llamacpp": LlamaCppProvider,
 }
 
 # Spellings accepted for a provider besides its registry key.
@@ -29,6 +35,13 @@ ALIASES = {
     "vertex": "gemini",
     "claude": "anthropic",
     "groqcloud": "groq",
+    "opencode": "zen",
+    "opencode_zen": "zen",
+    "opencode-zen": "zen",
+    "lm_studio": "lmstudio",
+    "lm-studio": "lmstudio",
+    "llama.cpp": "llamacpp",
+    "llama_cpp": "llamacpp",
 }
 
 

@@ -19,6 +19,11 @@ _MODEL_PREFIX_PROVIDERS = {
     "claude": "anthropic",
     "groq": "groq",
     "openrouter": "openrouter",
+    "zen": "zen",
+    "opencode": "zen",
+    "lmstudio": "lmstudio",
+    "ollama": "ollama",
+    "llamacpp": "llamacpp",
 }
 
 

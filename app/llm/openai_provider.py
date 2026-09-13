@@ -14,6 +14,7 @@ from app.llm.base import (
     ToolSchema,
     classify_llm_error,
     strip_routing_prefix,
+    tool_unsupported_error,
 )
 
 
@@ -197,6 +198,12 @@ class OpenAIProvider(LLMProvider):
         try:
             response = self.client.chat.completions.create(**params, **kwargs)
         except Exception as exc:
+            if "tools" in params:
+                tool_err = tool_unsupported_error(
+                    exc, provider=self.PROVIDER_NAME, model=model_name
+                )
+                if tool_err:
+                    raise RuntimeError(tool_err) from exc
             raise RuntimeError(
                 classify_llm_error(exc, provider=self.PROVIDER_NAME, model=model_name)
             ) from exc

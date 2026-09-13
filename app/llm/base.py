@@ -119,6 +119,32 @@ def _error_context(provider: str, model: str) -> str:
     return f" [provider={provider or 'unknown'}, model={model or 'unknown'}]"
 
 
+def tool_unsupported_error(exc: Exception, *, provider: str = "", model: str = "") -> str | None:
+    """A clear error when the API rejects a request that carried tool definitions.
+
+    Small local models (LM Studio / Ollama / llama.cpp) often lack function
+    calling; the server then 400s on `tools`/`functions`. Per Mk11 the user must
+    be told the model can't use tool calling — not a generic provider error.
+    Returns None when the failure is not tool-related.
+    """
+    msg = str(exc).lower()
+    if not any(k in msg for k in ["tool", "function"]):
+        return None
+    if not any(
+        k in msg
+        for k in [
+            "support", "unexpected", "unknown", "invalid", "not allowed", "unrecognized",
+            "400", "bad request", "validation", "schema", "additional properties",
+        ]
+    ):
+        return None
+    where = _error_context(provider, model)
+    return (
+        "LLM provider model does not support tool calling: the request included tool "
+        f"definitions and the API rejected them{where} {_sanitize_upstream(str(exc)) or ''}".rstrip()
+    )
+
+
 def _classify(exc: Exception) -> str:
     msg = str(exc).lower()
     if any(k in msg for k in ["auth", "api key", "unauthorized", "invalid key", "authentication", "401", "incorrect api key"]):

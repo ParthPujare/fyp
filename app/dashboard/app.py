@@ -922,8 +922,16 @@ def _normalize_model(provider: str, model: str) -> str:
     `openai/gpt-oss-20b`, which became `groq/openai/gpt-oss-20b` and 404'd. Now it
     only removes a prefix that redundantly repeats the selected provider, so both
     `groq/llama-3.3-70b-versatile` and `openai/gpt-oss-20b` end up correct.
+    Zen additionally accepts the `opencode/` spelling (`opencode/<id>` in Zen docs).
     """
-    return strip_routing_prefix((model or "").strip(), normalize_provider_type(provider))
+    p_type = normalize_provider_type(provider)
+    if p_type == "zen":
+        return strip_routing_prefix((model or "").strip(), "zen", "opencode")
+    if p_type in ("lmstudio", "ollama", "llamacpp"):
+        return strip_routing_prefix(
+            (model or "").strip(), p_type, "lm_studio", "lm-studio", "llama.cpp", "llama_cpp"
+        )
+    return strip_routing_prefix((model or "").strip(), p_type)
 
 
 class LLMKeyRequest(BaseModel):
@@ -945,6 +953,22 @@ def _validated_key_fields(req: LLMKeyRequest) -> tuple[str, str, str, str]:
     model = _normalize_model(provider, req.model or "")
     api_key = (req.api_key or "").strip()
     base_url = (req.base_url or "").strip()
+    p_type = normalize_provider_type(provider)
+    if p_type in ("lmstudio", "ollama", "llamacpp"):
+        from app.llm.lmstudio_provider import DUMMY_API_KEY, LOCAL_BASE_URLS
+
+        if not model:
+            raise HTTPException(status_code=422, detail="model is required")
+        if not api_key:
+            api_key = DUMMY_API_KEY
+        if not base_url:
+            base_url = LOCAL_BASE_URLS[p_type]
+        if not is_supported(provider):
+            raise HTTPException(
+                status_code=422,
+                detail=f"unsupported provider {provider!r}; supported: {sorted(PROVIDERS)}",
+            )
+        return provider, model, api_key, base_url
     if not provider or not model or not api_key:
         raise HTTPException(status_code=422, detail="provider, model, and api_key are required")
     if not is_supported(provider):
@@ -957,6 +981,10 @@ def _validated_key_fields(req: LLMKeyRequest) -> tuple[str, str, str, str]:
             status_code=422,
             detail="base_url is required for a custom OpenAI-compatible endpoint",
         )
+    if normalize_provider_type(provider) == "zen" and not base_url:
+        from app.llm.zen_provider import BASE_URL as _ZEN_BASE_URL
+
+        base_url = _ZEN_BASE_URL
     return provider, model, api_key, base_url
 
 
@@ -965,6 +993,51 @@ def get_own_llm_keys(authorization: str | None = Header(default=None)) -> list[d
     claims, _token = _verified_member(authorization)
     store = get_store()
     return [k.to_public() for k in store.list_llm_keys(claims["sub"])]
+
+
+@app.get("/api/account/local-models")
+def list_local_models(
+    provider: str = Query(default="lmstudio"),
+    base_url: str = Query(default=""),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Loaded-model ids from a local OpenAI-compatible server (plan Mk11).
+
+    Proxies `GET {base}/v1/models` so the Account tab can offer the models the
+    server actually has loaded (LM Studio loads several at once). Member JWT
+    only; short timeout — a stopped server is a 502, never a hang.
+    """
+    _verified_member(authorization)
+    p_type = normalize_provider_type(provider or "lmstudio")
+    base = (base_url or "").strip()
+    if p_type == "custom_openai":
+        if not base:
+            raise HTTPException(status_code=422, detail="base_url is required")
+    elif p_type in ("lmstudio", "ollama", "llamacpp"):
+        from app.llm.lmstudio_provider import LOCAL_BASE_URLS
+
+        base = base or LOCAL_BASE_URLS[p_type]
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail=f"model detection supports local providers only, got {provider!r}",
+        )
+    url = base.rstrip("/") + "/models"
+    try:
+        resp = httpx.get(url, timeout=5.0)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"local server unreachable: {exc}") from exc
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=502, detail=f"local server returned {resp.status_code}: {resp.text[:200]}"
+        )
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="local server returned invalid JSON") from exc
+    items = data.get("data", []) if isinstance(data, dict) else []
+    ids = [str(d.get("id")) for d in items if isinstance(d, dict) and d.get("id")]
+    return {"provider": p_type, "base_url": base, "models": ids}
 
 
 @app.post("/api/account/llm-keys")
