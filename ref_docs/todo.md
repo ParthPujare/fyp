@@ -26,11 +26,12 @@ This interacts with the memory write path (`app/agent/graph.py` `reflect`, centr
 
 ---
 
-## 3. Auto-learn preferences (Hermes-style) instead of explicit adds
+## 3. Auto-learn user facts with LLM as the base (Hermes-style)
 
 The product vision: a **personal assistant for company users where sharing memory boosts its ability** — like Hermes.
 
-- Preferences should be **auto-learned** from normal usage/conversation (the current keyword-rule extraction in `app/memory/extract.py` is a primitive first step; continue expanding toward genuine learned behavior).
+- Use an **LLM as the base for learning facts about users** from normal usage/conversation, replacing/augmenting the current keyword-rule extraction in `app/memory/extract.py`.
+- Extract durable user facts (preferences, role/context, recurring tasks, constraints) and propose them as memory writes through the existing tier + approval path (central/dept/personal).
 - Users should **not** have to explicitly add preferences, although they keep the **ability to do so manually** if they want to.
 
 ---
@@ -61,20 +62,35 @@ For ambiguous tasks, ask clarifying questions rather than assuming intent — si
 
 ---
 
-## 7. API Key Integration (BYOK — Bring Your Own Key)
+## 7. Connect external tools (direct + via Composio) for real tool-calling
 
-Core functionality to enable real LLM chat for all users (like ChatGPT):
+Make tool-calling actually useful so this becomes a real harness, not just chat + memory:
 
-- Each user provides their own LLM API key (OpenAI, Anthropic, Gemini, etc.) via the dashboard
-- Keys are stored encrypted per-user in the MemberStore (`data/members.sqlite`)
-- Gateway uses the user's key for their chat requests (LiteLLM provider per-user)
-- Fallback to mock provider if no key is set (preserves offline demo)
-- Admin can view key status (set/unset) but not the key itself
-- Keys never leave the server; only used server-side for LLM calls
+- Support connecting to various tools **directly** plus through an aggregator like **Composio** (or equivalent platform).
+- Connected tools become callable by the agent (LangGraph tool nodes), scoped per-user via their own credentials/keys.
+- Skills (`app/skills/`) become the abstraction layer over connected tools rather than canned markdown scripts.
 
-Points of interest:
-- `app/auth/store.py` — add `api_key_encrypted` column to members table
-- `app/llm/factory.py` — per-user LLMProvider creation from stored key
-- `app/gateway/app.py` — `/chat` uses caller's provider
-- `app/dashboard/static/index.html` — key management UI in member settings
-- `app/config.py` — encryption settings (Fernet from `cryptography`)
+---
+
+## 8. Switch model for the active key via the chat interface
+
+- Allow the user to **switch the model used with their active API key** from within the chat UI (e.g. model picker/dropdown in the dashboard chat surface).
+- Applies per-session/user without re-entering the key; gateway rebuilds the per-user provider (LiteLLM) for the selected model.
+- Fall back to the default/mock provider behavior when no key is set (preserves offline demo).
+
+---
+
+## 9. Self-edit codebase via the chat UI (lowest priority)
+
+- Allow fixes/updates to the codebase to be made **through the chat UI** (agent edits code, user reviews/applies).
+- Lowest priority — treat as a stretch goal after tool connectivity (7) and model switching (8) are solid.
+
+---
+
+## 10. External DB provisioning with request-access flow
+
+If the agent doesn't have access to an external DB/source, it should request access on the user's behalf, then auto-connect once granted:
+
+- e.g. new marketing employee wants to research old campaigns but lacks access → asks the agent → agent files an access request to the data owner/admin.
+- On approval, the harness provisions the connection (credentials, scoped read access) and the agent can then query/answer from that DB.
+- Needs: per-source access policy, pending-request state + notifications, audit trail, and least-privilege / revocable grants.

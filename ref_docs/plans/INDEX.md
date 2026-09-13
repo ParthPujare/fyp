@@ -17,6 +17,7 @@ original 16-week plan** (`ref_docs/plans/plan_mk1_core_harness.md`) and is froze
 | Mk6 | Official Google GenAI SDK Integration for Gemini Provider (`google-genai`) | **DONE 2026-09-09 (session 017)** | 2026-09-09 → | Migrate GeminiProvider from direct httpx to official `google-genai` SDK while keeping other providers fully isolated | [./plan_mk6_google_sdk.md](./plan_mk6_google_sdk.md) |
 | Mk7 | Gemini provider hardening + editable BYOK key models | **Phase 1 DONE 2026-09-12 (session 018)**; Phase 2 (key replacement + live verify) open | 2026-09-12 → | Editable saved-key models, sanitized upstream error detail, defaults on `gemini-3.6-flash` | [./plan_mk7_gemini_hardening.md](./plan_mk7_gemini_hardening.md) |
 | Mk8 | Chat UI declutter + correct memory learning (separate memory tab, title/error/input fixes, LLM extraction) | In Progress | 2026-09-12 → | Uncluttered chat (no inline memory, no `user:` noise, multiline, first-message titles) + memory stores only relevant facts | [./plan_mk8_chat_cleanup.md](./plan_mk8_chat_cleanup.md) |
+| Mk9 | Real tool-calling harness — hybrid Composio + direct, Gmail + GitHub MVP (per-user BYO Composio, full zero-trust enforcement, connect + chat-use) | Planned 2026-09-13 | 2026-09-13 → | External apps callable via harness pipeline; skills over connected tools (todo #4/#7) | [./plan_mk9_external_tools.md](./plan_mk9_external_tools.md) |
 
 ## Rules
 
