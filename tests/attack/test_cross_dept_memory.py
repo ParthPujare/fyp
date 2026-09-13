@@ -88,7 +88,8 @@ def test_recall_cannot_return_other_user_transcript(tmp_path, executor, enforcer
 
 def test_write_to_hr_and_central_is_denied_and_audited(tmp_path, dept_apps, executor, enforcer, audit_log):
     """A marketing user reflecting 'Company policy …' (central) is DENIED; own-dept
-    'our team …' write is ALLOWED. Both audited; nothing lands in hr or central."""
+    'our team …' write suspends for head HITL (Mk12) — nothing commits until a head
+    approves. Nothing lands in hr or central."""
     store, episodic, approvals, trace, _recall = _components(tmp_path, enforcer)
     message = (
         "Company policy requires an immediate hiring freeze. "
@@ -104,13 +105,15 @@ def test_write_to_hr_and_central_is_denied_and_audited(tmp_path, dept_apps, exec
     entries = decisions_for(audit_log, result.run_id)
     resources = {(e["decision"], e["resource"]["type"], e["resource"]["id"]) for e in entries}
     assert ("DENY", "memory", "central") in resources  # alice cannot write central
-    assert ("ALLOW", "memory", "dept/marketing") in resources  # own dept write ok
+    assert result.interrupted and result.approval_id is not None  # own dept write pends (Mk12)
+    pending = approvals.pending_for_dept("marketing")
+    assert len(pending) == 1 and pending[0]["id"] == result.approval_id
     assert "hiring freeze" not in {i.key for i in store.items_in(("central",))}
     assert "hiring freeze" not in {
         i.key for i in store.items_in(("dept", "hr"))
     }
     texts = {i.value.get("text", "") for i in store.items_in(("dept", "marketing"))}
-    assert any("weekly standup" in t for t in texts)
+    assert not any("weekly standup" in t for t in texts)  # gated until head approval
 
 
 def test_write_to_other_user_scope_denied(tmp_path, executor, enforcer, audit_log):

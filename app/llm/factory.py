@@ -60,26 +60,32 @@ def get_provider_for_user(
     """Resolution chain: User specified key_id > User's active key > global provider config > MockLLM."""
     settings = settings or get_settings()
     if username:
+        from fastapi import HTTPException
+
+        from app.auth.users import get_store
+        member_store = get_store()
+        key_data = None
         try:
-            from app.auth.users import get_store
-            member_store = get_store()
-            key_data = None
             if key_id:
                 key_data = member_store.get_llm_key_by_id(username, key_id)
             if not key_data:
                 key_data = member_store.get_active_llm_key(username)
-            if key_data:
-                provider_type, model_name, decrypted_key, base_url = key_data
-                return get_provider_instance(
-                    provider_type=provider_type,
-                    api_key=decrypted_key,
-                    base_url=base_url or None,
-                    model=model_name,
-                    temperature=settings.llm.temperature,
-                    max_tokens=settings.llm.max_tokens,
-                )
-        except Exception as exc:
-            print(f"[LLM Error] Failed to resolve user provider for {username}: {exc}")
-            raise
+        except HTTPException as exc:
+            # Stale token (rotated LLM__FERNET_KEY) or missing master key: don't
+            # kill the turn — fall back to the global/mock provider so chat keeps
+            # working. The row is flagged stale in /api/users; re-saving the key
+            # restores per-user routing.
+            print(f"[LLM] Stored key for {username} unusable ({exc.detail}); using fallback provider.")
+            key_data = None
+        if key_data:
+            provider_type, model_name, decrypted_key, base_url = key_data
+            return get_provider_instance(
+                provider_type=provider_type,
+                api_key=decrypted_key,
+                base_url=base_url or None,
+                model=model_name,
+                temperature=settings.llm.temperature,
+                max_tokens=settings.llm.max_tokens,
+            )
     return get_provider(settings)
 

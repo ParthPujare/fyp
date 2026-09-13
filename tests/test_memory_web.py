@@ -200,14 +200,38 @@ def test_admin_central_and_private_facts_via_memory_browser(web):
     assert harness.client.post("/api/memory/bogus", json={"text": "x"}, headers=_auth("admin@acme.com")).status_code == 422
 
 
+def _ensure_head(harness) -> None:
+    """Create the marketing head via the Members API (Mk12 dept-HITL approver)."""
+    created = harness.client.post(
+        "/api/members",
+        json={"username": "mhead@acme.com", "password": "head12345", "role": "marketing_head",
+              "dept": "marketing"},
+        headers=_auth("admin@acme.com"),
+    )
+    assert created.status_code == 200, created.text
+
+
+def _approve_dept_as_head(harness, approval_id: str) -> None:
+    decided = harness.client.post(
+        f"/api/dept/approvals/{approval_id}/decide",
+        json={"approve": True},
+        headers=_auth("mhead@acme.com"),
+    )
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["status"] == "approved"
+
+
 def test_alice_dept_and_private_facts_via_chat(web):
-    """Alice chats a dept + private fact (no HITL): her memory/me shows exactly
-    her own scopes and excludes another user's."""
+    """Alice chats a dept + private fact: the dept fact suspends for head HITL
+    (Mk12) while the private fact auto-commits; after the head approves, her
+    memory/me shows exactly her own scopes and excludes another user's."""
     harness = web
+    _ensure_head(harness)
     harness.provider = MockLLM(script={ALICE_FACTS_MSG: {"text": "noted.", "tool_calls": []}})
 
     body = _chat(harness, "alice@acme.com", ALICE_FACTS_MSG)
-    assert body["interrupted"] is False
+    assert body["interrupted"] is True
+    _approve_dept_as_head(harness, body["approval_id"])
 
     mine = _member_memory(harness, "alice@acme.com")
     assert set(mine) == {"central", "dept/marketing", "user/alice@acme.com"}
@@ -218,14 +242,21 @@ def test_alice_dept_and_private_facts_via_chat(web):
         e["decision"] == "ALLOW" and e["resource"]["type"] == "memory"
         for e in harness.components["audit"].entries()
     )
+    assert any(
+        e["decision"] == "APPROVED" and e["reason"] == "dept-hitl"
+        for e in harness.components["audit"].entries()
+    )
 
 
 def test_molly_second_marketing_member_reads_shared_dept_memory(web):
     """Phase-5 acceptance: a 2nd marketing member (created in the Members tab)
     sees the marketing dept-scope facts alice wrote — shared dept memory."""
     harness = web
+    _ensure_head(harness)
     harness.provider = MockLLM(script={ALICE_FACTS_MSG: {"text": "noted.", "tool_calls": []}})
-    _chat(harness, "alice@acme.com", ALICE_FACTS_MSG)
+    body = _chat(harness, "alice@acme.com", ALICE_FACTS_MSG)
+    assert body["interrupted"] is True
+    _approve_dept_as_head(harness, body["approval_id"])
 
     created = harness.client.post(
         "/api/members",

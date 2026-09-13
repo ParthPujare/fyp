@@ -85,6 +85,69 @@ p, hr_agent, hr, skill_triage_incident, use
 p, finance_agent, finance, skill_triage_incident, use
 p, devops_agent, devops, skill_triage_incident, use
 
+# ---- Department heads (Mk12, todo #2) ----
+# Per-dept `{dept}_head` mirrors the member role's tool/memory/skill rows so a head
+# can work as a senior member of their own dept. Dept-write APPROVAL authority itself
+# is application logic (`is_dept_head`), not a Casbin row. Multiple heads per dept allowed.
+p, marketing_head, marketing, crm, read
+p, marketing_head, marketing, crm, create
+p, marketing_head, marketing, memory_central, read
+p, marketing_head, marketing, memory_dept, read
+p, marketing_head, marketing, memory_dept, write
+p, marketing_head, marketing, memory_user, read
+p, marketing_head, marketing, memory_user, write
+p, marketing_head, marketing, memory_recall, use
+p, marketing_head, marketing, pii_email, read
+p, marketing_head, marketing, skill_launch_campaign, use
+p, marketing_head, marketing, skill_triage_incident, use
+p, marketing_head, marketing, skill_send_campaign_email, use
+p, marketing_head, marketing, gmail, read
+p, marketing_head, marketing, gmail, send
+p, marketing_head, marketing, gmail, write
+
+p, hr_head, hr, hr, read
+p, hr_head, hr, hr, create
+p, hr_head, hr, memory_central, read
+p, hr_head, hr, memory_dept, read
+p, hr_head, hr, memory_dept, write
+p, hr_head, hr, memory_user, read
+p, hr_head, hr, memory_user, write
+p, hr_head, hr, memory_recall, use
+p, hr_head, hr, pii_email, read
+p, hr_head, hr, skill_new_leave_request, use
+p, hr_head, hr, skill_triage_incident, use
+p, hr_head, hr, gmail, read
+p, hr_head, hr, gmail, write
+
+p, finance_head, finance, finance, read
+p, finance_head, finance, finance, transfer
+p, finance_head, finance, memory_central, read
+p, finance_head, finance, memory_dept, read
+p, finance_head, finance, memory_dept, write
+p, finance_head, finance, memory_user, read
+p, finance_head, finance, memory_user, write
+p, finance_head, finance, memory_recall, use
+p, finance_head, finance, pii_email, read
+p, finance_head, finance, skill_triage_incident, use
+p, finance_head, finance, gmail, read
+p, finance_head, finance, gmail, write
+
+p, devops_head, devops, devops, read
+p, devops_head, devops, devops, create
+p, devops_head, devops, memory_central, read
+p, devops_head, devops, memory_dept, read
+p, devops_head, devops, memory_dept, write
+p, devops_head, devops, memory_user, read
+p, devops_head, devops, memory_user, write
+p, devops_head, devops, memory_recall, use
+p, devops_head, devops, pii_email, read
+p, devops_head, devops, skill_triage_incident, use
+p, devops_head, devops, skill_triage_github_issue, use
+p, devops_head, devops, github, read
+p, devops_head, devops, github, create
+p, devops_head, devops, gmail, read
+p, devops_head, devops, gmail, write
+
 # ---- Registered departments ----
 # The dashboard `POST /api/departments` (`_append_policy_row`) appends one
 # `p, <role>, <dept>, *, *` row per registered department below. The append is

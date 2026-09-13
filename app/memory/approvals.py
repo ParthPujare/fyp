@@ -110,6 +110,25 @@ class ApprovalStore:
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    @staticmethod
+    def dept_of(entry: dict[str, Any]) -> str | None:
+        """Owning department of a memory approval, else None (Mk12).
+
+        Memory HITL resources are `{"type": "memory", "id": <scope>}`; only
+        `dept/<name>` scopes are head-owned. Tool-gate resources (`type == tool`)
+        and central scopes return None.
+        """
+        resource = entry.get("resource") or {}
+        if resource.get("type") != "memory":
+            return None
+        scope = str(resource.get("id", ""))
+        kind, _, value = scope.partition("/")
+        return value if kind == "dept" and value else None
+
+    def pending_for_dept(self, dept: str) -> list[dict[str, Any]]:
+        """Pending memory approvals owned by one department's head (Mk12)."""
+        return [i for i in self.pending_items() if self.dept_of(i) == dept]
+
     def decide(self, approval_id: str, approve: bool, admin: str) -> dict[str, Any]:
         row = self._conn.execute(
             "SELECT * FROM approvals WHERE id = ?", (approval_id,)

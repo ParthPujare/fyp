@@ -169,6 +169,10 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       <h2>Pending approvals</h2>
       <div id="approvals"></div>
     </div>
+    <div id="dept-approvals-view" class="hidden">
+      <h2>Department approvals <span class="muted" style="font-weight:normal;font-size:13px">(your dept's pending memory writes)</span></h2>
+      <div id="dept-approvals"></div>
+    </div>
     <div id="users-view" class="hidden">
       <h2>Members</h2>
       <div class="row" style="margin-bottom:12px">
@@ -263,8 +267,8 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   const $ = (id) => document.getElementById(id);
   const TOKENS = { admin: "harness_admin_token", member: "harness_member_token" };
   const CLAIMS = { admin: "harness_admin_claims", member: "harness_member_claims" };
-  const TAB_LABELS = { chat: "Chat", account: "Account", approvals: "Approvals", users: "Members", depts: "Departments",
-                       skills: "Skills", memory: "Memory", ops: "Ops" };
+  const TAB_LABELS = { chat: "Chat", account: "Account", approvals: "Approvals", "dept-approvals": "Dept approvals",
+                       users: "Members", depts: "Departments", skills: "Skills", memory: "Memory", ops: "Ops" };
   const ALL_TABS = Object.keys(TAB_LABELS);
   const ADMIN_TABS = ["approvals", "users", "depts", "skills", "memory", "ops"];
 
@@ -288,7 +292,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     else if (identities.member) active = "member";
     else if (identities.admin) active = "admin";
     else active = null;
-    if (active) currentTab = identities[active].claims.role === "admin" ? "approvals" : "chat";
+    if (active) currentTab = defaultTabFor(identities[active].claims.role);
   }
 
   function setIdentity(label, claims, token) {
@@ -306,8 +310,9 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       localStorage.setItem("harness_active", active || "");
     }
     loginMode = null;
+    resetChatState();
     render();
-    if (active) { currentTab = identities[active].claims.role === "admin" ? "approvals" : "chat"; loadCurrent(); }
+    if (active) { currentTab = defaultTabFor(identities[active].claims.role); loadCurrent(); }
   }
 
   function switchTo(label) {
@@ -315,7 +320,8 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     active = label;
     localStorage.setItem("harness_active", label);
     loginMode = null;
-    currentTab = identities[active].claims.role === "admin" ? "approvals" : "chat";
+    resetChatState();
+    currentTab = defaultTabFor(identities[active].claims.role);
     render();
     loadCurrent();
   }
@@ -347,11 +353,23 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
 
   // ---- render --------------------------------------------------------------
 
+  function isHeadRole(role) { return typeof role === "string" && role.endsWith("_head"); }
+
+  function defaultTabFor(role) {
+    if (role === "admin") return "approvals";
+    if (isHeadRole(role)) return "dept-approvals";
+    return "chat";
+  }
+
   function tabsForRole() {
     if (!active || !identities[active]) return [];
-    // Mk8: members get a read-only Memory tab (own scopes via /api/memory/me);
-    // admins keep the full browser.
-    return identities[active].claims.role === "admin" ? ADMIN_TABS : ["memory"];
+    const role = identities[active].claims.role;
+    if (role === "admin") return ADMIN_TABS;
+    // Mk12: dept heads get their own approvals queue, separate from the admin queue,
+    // plus the read-only Memory tab (own scopes via /api/memory/me, like members).
+    if (isHeadRole(role)) return ["dept-approvals", "memory"];
+    // Mk8: members get a read-only Memory tab (own scopes via /api/memory/me).
+    return ["memory"];
   }
 
   function render() {
@@ -411,6 +429,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     if (tab === "chat") loadChat();
     if (tab === "account") { loadAccount(); loadIntegrations(); }
     if (tab === "approvals") loadApprovals();
+    if (tab === "dept-approvals") loadDeptApprovals();
     if (tab === "users") loadUsers();
     if (tab === "depts") loadDepts();
     if (tab === "skills") loadSkills();
@@ -850,6 +869,20 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   // Unsent new chat, shown optimistically until the server confirms it.
   let pendingNewThread = null;
 
+  function resetChatState() {
+    // Chat state is per-identity: switching accounts must never carry the
+    // previous account's thread/transcript (or the next send would land in a
+    // foreign thread). The thread list reloads for the new identity on demand.
+    currentThreadId = null;
+    pendingNewThread = null;
+    const transcript = $("chat-transcript");
+    if (transcript) transcript.innerHTML = "";
+    const status = $("chat-status");
+    if (status) status.textContent = "";
+    const box = $("chat-msg");
+    if (box) box.value = "";
+  }
+
   async function loadChatThreads() {
     const list = $("threads-list");
     if (!list) return;
@@ -950,6 +983,12 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     const msg = $("chat-msg").value.trim();
     const id = identities[active];
     if (!msg || !id) return;
+    // Belt-and-braces: never send into another identity's thread (e.g. a stale
+    // id kept across account switches) — fall back to this account's default.
+    const ownPrefix = "user:" + id.claims.sub;
+    if (currentThreadId && currentThreadId !== ownPrefix && !currentThreadId.startsWith(ownPrefix + ":")) {
+      currentThreadId = null;
+    }
     $("chat-status").textContent = "";
     pushTranscript("user", esc(msg));
     $("chat-status").textContent = "working…";
@@ -985,8 +1024,8 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     }
     if (out.interrupted && out.approval_id) {
       const hint = identities.admin
-        ? "switch to the admin session and open Approvals to approve."
-        : "an admin must sign in and approve it in the Approvals tab.";
+        ? "switch to the admin session and open Approvals to approve (dept writes may need the dept head instead)."
+        : "an admin or your department head must approve it (Approvals / Dept approvals tab).";
       html += `<div class="status" style="color:#fef08a">&#9209; run suspended (approval <code>${esc(out.approval_id)}</code>) — ${esc(hint)}</div>`;
     }
     if (out.connect_required && out.connect_required.length) {
@@ -1013,14 +1052,17 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
 
   // ---- Approvals --------------------------------------------------------------
 
-  function approvalCard(item) {
+  function approvalCard(item, decideBase, reload) {
     const actor = item.actor || {}, res = item.resource || {}, payload = item.payload || {};
     const ctx = document.createElement("div");
     ctx.className = "card";
+    const tierPill = item.tier && item.tier !== res.type
+      ? `<span class="pill">${esc(item.tier)}${item.dept ? " · " + esc(item.dept) : ""}</span>` : "";
     ctx.innerHTML = `
       <div class="row">
         <span class="badge ${item.status}">${esc(item.status)}</span>
         <span><b>${esc(res.type)}:</b> <code>${esc(res.id || "")}</code></span>
+        ${tierPill}
         <span class="muted">by ${esc(actor.sub || "")} (${esc(actor.role || "")} / ${esc(actor.dept || "")})</span>
         <span class="pill">thread ${esc(item.thread_id || "")}</span>
         <span class="pill">${esc((item.created_ts || "").slice(0, 19).replace("T", " "))}</span>
@@ -1032,22 +1074,22 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
         <button class="bad" data-act="reject" data-id="${esc(item.id)}">Reject</button>
       </div>
       <div class="status" data-status=""></div>`;
-    ctx.querySelector("[data-act=approve]").addEventListener("click", () => decide(item.id, true, ctx));
-    ctx.querySelector("[data-act=reject]").addEventListener("click", () => decide(item.id, false, ctx));
+    ctx.querySelector("[data-act=approve]").addEventListener("click", () => decide(item.id, true, ctx, decideBase, reload));
+    ctx.querySelector("[data-act=reject]").addEventListener("click", () => decide(item.id, false, ctx, decideBase, reload));
     return ctx;
   }
 
-  async function decide(id, approve, card) {
+  async function decide(id, approve, card, decideBase, reload) {
     const btn = card.querySelector("[data-status]");
     btn.textContent = "deciding...";
     try {
-      const out = await api("/api/approvals/" + encodeURIComponent(id) + "/decide",
+      const out = await api(decideBase + encodeURIComponent(id) + "/decide",
         { method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ approve }) });
       btn.textContent = out.status + " — reply: " + out.reply;
       btn.classList.add("muted");
       card.querySelectorAll("button[data-act]").forEach((b) => (b.disabled = true));
-      setTimeout(loadApprovals, 1200);
+      setTimeout(reload, 1200);
     } catch (e) { btn.textContent = "error: " + e.message; }
   }
 
@@ -1057,8 +1099,18 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       const items = await api("/api/approvals/pending");
       $("approvals").innerHTML = "";
       if (!items.length) { $("approvals").innerHTML = '<p class="muted">No pending approvals.</p>'; return; }
-      items.forEach((item) => $("approvals").appendChild(approvalCard(item)));
+      items.forEach((item) => $("approvals").appendChild(approvalCard(item, "/api/approvals/", loadApprovals)));
     } catch (e) { $("approvals").textContent = "error: " + e.message; }
+  }
+
+  async function loadDeptApprovals() {
+    $("dept-approvals").textContent = "loading...";
+    try {
+      const items = await api("/api/dept/approvals/pending");
+      $("dept-approvals").innerHTML = "";
+      if (!items.length) { $("dept-approvals").innerHTML = '<p class="muted">No pending department approvals.</p>'; return; }
+      items.forEach((item) => $("dept-approvals").appendChild(approvalCard(item, "/api/dept/approvals/", loadDeptApprovals)));
+    } catch (e) { $("dept-approvals").textContent = "error: " + e.message; }
   }
 
   // ---- Members (plan_mk2 Phase 4) ----

@@ -802,6 +802,22 @@ class MemberStore:
             (username,),
         )
 
+    def get_active_llm_key_meta(self, username: str) -> tuple[str, str] | None:
+        """(provider, model) for the user's active key — no decryption.
+
+        Status surfaces (e.g. `/api/users`) must never decrypt: one stale token
+        (rotated `LLM__FERNET_KEY`) would otherwise fail the whole listing.
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT provider, model FROM member_llm_keys WHERE username = ? AND active = 1",
+                (username,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return (row["provider"], row["model"]) if row else None
+
     def get_llm_key_by_id(self, username: str, key_id: str) -> tuple[str, str, str, str] | None:
         """(provider, model, decrypted_api_key, base_url) for one of the user's keys."""
         return self._llm_key_row(
@@ -1066,6 +1082,12 @@ class MemberStore:
 
     # ---- writes (admin-only, every change audit-logged) ----
 
+    @staticmethod
+    def _validate_head_role(role: str, dept: str) -> None:
+        """Mk12: a `*_head` role must own its own dept (`marketing_head` ⟺ `marketing`)."""
+        if role.endswith("_head") and role != f"{dept}_head":
+            raise MemberError(f"head role {role!r} must match its department {dept!r}")
+
     def create(
         self,
         username: str,
@@ -1075,6 +1097,7 @@ class MemberStore:
         scopes: list[str] | None = None,
         actor: str = "admin",
     ) -> MemberRecord:
+        self._validate_head_role(role, dept)
         if self.get(username) is not None:
             raise MemberExistsError(f"member {username!r} already exists")
         now = _now()
@@ -1113,6 +1136,7 @@ class MemberStore:
     ) -> MemberRecord:
         if self.get(username) is None:
             raise MemberError(f"member {username!r} not found")
+        self._validate_head_role(role, dept)
         conn = self._connect()
         try:
             conn.execute(

@@ -136,6 +136,48 @@ def test_admin_member_llm_keys_management(member_store, monkeypatch):
     assert alice_record["active_llm_key"] == {"provider": "anthropic", "model": "claude-3"}
 
 
+def test_users_listing_survives_rotated_fernet_key(member_store, monkeypatch):
+    """One stale token (rotated LLM__FERNET_KEY) must not break GET /api/users.
+
+    The affected row reports provider/model with stale:true so the key can be
+    re-saved; every other row is unaffected.
+    """
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("LLM__FERNET_KEY", Fernet.generate_key().decode("ascii"))
+    get_settings.cache_clear()
+    member_store.set_llm_key("alice@acme.com", "openai", "gpt-4o-mini", "sk-test-12345")
+
+    monkeypatch.setenv("LLM__FERNET_KEY", Fernet.generate_key().decode("ascii"))
+    get_settings.cache_clear()
+
+    client = TestClient(dashboard_app)
+    headers = {"Authorization": f"Bearer {make_token('admin@acme.com', member_store)}"}
+    resp = client.get("/api/users", headers=headers)
+    assert resp.status_code == 200
+    alice = next(u for u in resp.json() if u["username"] == "alice@acme.com")
+    assert alice["active_llm_key"] == {"provider": "openai", "model": "gpt-4o-mini", "stale": True}
+    bob = next(u for u in resp.json() if u["username"] == "bob@acme.com")
+    assert bob["active_llm_key"] is None
+
+
+def test_chat_falls_back_when_stored_key_undecryptable(member_store, monkeypatch):
+    """A stale token (rotated LLM__FERNET_KEY) must not kill chat — the global /
+    mock provider serves the turn until the key is re-saved."""
+    from cryptography.fernet import Fernet
+
+    from app.llm.mock import MockLLM
+
+    monkeypatch.setenv("LLM__FERNET_KEY", Fernet.generate_key().decode("ascii"))
+    get_settings.cache_clear()
+    member_store.set_llm_key("alice@acme.com", "openai", "gpt-4o-mini", "sk-test-12345")
+
+    monkeypatch.setenv("LLM__FERNET_KEY", Fernet.generate_key().decode("ascii"))
+    get_settings.cache_clear()
+    provider = get_provider_for_user(get_settings(), "alice@acme.com", member_store)
+    assert isinstance(provider, MockLLM)
+
+
 def test_model_ids_are_stored_as_the_provider_expects():
     """The saved id must be exactly what the provider's API accepts.
 

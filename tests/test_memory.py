@@ -336,15 +336,16 @@ def test_thread_reuses_snapshot_not_rebuilt(runner_factory, trace_store):
 # --------------------------------------------------------------------------- dept / user writes
 
 
-def test_dept_write_allowed_without_interrupt(runner_factory, memory_store, audit_log):
+def test_dept_write_suspends_for_head_approval(runner_factory, memory_store, approvals, audit_log):
+    """Mk12: a member's dept-tier write suspends for head HITL (no longer auto-commits)."""
     provider = MockLLM({"policy": {"text": "noted", "tool_calls": []}})
-    runner = runner_factory(provider=provider)
+    runner = runner_factory(provider=provider, approvals=approvals)
     res = runner(claims_of("alice@acme.com"), "Our team policy requires weekly standups.", thread_id="t-dept")
-    assert not res.interrupted
+    assert res.interrupted and res.approval_id is not None
     ns = scope_to_namespace(scope_dept("marketing"))
-    texts = [i.value.get("text") for i in memory_store.items_in(ns)]
-    assert any("weekly standups" in t for t in texts)
-    assert audit_log.entries()[-1]["decision"] == "ALLOW"
+    assert memory_store.items_in(ns) == []
+    pending = approvals.pending_for_dept("marketing")
+    assert len(pending) == 1 and pending[0]["id"] == res.approval_id
 
 
 def test_user_write_is_self_scoped(runner_factory, memory_store):

@@ -493,7 +493,13 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                 )
                 continue
 
-            if fact.scope == SCOPE_CENTRAL:
+            needs_hitl = fact.scope == SCOPE_CENTRAL or (
+                fact.scope.startswith("dept/")
+                and not deps.enforcer.is_dept_head(claims, fact.scope)
+            )
+            if needs_hitl:
+                tier = "central" if fact.scope == SCOPE_CENTRAL else "dept"
+                reason = "hitl" if tier == "central" else "dept-hitl"
                 approval_id = deps.approvals.create(
                     deps.run_id,
                     deps.thread_id,
@@ -505,7 +511,7 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                     deps.run_id,
                     TraceEventType.MEMORY_WRITE,
                     actor,
-                    {"scope": fact.scope, "op": fact.op, "decision": "pending", "approval_id": approval_id},
+                    {"scope": fact.scope, "op": fact.op, "decision": "pending", "approval_id": approval_id, "tier": tier},
                 )
                 approved = interrupt(
                     {
@@ -514,24 +520,25 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                         "actor": actor,
                         "text": fact.text,
                         "thread_id": deps.thread_id,
+                        "tier": tier,
                     }
                 )
                 if approved:
                     editor.apply(fact)
-                    deps.audit.log(decision="APPROVED", resource=resource, actor=actor, run_id=deps.run_id, reason="hitl")
+                    deps.audit.log(decision="APPROVED", resource=resource, actor=actor, run_id=deps.run_id, reason=reason)
                     deps.trace.add_event(
                         deps.run_id,
                         TraceEventType.MEMORY_WRITE,
                         actor,
-                        {"scope": fact.scope, "op": fact.op, "decision": "approved", "approval_id": approval_id},
+                        {"scope": fact.scope, "op": fact.op, "decision": "approved", "approval_id": approval_id, "tier": tier},
                     )
                 else:
-                    deps.audit.log(decision="REJECTED", resource=resource, actor=actor, run_id=deps.run_id, reason="hitl")
+                    deps.audit.log(decision="REJECTED", resource=resource, actor=actor, run_id=deps.run_id, reason=reason)
                     deps.trace.add_event(
                         deps.run_id,
                         TraceEventType.MEMORY_WRITE,
                         actor,
-                        {"scope": fact.scope, "op": fact.op, "decision": "rejected", "approval_id": approval_id},
+                        {"scope": fact.scope, "op": fact.op, "decision": "rejected", "approval_id": approval_id, "tier": tier},
                     )
             else:
                 try:

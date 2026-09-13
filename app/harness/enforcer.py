@@ -34,6 +34,17 @@ MODEL_PATH = POLICY_DIR / "model.conf"
 POLICY_PATH = POLICY_DIR / "policy.csv"
 
 
+def head_role_for(dept: str) -> str:
+    """Canonical head role for a department (Mk12): `marketing` -> `marketing_head`."""
+    return f"{dept}_head"
+
+
+def dept_of_scope(scope: str) -> str | None:
+    """Owning department of a `dept/<name>` scope, else None (Mk12)."""
+    kind, _, value = scope.partition("/")
+    return value if kind == "dept" and value else None
+
+
 class PolicyEnforcer:
     def __init__(
         self,
@@ -120,6 +131,20 @@ class PolicyEnforcer:
                 return False
             return self.enforce(sub, dom, "memory_user", act)
         return False
+
+    def is_dept_head(self, claims: dict[str, Any], scope: str) -> bool:
+        """True iff claims hold the `{dept}_head` role for this dept scope (Mk12).
+
+        `dept/marketing` is head-owned by role `marketing_head` with `dept == marketing`.
+        Central/user scopes are never head-owned.
+        """
+        kind, _, value = scope.partition("/")
+        if kind != "dept" or not value:
+            return False
+        return (
+            str(claims.get("role", "")) == f"{value}_head"
+            and str(claims.get("dept", "")) == value
+        )
 
     def memory_recall_allowed(self, claims: dict[str, Any]) -> bool:
         """Gate for the `recall` tool (FTS5 episodic search)."""

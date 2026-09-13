@@ -114,6 +114,55 @@ def get_approval_store() -> ApprovalStore:
     return _get_components()["approvals"]
 
 
+def _verify_dept_head(authorization: str | None) -> dict[str, Any]:
+    """Verify a department-head JWT (Mk12): valid + active + `{dept}_head` role.
+
+    The role must own its own dept (`marketing_head` ⟺ `dept == marketing`);
+    stale/mismatched tokens are rejected so a moved member keeps no head power.
+    """
+    from app.harness.enforcer import head_role_for
+
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    token = authorization.split(" ", 1)[1]
+    try:
+        claims = verify_token(token, settings.jwt.secret, settings.jwt.algorithm)
+    except AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    if not is_active_member(str(claims.get("sub", ""))):
+        raise HTTPException(status_code=403, detail="account disabled or not a member")
+    role, dept = str(claims.get("role", "")), str(claims.get("dept", ""))
+    if not role.endswith("_head") or role != head_role_for(dept):
+        raise HTTPException(status_code=403, detail="only department heads may access this API")
+    return claims
+
+
+def _active_head_count(dept: str) -> int:
+    """Active `{dept}_head` members owning this dept (Mk12 escalation check)."""
+    from app.harness.enforcer import head_role_for
+
+    head_role = head_role_for(dept)
+    return sum(
+        1 for m in get_store().list() if m.active and m.role == head_role and m.dept == dept
+    )
+
+
+def _approval_view(item: dict[str, Any]) -> dict[str, Any]:
+    dept = ApprovalStore.dept_of(item)
+    return {
+        "id": item["id"],
+        "run_id": item["run_id"],
+        "thread_id": item["thread_id"],
+        "resource": item["resource"],
+        "actor": item["actor"],
+        "payload": _mask_payload(item["payload"]),
+        "status": item["status"],
+        "created_ts": item["created_ts"],
+        "tier": "dept" if dept is not None else item["resource"].get("type", "memory"),
+        "dept": dept,
+    }
+
+
 def get_resumer():
     def _resume(approval_id: str):
         c = _get_components()
@@ -330,20 +379,29 @@ def pending_approvals(
     approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
     authorization: str | None = Header(default=None),
 ) -> list[dict[str, Any]]:
+    """Admin queue: central + tool gates + ESCALATED dept items (Mk12).
+
+    A dept-tier item owned by a dept with ≥1 active head stays in that head's
+    queue only; it surfaces here iff the dept has no active head (fallback).
+    """
     _verify_admin(authorization)
-    return [
-        {
-            "id": item["id"],
-            "run_id": item["run_id"],
-            "thread_id": item["thread_id"],
-            "resource": item["resource"],
-            "actor": item["actor"],
-            "payload": _mask_payload(item["payload"]),
-            "status": item["status"],
-            "created_ts": item["created_ts"],
-        }
-        for item in approvals.pending_items()
-    ]
+    out: list[dict[str, Any]] = []
+    for item in approvals.pending_items():
+        dept = ApprovalStore.dept_of(item)
+        if dept is not None and _active_head_count(dept) > 0:
+            continue
+        out.append(_approval_view(item))
+    return out
+
+
+@app.get("/api/dept/approvals/pending")
+def pending_dept_approvals(
+    approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
+    authorization: str | None = Header(default=None),
+) -> list[dict[str, Any]]:
+    """A head's own-dept queue — separate from the admin queue (Mk12)."""
+    claims = _verify_dept_head(authorization)
+    return [_approval_view(i) for i in approvals.pending_for_dept(str(claims.get("dept", "")))]
 
 
 @app.post("/api/approvals/{approval_id}/decide")
@@ -371,6 +429,38 @@ def decide_approval(
     }
 
 
+@app.post("/api/dept/approvals/{approval_id}/decide")
+def decide_dept_approval(
+    approval_id: str,
+    req: DecideRequest,
+    resumer: Annotated[Any, Depends(get_resumer)],
+    approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """A head decides an item from their OWN dept queue (Mk12).
+
+    Cross-dept decides are 403; an admin deciding an escalated dept item must use
+    the admin endpoint. Any single head's decision resolves (multiple heads allowed).
+    """
+    claims = _verify_dept_head(authorization)
+    entry = approvals.get(approval_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
+    if entry["status"] != "pending":
+        raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
+    if ApprovalStore.dept_of(entry) != str(claims.get("dept", "")):
+        raise HTTPException(status_code=403, detail="not your department's approval")
+    approvals.decide(approval_id, req.approve, claims["sub"])
+    result = resumer(approval_id)
+    decided = approvals.get(approval_id)
+    return {
+        "approval_id": approval_id,
+        "status": decided["status"],
+        "thread_id": result.thread_id,
+        "reply": result.reply,
+    }
+
+
 @app.get("/api/users")
 def users(
     authorization: str | None = Header(default=None),
@@ -380,8 +470,20 @@ def users(
     out = []
     for m in store.list():
         pub = m.to_public()
-        active_key = store.get_active_llm_key(m.username)
-        pub["active_llm_key"] = {"provider": active_key[0], "model": active_key[1]} if active_key else None
+        try:
+            active_key = store.get_active_llm_key(m.username)
+        except HTTPException:
+            # One stale token (rotated LLM__FERNET_KEY) must not break the whole
+            # members listing — report metadata with a stale flag so the key can
+            # be re-saved from the Account tab.
+            meta = store.get_active_llm_key_meta(m.username)
+            pub["active_llm_key"] = (
+                {"provider": meta[0], "model": meta[1], "stale": True} if meta else None
+            )
+        else:
+            pub["active_llm_key"] = (
+                {"provider": active_key[0], "model": active_key[1]} if active_key else None
+            )
         out.append(pub)
     return out
 
@@ -428,6 +530,8 @@ def create_member(
         ).to_public()
     except MemberExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except MemberError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.put("/api/members/{username}")
@@ -445,8 +549,15 @@ def update_member(
             scopes=list(req.scopes or []),
             actor=claims["sub"],
         ).to_public()
+    except LockoutGuardError:
+        raise
+    except MemberExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except MemberError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        msg = str(exc)
+        if "head role" in msg:
+            raise HTTPException(status_code=422, detail=msg) from exc
+        raise HTTPException(status_code=404, detail=msg) from exc
 
 
 @app.post("/api/members/{username}/activate")
@@ -575,19 +686,20 @@ def register_department(
 
 
 def _append_policy_row(role: str, dept: str) -> None:
-    """Append `p, <role>, <dept>, *, *` to policy.csv so the role is grantable.
-    `_build`/`load_policy` re-reads the file on the next version guard rebuild,
-    so the newly-registered role takes effect without a restart.
+    """Append `p, <role>, <dept>, *, *` (+ the Mk12 `{dept}_head` row) to policy.csv
+    so the role is grantable. `_build`/`load_policy` re-reads the file on the next
+    version guard rebuild, so the newly-registered role takes effect without a restart.
 
     Idempotent: an equivalent row already in the file is left alone. Casbin
     ignores duplicate rows, but an unconditional append grows the file without
     bound every time a department is re-registered.
     """
-    row = ("p", role, dept, "*", "*")
-    if _policy_has_row(row):
-        return
+    from app.harness.enforcer import head_role_for
+
     with open(_policy_csv(), "a", encoding="utf-8") as fh:
-        fh.write(f"p, {role}, {dept}, *, *\n")
+        for r in (role, head_role_for(dept)):
+            if not _policy_has_row(("p", r, dept, "*", "*")):
+                fh.write(f"p, {r}, {dept}, *, *\n")
 
 
 def _policy_has_row(row: tuple[str, ...]) -> bool:

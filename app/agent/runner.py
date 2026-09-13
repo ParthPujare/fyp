@@ -3,7 +3,8 @@
 Each call to `run_agent` runs the graph for `thread_id` (default: a fresh random
 thread). With a checkpointer, conversation state + the frozen memory snapshot
 persist per thread, so `/chat` becomes multi-turn. Central-tier memory writes
-suspend via `interrupt()`; `resume_agent` re-invokes the graph after an admin
+suspend via `interrupt()` for admin approval and dept-tier writes suspend for
+dept-head approval (Mk12); `resume_agent` re-invokes the graph after the
 decision. Every run is traced (run_start → nodes → tool_calls → memory → run_end).
 """
 
@@ -262,7 +263,7 @@ def resume_agent(
     evals_enabled: bool = True,
     judge_provider: LLMProvider | None = None,
 ) -> AgentResult:
-    """Apply an admin decision and resume a suspended central-write run."""
+    """Apply an admin/head decision and resume a suspended central/dept-write run."""
     settings = settings or get_settings()
     if approvals is None:
         approvals = ApprovalStore(settings.services.memory_path)
