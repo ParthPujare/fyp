@@ -1,0 +1,9 @@
+attack,suite,tests,passed,failed,pass_rate,ub95_if_zero_failures
+A3,test_cross_dept_memory,4,4,0,1.000,0.527
+A9,test_external_deny,3,3,0,1.000,0.632
+A6,test_hitl_bypass,5,5,0,1.000,0.451
+A7/A8,test_integrity,9,9,0,1.000,0.283
+A5,test_loop_abuse,5,5,0,1.000,0.451
+A1,test_policy_matrix,9,9,0,1.000,0.283
+A2,test_prompt_injection,6,6,0,1.000,0.393
+A4,test_skill_misuse,5,5,0,1.000,0.451

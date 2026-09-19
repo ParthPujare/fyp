@@ -106,3 +106,5 @@ If the agent doesn't have access to an external DB/source, it should request acc
 - e.g. new marketing employee wants to research old campaigns but lacks access → asks the agent → agent files an access request to the data owner/admin.
 - On approval, the harness provisions the connection (credentials, scoped read access) and the agent can then query/answer from that DB.
 - Needs: per-source access policy, pending-request state + notifications, audit trail, and least-privilege / revocable grants.
+
+## 11. After creating an ID provide some sets of feature so that for each approval is not required. 

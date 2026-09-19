@@ -1,0 +1,2 @@
+queries,queries_with_leak,leak_rate,ub95,hits_returned
+400,0,0.0000,0.0075,244
