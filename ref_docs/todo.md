@@ -99,7 +99,7 @@ Make tool-calling actually useful so this becomes a real harness, not just chat 
 
 ---
 
-## 10. External DB provisioning with request-access flow — OPEN
+## 10. personal DB provisioning with request-access flow — OPEN
 
 If the agent doesn't have access to an external DB/source, it should request access on the user's behalf, then auto-connect once granted:
 
@@ -108,3 +108,5 @@ If the agent doesn't have access to an external DB/source, it should request acc
 - Needs: per-source access policy, pending-request state + notifications, audit trail, and least-privilege / revocable grants.
 
 ## 11. After creating an ID provide some sets of feature so that for each approval is not required. 
+
+## 12. Centralise the entire db on some cloud platform . (highest priority)
