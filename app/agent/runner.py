@@ -44,6 +44,37 @@ class AgentResult:
     thread_id: str | None = None
     interrupted: bool = False
     approval_id: str | None = None
+    approval_tier: str | None = None  # "tool" | "central" | "dept" — who must approve
+
+
+def _suspension(interrupts: list[Any]) -> tuple[str | None, str | None, str | None]:
+    """(approval_id, tier, tool) from the first pending LangGraph interrupt payload."""
+    if not interrupts:
+        return None, None, None
+    value = getattr(interrupts[0], "value", None) or {}
+    tool = value.get("tool")
+    tier = "tool" if tool else str(value.get("tier") or "central")
+    return value.get("approval_id"), tier, tool
+
+
+def _suspended_reply(tier: str | None, tool: str | None, approval_id: str | None) -> str:
+    """Reply text for a run that paused for approval before producing an answer."""
+    who = "your department head or an admin" if tier == "dept" else "an admin"
+    what = f"run `{tool}`" if tool else "save this to shared memory"
+    return (
+        f"Waiting for approval: I need {who} to approve before I {what}. "
+        f"Approval id {approval_id}. The run continues automatically once it is approved."
+    )
+
+
+def _saved_key_id(checkpointer: Any, thread_id: str) -> str | None:
+    """The BYOK key id stored in the thread's latest checkpoint (None if absent)."""
+    try:
+        tup = checkpointer.get_tuple({"configurable": {"thread_id": thread_id}})
+        values = (tup.checkpoint or {}).get("channel_values", {}) if tup else {}
+        return values.get("key_id") or None
+    except Exception:  # noqa: BLE001 - best effort: fall back to the default provider
+        return None
 
 
 def _make_checkpointer(settings: Settings):
@@ -210,7 +241,7 @@ def run_agent(
     actor = deps.actor
 
     graph = build_agent_graph(deps, checkpointer=checkpointer)
-    initial: dict[str, Any] = {"claims": claims, "input": message}
+    initial: dict[str, Any] = {"claims": claims, "input": message, "key_id": key_id}
     try:
         final_state = graph.invoke(initial, config={"configurable": {"thread_id": thread_id}})
     except Exception as exc:
@@ -219,12 +250,13 @@ def run_agent(
 
     interrupts = final_state.get("__interrupt__") or []
     interrupted = bool(interrupts)
-    approval_id: str | None = None
+    approval_id, tier, tool = _suspension(interrupts)
     if interrupted:
-        approval_id = interrupts[0].value.get("approval_id")
         trace.add_event(run_id, TraceEventType.GUARDRAIL, actor, {"type": "hitl_suspend", "approval_id": approval_id})
 
-    reply = final_state.get("reply") or "no reply produced"
+    reply = final_state.get("reply") or (
+        _suspended_reply(tier, tool, approval_id) if interrupted else "no reply produced"
+    )
     if not interrupted:
         trace.end_run(run_id, {"output": reply})
         if evals_enabled:
@@ -243,6 +275,7 @@ def run_agent(
         thread_id=thread_id,
         interrupted=interrupted,
         approval_id=approval_id,
+        approval_tier=tier if interrupted else None,
     )
 
 
@@ -262,8 +295,13 @@ def resume_agent(
     checkpointer: Any = None,
     evals_enabled: bool = True,
     judge_provider: LLMProvider | None = None,
+    key_id: str | None = None,
 ) -> AgentResult:
-    """Apply an admin/head decision and resume a suspended central/dept-write run."""
+    """Apply an admin/head decision and resume a suspended central/dept-write run.
+
+    The resumed run keeps the model the caller picked (`key_id` is read back from the
+    thread checkpoint), and a second approval request raised while resuming suspends the
+    run again instead of being reported as finished."""
     settings = settings or get_settings()
     if approvals is None:
         approvals = ApprovalStore(settings.services.memory_path)
@@ -275,6 +313,10 @@ def resume_agent(
 
     run_id = entry["run_id"]
     thread_id = entry["thread_id"]
+    if checkpointer is None:
+        checkpointer = _make_checkpointer(settings)
+    if key_id is None:
+        key_id = _saved_key_id(checkpointer, thread_id)
     deps, checkpointer = _build_deps(
         entry["actor"],
         settings=settings,
@@ -290,6 +332,7 @@ def resume_agent(
         run_id=run_id,
         thread_id=thread_id,
         checkpointer=checkpointer,
+        key_id=key_id,
     )
     graph = build_agent_graph(deps, checkpointer=checkpointer)
     from langgraph.types import Command
@@ -302,21 +345,34 @@ def resume_agent(
     except Exception as exc:
         deps.trace.end_run(run_id, {"error": str(exc)})
         raise
-    reply = final_state.get("reply") or "no reply produced"
-    deps.trace.end_run(run_id, {"output": reply, "resumed": True})
-    if evals_enabled:
-        _fire_evals(
-            deps=deps,
-            run_id=run_id,
-            settings=settings,
-            judge_provider=judge_provider,
+    interrupts = final_state.get("__interrupt__") or []
+    interrupted = bool(interrupts)
+    next_id, tier, tool = _suspension(interrupts)
+    if interrupted:
+        # A further gated call/write: the run is still suspended, so do not close the
+        # trace or fire evals — the next decision resumes it again.
+        deps.trace.add_event(
+            run_id, TraceEventType.GUARDRAIL, deps.actor, {"type": "hitl_suspend", "approval_id": next_id}
         )
+    reply = final_state.get("reply") or (
+        _suspended_reply(tier, tool, next_id) if interrupted else "no reply produced"
+    )
+    if not interrupted:
+        deps.trace.end_run(run_id, {"output": reply, "resumed": True})
+        if evals_enabled:
+            _fire_evals(
+                deps=deps,
+                run_id=run_id,
+                settings=settings,
+                judge_provider=judge_provider,
+            )
     return AgentResult(
         reply=reply,
         run_id=run_id,
         guardrail_hits=deps.tracker.hits,
         tool_calls=deps.executed_calls,
         thread_id=thread_id,
-        interrupted=False,
-        approval_id=approval_id,
+        interrupted=interrupted,
+        approval_id=next_id if interrupted else approval_id,
+        approval_tier=tier if interrupted else None,
     )

@@ -130,19 +130,26 @@ class ApprovalStore:
         return [i for i in self.pending_items() if self.dept_of(i) == dept]
 
     def decide(self, approval_id: str, approve: bool, admin: str) -> dict[str, Any]:
-        row = self._conn.execute(
-            "SELECT * FROM approvals WHERE id = ?", (approval_id,)
-        ).fetchone()
-        if row is None:
-            raise KeyError(f"approval {approval_id!r} not found")
-        if row["status"] != STATUS_PENDING:
-            raise ValueError(f"approval {approval_id!r} already {row['status']}")
+        """Atomically move a pending approval to approved/rejected.
+
+        The status check lives in the UPDATE itself, so two simultaneous deciders
+        (e.g. an admin and a department head) cannot both win: exactly one row is
+        updated and the loser gets `ValueError`.
+        """
         status = STATUS_APPROVED if approve else STATUS_REJECTED
         with self._conn:
-            self._conn.execute(
-                "UPDATE approvals SET status = ?, decided_ts = ?, decided_by = ? WHERE id = ?",
-                (status, datetime.now(UTC).isoformat(), admin, approval_id),
+            cur = self._conn.execute(
+                "UPDATE approvals SET status = ?, decided_ts = ?, decided_by = ? "
+                "WHERE id = ? AND status = ?",
+                (status, datetime.now(UTC).isoformat(), admin, approval_id, STATUS_PENDING),
             )
+        if cur.rowcount == 0:
+            row = self._conn.execute(
+                "SELECT status FROM approvals WHERE id = ?", (approval_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"approval {approval_id!r} not found")
+            raise ValueError(f"approval {approval_id!r} already {row['status']}")
         return self.get(approval_id)  # type: ignore[return-value]
 
     @staticmethod

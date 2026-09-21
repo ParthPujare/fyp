@@ -197,6 +197,7 @@ def chat(req: ChatRequest, runner: Annotated[Runner, Depends(get_runner)]) -> di
         "thread_id": result.thread_id,
         "interrupted": result.interrupted,
         "approval_id": result.approval_id,
+        "approval_tier": getattr(result, "approval_tier", None),
         "connect_required": connect_required,
     }
 
@@ -260,7 +261,7 @@ def list_threads(req: ThreadListRequest) -> list[str]:
         threads = []
     finally:
         conn.close()
-    if f"user:{username}" not in threads:
+    if not threads:  # brand-new user: offer the default chat (deleted chats must not reappear)
         threads.insert(0, f"user:{username}")
     return threads
 
@@ -283,7 +284,12 @@ def decide_approval(
         raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
     if entry["status"] != "pending":
         raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
-    approvals.decide(approval_id, req.approve, claims["sub"])
+    try:
+        approvals.decide(approval_id, req.approve, claims["sub"])
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    except ValueError as exc:  # lost a race with another decider
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     result = resumer(approval_id)
     decided = approvals.get(approval_id)
     return {
@@ -291,4 +297,6 @@ def decide_approval(
         "status": decided["status"],
         "thread_id": result.thread_id,
         "reply": result.reply,
+        "interrupted": result.interrupted,
+        "next_approval_id": result.approval_id if result.interrupted else None,
     }

@@ -105,13 +105,15 @@ is only as strong as `SENSITIVE_FIELDS` and the regexes.
 stored approval status (never from request bodies). `ApprovalStore.decide` checks `status='pending'` and then updates
 (second decide → `ValueError`) — a check-then-act, **not** an atomic compare-and-set (see G9). Decider identity comes from verified claims; admin-only for tool/central gates,
 own-dept head or admin-on-escalation for `dept/*` writes. ∎
-**This theorem currently has three counter-examples in the code — see §9 (G1–G3). Do not publish it before they are fixed.**
+*Status:* the counter-examples G1–G3 and the decide race G9 (§9) were fixed on 2026-09-20 and are covered by regression tests (`tests/test_hitl_resume.py`). One residual gap remains: a **skill** whose *nested* step is critical still replays its earlier steps on resume (the whole skill runs inside one node run). State the theorem for direct tool calls and central/dept memory writes, or fix skill execution the same way (one step per node run).
 
 **Theorem 4 (Tamper evidence — I4, Option E).** With `H₀=0⁶⁴`, `Hᵢ = SHA-256(Hᵢ₋₁ ‖ canon(eᵢ))` and head `H_n` stored
 out of the attacker's reach, any modification of `e₁..e_n`, any reordering, deletion or truncation changes `H_n`
 (collision resistance). *Limitation (measured, §8):* the head marker lives beside the log, so an attacker with
-filesystem write access recomputes the chain **and** the head — detection rate 0/50. I4 therefore holds only against
-attackers who cannot rewrite the head. Fix options in §9 (G5). Note this is a hash **chain**, not a Merkle tree; do not
+filesystem write access recomputes the chain **and** the head — detection rate 0/50 with the default SHA-256 chain. I4 therefore holds
+only against attackers who cannot rewrite the head. *Implemented mitigation (G5):* setting `SERVICES__AUDIT_HMAC_KEY` makes the chain
+HMAC-SHA-256; the same attacker, lacking the key, is detected 50/50. Residual: an attacker who also obtains the key or the gateway's
+memory, and a key must be set before the first line is written (an existing plain chain will not verify under a key). Note this is a hash **chain**, not a Merkle tree; do not
 call it Merkle in the paper.
 
 **Lemma 5 (Termination — I5, Option F).** Each iteration of the `agent ⇄ execute_tools` cycle increments `steps_used`;
@@ -188,17 +190,24 @@ enforcer/materialisation code, not the policy itself. Say so, or add an independ
 |---|---|---|
 | Attack suites A1–A9 | 46 / 46 pass | `attack_results.csv` |
 | Tamper detection M1 edit / M2 delete / M3 reorder / M4 truncate | 50/50 each (100 %) | `tamper_detection.csv` |
-| Tamper detection M5 (attacker recomputes chain + head) | **0/50** | `tamper_detection.csv` |
+| Tamper detection M5 (attacker recomputes chain + head), plain SHA-256 chain | **0/50** | `tamper_detection.csv` |
+| Same attacker vs HMAC-keyed chain (M5b) | 50/50 | `tamper_detection.csv` |
 | Leakage over 400 randomized recall queries | 0 leaking queries (95 % UB 0.74 %) | `memory_leakage.csv` |
-| Audit chain **false alarm** with concurrent writers | 0/3 at 1 writer; **3/3 at 2, 4, 8 writers**, entries lost at 4–8 | `audit_concurrency.csv` |
-| Latency p50 / p95 | `enforce` allow 1.5 / 3.5 ms; deny 3.7 / 9.6 ms; `audit.log` **39 / 232 ms**; `trace.add_event` 7.6 / 11.3 ms | `latency.csv` |
+| Audit chain false alarm with concurrent writers (after fix G4) | 0/3 at 1, 2, 4 and 8 writers, no entries lost (was 3/3 broken at ≥ 2 writers) | `audit_concurrency.csv` |
+| Latency p50 / p95 (after G4; machine load varies run to run) | `enforce` allow 0.6 / 0.7 ms; deny 1.3 / 1.6 ms; `audit.log` 17 / 31 ms (includes the new cross-process lock); `trace.add_event` 3.8 / 5.5 ms | `latency.csv` |
 
-Reading these honestly: the security properties hold in the single-writer regime; the availability of the integrity
-mechanism does not (concurrent writers corrupt the chain), and `audit.log` dominates per-decision overhead
+Reading these honestly: before the 2026-09-20 fixes the security properties held only in the single-writer regime (concurrent writers
+corrupted the chain — 3/3 broken at ≥ 2 writers). The lock now serialises writers across threads and processes, at the cost of
+serialising all audit appends. `audit.log` still dominates per-decision overhead
 (a HITL-gated call writes 2 audit records, ALLOW then APPROVED ⇒ ≈ 80 ms at p50 on this disk; Windows file I/O amplifies
 it, but the unbatched read-modify-write of the head file is the structural cause).
 
-## 9. Known gaps found while preparing this spec (fix before claiming the invariant)
+## 9. Known gaps found while preparing this spec
+
+**Status 2026-09-20:** G1, G2, G3, G4, G5 (optional HMAC), G8 and G9 are fixed with regression tests in `tests/test_hitl_resume.py`.
+Still open: **G6** (semantic attacks inside an allowed permission — out of ZTAE's scope by design), **G7** (discovered Composio tools are not
+exposed; deliberately not "fixed" because exposing 20+ tools to a small local model degrades it — decide expose-vs-delete), and the
+skill-replay residual noted under Thm 3. The table below records the original findings.
 
 | # | Invariant | Defect | Evidence | Fix |
 |---|---|---|---|---|
@@ -230,7 +239,7 @@ CaMeL-style design-level defences; AgentDojo as the benchmark for the utility si
 
 ## 11. Order of work (recommended)
 
-1. Fix G1–G4 (they falsify Thm 3 / weaken Thm 4) and add a regression test for each; re-run `metrics/collect_metrics.py`.
+1. ~~Fix G1–G4~~ done 2026-09-20 (tests + re-measured metrics). Remaining: skill-step replay, G7 decision.
 2. Add the ablation runner (`none` / `filter-only` / `filter+intercept` / `full`) and a small benign-task corpus for TaskSuccess.
-3. Decide G5 (HMAC vs external anchor) — it changes the I4 statement.
+3. G5: HMAC is implemented (optional). Decide whether the paper claims I4 against a file-only attacker (needs the key set) or also wants an external anchor.
 4. Freeze the spec, then write §4 of the paper directly from this file.

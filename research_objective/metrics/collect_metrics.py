@@ -90,7 +90,7 @@ def attack_results() -> None:
 
 
 # ------------------------------------------------------------------ tamper
-def _mk_audit(path: Path, n: int) -> None:
+def _mk_audit(path: Path, n: int, key: bytes | None = None) -> None:
     """Build a valid n-entry chain in one write (same record format as AuditLog.log;
     per-call file I/O is too slow to build hundreds of fixtures)."""
     from app.harness.audit import GENESIS, _hash_entry
@@ -100,7 +100,7 @@ def _mk_audit(path: Path, n: int) -> None:
         entry = {"ts": f"2026-01-01T00:00:{i % 60:02d}+00:00", "event_id": f"ev-{i}", "run_id": f"run-{i // 10}",
                  "decision": "ALLOW" if i % 3 else "DENY", "resource": {"type": "tool", "id": f"t{i % 7}"},
                  "actor": {"sub": f"u{i % 5}", "role": "r", "dept": "d"}, "guardrail_hit": None, "reason": "rbac"}
-        h = _hash_entry(prev, entry)
+        h = _hash_entry(prev, entry, key)
         out.append(json.dumps({"prev_hash": prev, "hash": h, "entry": entry}, sort_keys=True))
         prev = h
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
@@ -147,14 +147,17 @@ def tamper_detection(trials: int = 50, n_entries: int = 120) -> None:
 
     rng = random.Random(7)
     rows = []
-    for kind in ("M1_edit", "M2_delete", "M3_reorder", "M4_truncate", "M5_full_fs_attacker"):
+    key = b"server-only-secret"  # M5b: same attacker, but the chain is HMAC-keyed (attacker lacks the key)
+    for kind in ("M1_edit", "M2_delete", "M3_reorder", "M4_truncate", "M5_full_fs_attacker",
+                 "M5b_full_fs_attacker_vs_hmac"):
         detected = 0
+        keyed = kind == "M5b_full_fs_attacker_vs_hmac"
         for t in range(trials):
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
                 p = Path(tmp) / "audit.jsonl"
-                _mk_audit(p, n_entries)
-                _mutate(kind, p, rng)
-                ok, _ = AuditLog(p).verify_integrity()
+                _mk_audit(p, n_entries, key if keyed else None)
+                _mutate("M5_full_fs_attacker" if keyed else kind, p, rng)
+                ok, _ = AuditLog(p, hmac_key=key if keyed else "").verify_integrity()
                 detected += 0 if ok else 1
         rate = detected / trials
         rows.append([kind, trials, detected, f"{rate:.3f}"])

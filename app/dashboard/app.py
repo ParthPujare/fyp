@@ -163,6 +163,16 @@ def _approval_view(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _decide_or_http_error(approvals: ApprovalStore, approval_id: str, approve: bool, decider: str) -> None:
+    """Record a decision; a lost race with another decider is a 409, not a 500."""
+    try:
+        approvals.decide(approval_id, approve, decider)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 def get_resumer():
     def _resume(approval_id: str):
         c = _get_components()
@@ -358,6 +368,38 @@ def own_thread_history(
     return {"thread_id": thread_id, "messages": _thread_messages_local(checkpointer, thread_id)}
 
 
+@app.delete("/api/chat/threads/{thread_id:path}")
+def delete_own_thread(
+    thread_id: str,
+    checkpointer: Annotated[Any, Depends(get_dashboard_checkpointer)],
+    approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Delete one of the caller's own chats (its checkpointed conversation).
+
+    Approvals still pending for that thread are rejected without resuming — a
+    resume needs the checkpoint that is being removed. Team episodic memory
+    (`recall`) is deliberately left alone: it is shared, not per-chat.
+    """
+    claims, _token = _verified_member(authorization)
+    username = str(claims.get("sub", ""))
+    if thread_id != f"user:{username}" and not thread_id.startswith(f"user:{username}:"):
+        raise HTTPException(status_code=403, detail="not your thread")
+    rejected = 0
+    for item in approvals.pending_items():
+        if item["thread_id"] == thread_id:
+            try:
+                approvals.decide(item["id"], False, f"system:chat-deleted:{username}")
+                rejected += 1
+            except (KeyError, ValueError):  # decided by someone else meanwhile
+                pass
+    try:
+        checkpointer.delete_thread(thread_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"could not delete chat: {exc}") from exc
+    return {"thread_id": thread_id, "deleted": True, "approvals_rejected": rejected}
+
+
 @app.get("/api/chat/threads")
 def list_own_threads(authorization: str | None = Header(default=None)) -> list[str]:
     _claims, token = _verified_member(authorization)
@@ -418,7 +460,7 @@ def decide_approval(
         raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
     if entry["status"] != "pending":
         raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
-    approvals.decide(approval_id, req.approve, claims["sub"])
+    _decide_or_http_error(approvals, approval_id, req.approve, claims["sub"])
     result = resumer(approval_id)
     decided = approvals.get(approval_id)
     return {
@@ -426,6 +468,8 @@ def decide_approval(
         "status": decided["status"],
         "thread_id": result.thread_id,
         "reply": result.reply,
+        "interrupted": result.interrupted,
+        "next_approval_id": result.approval_id if result.interrupted else None,
     }
 
 
@@ -450,7 +494,7 @@ def decide_dept_approval(
         raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
     if ApprovalStore.dept_of(entry) != str(claims.get("dept", "")):
         raise HTTPException(status_code=403, detail="not your department's approval")
-    approvals.decide(approval_id, req.approve, claims["sub"])
+    _decide_or_http_error(approvals, approval_id, req.approve, claims["sub"])
     result = resumer(approval_id)
     decided = approvals.get(approval_id)
     return {
@@ -458,6 +502,8 @@ def decide_dept_approval(
         "status": decided["status"],
         "thread_id": result.thread_id,
         "reply": result.reply,
+        "interrupted": result.interrupted,
+        "next_approval_id": result.approval_id if result.interrupted else None,
     }
 
 

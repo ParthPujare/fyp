@@ -4,3 +4,4 @@ M2_delete,50,50,1.000
 M3_reorder,50,50,1.000
 M4_truncate,50,50,1.000
 M5_full_fs_attacker,50,0,0.000
+M5b_full_fs_attacker_vs_hmac,50,50,1.000

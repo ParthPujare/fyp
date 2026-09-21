@@ -55,6 +55,7 @@ class AgentState(TypedDict, total=False):
     reply: str
     final: bool
     force_end: bool
+    key_id: str | None  # BYOK key the caller picked; persisted so an approval-resume uses the same model
 
 
 @dataclass
@@ -394,7 +395,13 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
             enforcer=deps.enforcer, audit=deps.audit, run_id=deps.run_id, run_step=_execute_one
         )
 
-        for call in state.get("pending_calls") or []:
+        # One call per node invocation. A HITL `interrupt()` re-runs the interrupted
+        # node from the top on resume, so batching several calls here would replay
+        # every call that preceded the gated one (duplicating its side effects).
+        # Each completed call is checkpointed as its own node run instead.
+        pending = list(state.get("pending_calls") or [])
+        if pending:
+            call = pending.pop(0)
             name = call["name"]
             args = call.get("args") or {}
             result = _execute_one(name, args)
@@ -411,9 +418,11 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
             deps.executed_calls.append(executed[-1])
 
             if tracker.budget_exhausted():
-                break
+                pending = []  # budget spent: drop the rest of this batch
 
-        update: dict[str, Any] = {"messages": messages, "tool_calls": executed, "pending_calls": []}
+        update: dict[str, Any] = {"messages": messages, "tool_calls": executed, "pending_calls": pending}
+        if pending:
+            return update  # more calls in this batch: next node run handles them
         if tracker.steps_exhausted():
             tracker.hit("max_steps")
             deps.trace.add_event(deps.run_id, TraceEventType.GUARDRAIL, deps.actor, {"type": "max_steps"})
@@ -430,6 +439,11 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
 
     def route_from_agent(state: AgentState) -> str:
         return "tools" if state.get("pending_calls") else "end"
+
+    def route_from_tools(state: AgentState) -> str:
+        if state.get("pending_calls"):
+            return "tools"
+        return should_continue(state)
 
     def should_continue(state: AgentState) -> str:
         tracker = deps.tracker
@@ -576,7 +590,9 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
     graph.add_edge(START, "load_memory")
     graph.add_edge("load_memory", "agent")
     graph.add_conditional_edges("agent", route_from_agent, {"tools": "execute_tools", "end": "finalize"})
-    graph.add_conditional_edges("execute_tools", should_continue, {"agent": "agent", "end": "finalize"})
+    graph.add_conditional_edges(
+        "execute_tools", route_from_tools, {"tools": "execute_tools", "agent": "agent", "end": "finalize"}
+    )
     graph.add_edge("finalize", "reflect")
     graph.add_edge("reflect", END)
     return graph.compile(checkpointer=checkpointer)

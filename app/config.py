@@ -3,12 +3,16 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_JWT_SECRET = "dev-secret-change-me-0123456789abcdef"  # >=32 bytes for HS256
+# Public dev-only key (it is in the repo): never use it to protect real API keys.
+DEFAULT_FERNET_KEY = "vqehzoXFoWkA1WYmxrpBDn_4CabfBOvUue9-GStFo9k="
 
 
 class JWTSettings(BaseModel):
-    secret: str = "dev-secret-change-me-0123456789abcdef"  # >=32 bytes for HS256
+    secret: str = DEFAULT_JWT_SECRET
     algorithm: str = "HS256"
     expiry_minutes: int = Field(default=60, ge=1)
 
@@ -20,7 +24,7 @@ class LLMSettings(BaseModel):
     model: str = "gemini/gemini-3.6-flash"
     api_key: str | None = None
     base_url: str | None = None
-    fernet_key: str = "vqehzoXFoWkA1WYmxrpBDn_4CabfBOvUue9-GStFo9k="
+    fernet_key: str = DEFAULT_FERNET_KEY
     temperature: float = 0.2
     max_tokens: int = 1024
 
@@ -39,6 +43,9 @@ class ServiceSettings(BaseModel):
     hr_url: str = "http://127.0.0.1:8003"
     devops_url: str = "http://127.0.0.1:8004"
     finance_url: str = "http://127.0.0.1:8005"
+    # Optional: HMAC key for the audit hash chain. Set it BEFORE the first audit line is
+    # written (an existing plain-SHA chain will fail verification once a key is added).
+    audit_hmac_key: str | None = None
 
 
 class MemorySettings(BaseModel):
@@ -90,6 +97,25 @@ class Settings(BaseSettings):
     composio: ComposioSettings = ComposioSettings()
 
     model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")
+
+    @model_validator(mode="after")
+    def _no_dev_secrets_outside_dev(self) -> "Settings":
+        """Fail fast: the repo-public dev secrets must not run anywhere but ENV=dev."""
+        if self.env.strip().lower() != "dev":
+            unsafe = [
+                name
+                for name, bad in (
+                    ("JWT__SECRET", self.jwt.secret == DEFAULT_JWT_SECRET),
+                    ("LLM__FERNET_KEY", self.llm.fernet_key == DEFAULT_FERNET_KEY),
+                )
+                if bad
+            ]
+            if unsafe:
+                raise ValueError(
+                    f"ENV={self.env!r} but {', '.join(unsafe)} still use the built-in dev default; "
+                    "set your own values"
+                )
+        return self
 
 
 @lru_cache

@@ -54,6 +54,12 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   .thread-item { padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; word-break: break-all; }
   .thread-item:hover { background: var(--line); }
   .thread-item.active { background: var(--accent); color: #062a3a; font-weight: 600; }
+  .thread-item { display: flex; align-items: center; gap: 6px; }
+  .thread-item .thread-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: normal; }
+  .thread-item .thread-del { background: transparent; color: inherit; border: 0; padding: 0 4px; font-size: 15px;
+                             line-height: 1; opacity: .5; cursor: pointer; flex-shrink: 0; }
+  .thread-item .thread-del:hover { opacity: 1; color: var(--bad); }
+  .thread-item.active .thread-del:hover { color: #7f1d1d; }
 </style>
 </head>
 <body>
@@ -868,6 +874,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
 
   // Unsent new chat, shown optimistically until the server confirms it.
   let pendingNewThread = null;
+  let suspendWatch = null; // approval-resume poller (see watchSuspended)
 
   function resetChatState() {
     // Chat state is per-identity: switching accounts must never carry the
@@ -875,6 +882,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     // foreign thread). The thread list reloads for the new identity on demand.
     currentThreadId = null;
     pendingNewThread = null;
+    stopSuspendWatch();
     const transcript = $("chat-transcript");
     if (transcript) transcript.innerHTML = "";
     const status = $("chat-status");
@@ -897,7 +905,18 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       visible.forEach((t) => {
         const div = document.createElement("div");
         div.className = "thread-item" + (t === currentThreadId ? " active" : "");
-        div.textContent = threadLabel(t);
+        const label = document.createElement("span");
+        label.className = "thread-label";
+        label.textContent = threadLabel(t);
+        div.appendChild(label);
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "thread-del";
+        del.textContent = "✕";
+        del.title = "Delete this chat";
+        del.setAttribute("aria-label", "Delete chat");
+        del.addEventListener("click", (ev) => { ev.stopPropagation(); deleteChat(t); });
+        div.appendChild(del);
         div.title = t;
         div.addEventListener("click", async () => {
           // Switching away abandons an unsent pending chat (server has nothing).
@@ -920,6 +939,50 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     }
   }
 
+  async function deleteChat(t) {
+    if (!confirm("Delete this chat? This cannot be undone.")) return;
+    try {
+      if (t === pendingNewThread) {
+        pendingNewThread = null; // never sent: the server has nothing to delete
+      } else {
+        await api("/api/chat/threads/" + encodeURIComponent(t), { method: "DELETE" });
+      }
+      delete threadTitles[t];
+      if (t === currentThreadId) {
+        currentThreadId = null;
+        stopSuspendWatch();
+        $("chat-transcript").innerHTML = "";
+        $("chat-status").textContent = "";
+      }
+      await loadChatThreads();
+    } catch (e) { $("chat-status").textContent = "could not delete chat: " + e.message; }
+  }
+
+  // After a run suspends for approval, poll the thread so the resumed reply shows up
+  // without the member having to re-open the chat (approvals happen in another session).
+  function stopSuspendWatch() { if (suspendWatch) { clearTimeout(suspendWatch.timer); suspendWatch = null; } }
+  function watchSuspended(threadId) {
+    stopSuspendWatch();
+    const state = { threadId, base: null, until: Date.now() + 15 * 60 * 1000, timer: null };
+    suspendWatch = state;
+    const tick = async () => {
+      if (suspendWatch !== state || Date.now() > state.until || currentThreadId !== threadId) { stopSuspendWatch(); return; }
+      try {
+        const hist = await api("/api/chat/threads/" + encodeURIComponent(threadId) + "/history");
+        const n = (hist.messages || []).filter((m) => m.role === "assistant").length;
+        if (state.base === null) state.base = n;
+        else if (n > state.base) {
+          stopSuspendWatch();
+          $("chat-status").textContent = "approved — chat updated";
+          await loadThreadHistory(threadId);
+          return;
+        }
+      } catch (e) { /* transient: keep polling until the deadline */ }
+      if (suspendWatch === state) state.timer = setTimeout(tick, 4000);
+    };
+    state.timer = setTimeout(tick, 4000);
+  }
+
   async function loadThreadHistory(t) {
     try {
       const hist = await api("/api/chat/threads/" + encodeURIComponent(t) + "/history");
@@ -940,7 +1003,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
         threadTitles[t] = snippet;
         const list = $("threads-list");
         if (list) [...list.children].forEach((el) => {
-          if (el.title === t) el.textContent = snippet;
+          if (el.title === t) { const l = el.querySelector(".thread-label"); if (l) l.textContent = snippet; }
         });
       }
     } catch (e) { /* keep short-id fallback */ }
@@ -1005,6 +1068,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       }
       pushTranscript("assistant", renderChatTurn(out));
       $("chat-status").textContent = "";
+      if (out.interrupted && out.approval_id && out.thread_id) watchSuspended(out.thread_id);
       loadChatThreads();
     } catch (e) { $("chat-status").textContent = "error: " + e.message; }
     $("chat-msg").value = "";
@@ -1023,10 +1087,14 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       html += `<div class="status muted">guardrails: ${esc(out.guardrail_hits.map((h) => h.type || h).join(", "))}</div>`;
     }
     if (out.interrupted && out.approval_id) {
-      const hint = identities.admin
-        ? "switch to the admin session and open Approvals to approve (dept writes may need the dept head instead)."
-        : "an admin or your department head must approve it (Approvals / Dept approvals tab).";
-      html += `<div class="status" style="color:#fef08a">&#9209; run suspended (approval <code>${esc(out.approval_id)}</code>) — ${esc(hint)}</div>`;
+      // Tool actions (e.g. sending email) and central-memory writes are admin-only;
+      // only department-memory writes go to the department head first.
+      const hint = out.approval_tier === "dept"
+        ? "your department head (or an admin, if the department has none) must approve it."
+        : (identities.admin
+          ? "switch to the admin session and open Approvals to approve it."
+          : "an admin must approve it (Approvals tab).");
+      html += `<div class="status" style="color:#fef08a">&#9209; run suspended (approval <code>${esc(out.approval_id)}</code>) — ${esc(hint)} This chat updates by itself once it is decided.</div>`;
     }
     if (out.connect_required && out.connect_required.length) {
       html += `<div class="card" style="margin-top:8px"><b>Connect to continue:</b> `

@@ -120,7 +120,7 @@ class SqliteBaseStore(BaseStore):
         rows = self._conn.execute(
             "SELECT ns, key, value, created_at, updated_at FROM memory_items "
             "WHERE ns = ? OR ns LIKE ? "
-            "ORDER BY updated_at DESC, key ASC",
+            "ORDER BY updated_at DESC, rowid DESC",
             (_ns_str(prefix), _ns_str(prefix) + _NS_SEP + "%"),
         ).fetchall()
         items: list[SearchItem] = []
@@ -219,9 +219,11 @@ class SqliteBaseStore(BaseStore):
 
     def items_in(self, namespace: tuple[str, ...], *, oldest_first: bool = False) -> list[Item]:
         order = "ASC" if oldest_first else "DESC"
+        # rowid breaks timestamp ties in insertion order; a random key tiebreak made
+        # "oldest-out" eviction non-deterministic when two writes share a clock tick.
         rows = self._conn.execute(
             "SELECT ns, key, value, created_at, updated_at FROM memory_items "
-            "WHERE ns = ? ORDER BY updated_at " + order + ", key ASC",
+            "WHERE ns = ? ORDER BY updated_at " + order + ", rowid " + order,
             (_ns_str(namespace),),
         ).fetchall()
         return [i for r in rows if (i := self._row_to_item(r)) is not None]
