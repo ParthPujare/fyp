@@ -1,0 +1,26 @@
+# Runtime data — must come from the named volume, never baked into the image
+# or leaked in from the host during `docker compose up --build`.
+data/
+
+# Local/dev-only, never needed inside the image
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.git/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Host docs not needed at runtime (keeps build context + image small)
+agent_history/
+research_objective/
+ref_docs/
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store

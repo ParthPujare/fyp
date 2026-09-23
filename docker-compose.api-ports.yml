@@ -1,0 +1,14 @@
+# OPTIONAL: also publish the raw auth (:8000) and gateway (:8001) APIs, for the curl demos
+# in the README ("Role-aware hello"). Not needed for normal use of the dashboard.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.api-ports.yml up -d
+#
+# Host ports default to 18000/18001 (not 8000/8001) because 8000 is one of the most
+# commonly occupied ports on a dev laptop. Override with AUTH_PORT / GATEWAY_PORT in .env.
+# The curl examples then use localhost:18000 / localhost:18001 instead of :8000 / :8001.
+
+services:
+  app:
+    ports:
+      - "${AUTH_PORT:-18000}:8000"
+      - "${GATEWAY_PORT:-18001}:8001"

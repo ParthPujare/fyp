@@ -1,0 +1,45 @@
+# One command, one container, the whole app — see README "Run with Docker".
+#   docker compose up --build      start (rebuilds only when the image is stale)
+#   docker compose down            stop, keep data
+#   docker compose down -v         stop and wipe the data volume (fresh reseed)
+#
+# Only the dashboard (http://localhost:8006) is published to your machine: it is the
+# only thing a browser talks to. It reaches auth/gateway/crm/hr/devops/finance over
+# 127.0.0.1 *inside* the container, so those ports never need to be free on the host.
+# (Publishing 8000-8005 too is what broke the first run: another project on the same
+# laptop already owned :8000.) Need the raw APIs for curl demos? See
+# docker-compose.api-ports.yml.
+#
+# .env is OPTIONAL. Without it the app runs on its built-in ENV=dev defaults
+# (mock LLM, dev secrets, seeded demo accounts) — identical to copying .env.example.
+# Create .env only to change something: a real LLM/Composio key, DASHBOARD_PORT, ...
+# app/config.py refuses the built-in dev secrets when ENV is not "dev", so a real
+# deployment must set real JWT__SECRET / LLM__FERNET_KEY there.
+
+services:
+  app:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      # Change the LEFT side (or set DASHBOARD_PORT in .env) if 8006 is taken on your machine.
+      - "${DASHBOARD_PORT:-8006}:8006"
+    extra_hosts:
+      # Lets the container reach services on YOUR machine (e.g. LM Studio) as
+      # http://host.docker.internal:<port>. Docker Desktop defines this already; the
+      # mapping makes it work on Linux Docker too. Inside the container, "localhost"
+      # is the container itself, not your laptop.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - fyp_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8006/health', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
+
+volumes:
+  fyp_data:

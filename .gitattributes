@@ -1,0 +1,5 @@
+# Shell scripts run inside a Linux container. On Windows, git's default autocrlf=true would
+# check them out with CRLF line endings and `bash` would fail on the stray \r
+# ("$'\r': command not found"). Force LF regardless of the checkout platform.
+*.sh text eol=lf
+Dockerfile text eol=lf

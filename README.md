@@ -35,16 +35,81 @@ tests/          offline test suites (auth, llm, trace, services, agent, tools, c
 skills/         seed skills: central/triage_incident, dept/hr/new_leave_request, dept/marketing/launch_campaign
 ```
 
-## Quickstart
+## Run with Docker (recommended — one command)
 
-Requires [uv](https://docs.astral.sh/uv/) and Python ≥ 3.12.
+Everything (auth, gateway, dashboard and the four mock department services) runs in **one
+container**. You need only [Docker Desktop](https://www.docker.com/products/docker-desktop/) —
+**running**, not just installed — and Git. No Python, `uv`, or `make` required.
+(What this containerizes and why: `ref_docs/plans/plan_mk13_docker_cloud_db.md`, Mk13 Phase 0.)
+
+### First time (new teammate, fresh clone)
+
+```bash
+git clone <repo-url>
+cd fyp
+docker compose up --build        # first build takes a few minutes; later starts take seconds
+```
+
+Then open **http://localhost:8006** and sign in with a seeded demo account — `alice@acme.com` /
+`alice123` (marketing), `bob@acme.com` / `bob123` (hr), `carol@acme.com` / `carol123` (finance),
+`dave@acme.com` / `dave123` (devops), `admin@acme.com` / `admin123` (admin).
+
+That's all — **no `.env` needed**. Without one the app runs on its built-in `ENV=dev` defaults
+(mock LLM, seeded accounts, fully offline), which is exactly what copying `.env.example` gives you.
+Create `.env` (`cp .env.example .env`) only when you want to *change* something: a real LLM or
+Composio key, a different port, etc. — then `docker compose up -d --build` again.
+
+### Every day
+
+| You want to… | Command |
+|---|---|
+| Start (background) | `docker compose up -d` — after a reboot Docker Desktop restarts it by itself, so often you just open the page |
+| Open the app | http://localhost:8006 |
+| Stop, keep all data | `docker compose down` |
+| See logs | `docker compose logs -f` |
+| **After `git pull` / any code change** | `docker compose up -d --build` — the code is baked into the image, so a plain `up` runs the *old* code |
+| Wipe all data (fresh reseed) | `docker compose down -v` |
+
+Data lives in a named Docker volume (`fyp_data`) and survives `down`/`up`/reboots; only `down -v`
+deletes it. The "GET /health" lines in the logs are Docker's own healthcheck — normal.
+
+### Things that will bite you (each one hit for real while testing)
+
+- **Port 8006 already in use** → set `DASHBOARD_PORT=8007` (any free port) in `.env`, then
+  `docker compose up -d`. Only the dashboard is published; the other services stay *inside* the
+  container, so they can't collide with anything else on your laptop (that is what broke the
+  first attempt — another project already owned `:8000`). Symptom of a stuck start: `docker ps`
+  lists the container as healthy but its PORTS column shows `8000-8006/tcp` with no
+  `0.0.0.0:…->` → run `docker compose down`, free the port, `docker compose up -d`.
+- **Local models (LM Studio / Ollama)** run on *your machine*, but inside the container
+  `localhost` means the container itself. In Account → LLM API Keys use
+  `http://host.docker.internal:1234/v1` (not `http://localhost:1234/v1`). *(Not tested against a
+  live LM Studio yet — if it refuses, enable "Serve on Local Network" in LM Studio.)*
+- **Windows line endings** — `.gitattributes` forces LF on `*.sh`; without it Git for Windows
+  would break the container's start script.
+- **Raw API access for curl demos** ("Role-aware hello" below) is opt-in:
+  `docker compose -f docker-compose.yml -f docker-compose.api-ports.yml up -d`, then use
+  `localhost:18000` (auth) and `localhost:18001` (gateway) instead of `:8000` / `:8001`.
+- **"Cannot connect to the Docker daemon"** → start Docker Desktop and wait until it says running.
+
+### What is (and is not) shared today
+
+Docker gives every teammate the **same app**, not the **same data**: each machine's container has
+its own private volume (its own members, chats, approvals). Everyone starts from the same seeded
+demo accounts and diverges from there. A single shared database for the whole team is the next
+part of Mk13 (Neon Postgres, Phases 1–6 of the plan) and is **not built yet**.
+
+## Native setup (development, running tests, editing code)
+
+Requires [uv](https://docs.astral.sh/uv/) and Python ≥ 3.12. Use this for `uv run pytest` /
+`ruff` while developing — Docker above doesn't run the test suite.
 
 ```bash
 uv sync                 # install deps into .venv
-uv run pytest           # 140+ tests, fully offline (MockLLM, no API keys)
+uv run pytest           # 370+ tests, fully offline (MockLLM, no API keys)
 ```
 
-## Run everything
+## Run everything (native)
 
 ```bash
 make run               # starts auth :8000, gateway :8001, dashboard :8006, crm/hr/devops/finance :8002-8005
