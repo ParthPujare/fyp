@@ -14,7 +14,8 @@ directly, so an approval decided here resumes the exact suspended thread. Every
 from __future__ import annotations
 
 import re
-import sqlite3
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -24,7 +25,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app.agent.runner import resume_agent
+from app.agent.checkpoints import make_checkpointer
+from app.agent.runner import resume_agent, run_state_is_local
 from app.auth.jwt import AuthError, verify_token
 from app.auth.store import (
     DepartmentExistsError,
@@ -34,14 +36,15 @@ from app.auth.store import (
 )
 from app.auth.users import USERS, get_store, is_active_member
 from app.config import get_settings
-from app.harness.audit import AuditLog
+from app.harness.audit import open_audit_log
 from app.harness.enforcer import PolicyEnforcer
+from app.harness.policy_store import FilePolicyStore
 from app.harness.sanitize import MASK
 from app.llm.base import strip_routing_prefix
 from app.llm.registry import PROVIDERS, is_supported, normalize_provider_type
 from app.memory.approvals import ApprovalStore
 from app.memory.edit import MemoryEditor
-from app.memory.episodic import EpisodicStore
+from app.memory.factory import open_approval_store, open_base_store, open_episodic_store
 from app.memory.recall import RecallService
 from app.memory.scopes import (
     SCOPE_CENTRAL,
@@ -50,24 +53,28 @@ from app.memory.scopes import (
     scope_to_namespace,
     scope_user,
 )
-from app.memory.store import SqliteBaseStore
+from app.ops.factory import open_trace_store
 from app.ops.store import TraceStore
 from app.skills.model import SkillValidationError, parse_skill_document, render_skill
 from app.skills.registry import SkillRegistry
 
 settings = get_settings()
 
-app = FastAPI(title="harness dashboard", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Shared DB (Mk13): build the stores at boot rather than on the first request."""
+    from app.db import is_enabled
+
+    if is_enabled():
+        _get_components()["skills"].load_all()  # Phase 6: seed-if-empty + cache the shared skills
+        get_store()
+    yield
+
+
+app = FastAPI(title="harness dashboard", version="0.1.0", lifespan=_lifespan)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-
-def _checkpointer():
-    from langgraph.checkpoint.sqlite import SqliteSaver
-
-    conn = sqlite3.connect(settings.services.checkpoint_path, check_same_thread=False)
-    return SqliteSaver(conn)
 
 
 _components: dict[str, Any] | None = None
@@ -77,16 +84,16 @@ def _get_components() -> dict[str, Any]:
     """Persistent shared components — same files the gateway uses."""
     global _components
     if _components is None:
-        _store = SqliteBaseStore(settings.services.memory_path)
+        _store = open_base_store(settings.services.memory_path)
         _components = {
-            "trace": TraceStore(settings.services.data_dir / "trace.sqlite"),
+            "trace": open_trace_store(settings.services.data_dir / "trace.sqlite"),
             "enforcer": PolicyEnforcer(),
-            "audit": AuditLog(settings.services.audit_path),
+            "audit": open_audit_log(settings.services.audit_path),
             "store": _store,
-            "episodic": EpisodicStore(settings.services.memory_path),
-            "approvals": ApprovalStore(settings.services.memory_path),
-            "checkpointer": _checkpointer(),
-            "skills": SkillRegistry(settings.skills.skills_dir),
+            "episodic": open_episodic_store(settings.services.memory_path),
+            "approvals": open_approval_store(settings.services.memory_path),
+            "checkpointer": make_checkpointer(settings),
+            "skills": SkillRegistry.open(settings.skills.skills_dir),
             "memory_editor": MemoryEditor(_store, settings.memory),
         }
         _components["recall"] = RecallService(
@@ -147,6 +154,20 @@ def _active_head_count(dept: str) -> int:
     )
 
 
+RESUME_ELSEWHERE = (
+    "This run's saved state was not found (was the chat deleted?), so it cannot be resumed."
+)
+
+
+def _resumable_here(entry: dict[str, Any]) -> bool:
+    """Only meaningful on the shared database, where approvals can come from other machines."""
+    from app.db import is_enabled
+
+    if not is_enabled():
+        return True
+    return run_state_is_local(_get_components()["checkpointer"], entry["thread_id"])
+
+
 def _approval_view(item: dict[str, Any]) -> dict[str, Any]:
     dept = ApprovalStore.dept_of(item)
     return {
@@ -160,6 +181,7 @@ def _approval_view(item: dict[str, Any]) -> dict[str, Any]:
         "created_ts": item["created_ts"],
         "tier": "dept" if dept is not None else item["resource"].get("type", "memory"),
         "dept": dept,
+        "resumable_here": _resumable_here(item),
     }
 
 
@@ -460,6 +482,8 @@ def decide_approval(
         raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
     if entry["status"] != "pending":
         raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
+    if not _resumable_here(entry):
+        raise HTTPException(status_code=409, detail=RESUME_ELSEWHERE)
     _decide_or_http_error(approvals, approval_id, req.approve, claims["sub"])
     result = resumer(approval_id)
     decided = approvals.get(approval_id)
@@ -492,6 +516,8 @@ def decide_dept_approval(
         raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
     if entry["status"] != "pending":
         raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
+    if not _resumable_here(entry):
+        raise HTTPException(status_code=409, detail=RESUME_ELSEWHERE)
     if ApprovalStore.dept_of(entry) != str(claims.get("dept", "")):
         raise HTTPException(status_code=403, detail="not your department's approval")
     _decide_or_http_error(approvals, approval_id, req.approve, claims["sub"])
@@ -660,13 +686,11 @@ def departments(
     # policy.csv `p` rows can still introduce/denote knowable objects per domain;
     # merge them so the resource list stays accurate even before registration.
     policy_objs: dict[str, list[str]] = {}
-    with open(_policy_csv(), encoding="utf-8") as fh:
-        for line in fh:
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) == 5 and parts[0] == "p" and parts[3] != "*":
-                policy_objs.setdefault(parts[2], [])
-                if parts[3] not in policy_objs[parts[2]]:
-                    policy_objs[parts[2]].append(parts[3])
+    for _sub, dom, obj, _act in _policy_store().rules().get("p", []):
+        if obj != "*":
+            policy_objs.setdefault(dom, [])
+            if obj not in policy_objs[dom]:
+                policy_objs[dom].append(obj)
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for name in sorted(set(dept_roles) | set(policy_objs)):
@@ -725,38 +749,41 @@ def register_department(
         )
     except DepartmentExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    _append_policy_row(role, name)
+    _append_policy_row(role, name, actor=claims["sub"])
     rec = store.get_department(name)
     assert rec is not None
     return rec.to_public()
 
 
-def _append_policy_row(role: str, dept: str) -> None:
-    """Append `p, <role>, <dept>, *, *` (+ the Mk12 `{dept}_head` row) to policy.csv
-    so the role is grantable. `_build`/`load_policy` re-reads the file on the next
-    version guard rebuild, so the newly-registered role takes effect without a restart.
+def _append_policy_row(role: str, dept: str, actor: str = "") -> None:
+    """Add `p, <role>, <dept>, *, *` (+ the Mk12 `{dept}_head` row) to the policy so
+    the role is grantable. The enforcer's version guard notices the change (file
+    mtime, or `members_version` on the shared database) and rebuilds on its next
+    call, so the newly-registered role takes effect without a restart.
 
-    Idempotent: an equivalent row already in the file is left alone. Casbin
+    Idempotent: an equivalent row already present is left alone. Casbin
     ignores duplicate rows, but an unconditional append grows the file without
     bound every time a department is re-registered.
     """
     from app.harness.enforcer import head_role_for
 
-    with open(_policy_csv(), "a", encoding="utf-8") as fh:
-        for r in (role, head_role_for(dept)):
-            if not _policy_has_row(("p", r, dept, "*", "*")):
-                fh.write(f"p, {r}, {dept}, *, *\n")
+    _policy_store().add_rows([("p", r, dept, "*", "*") for r in (role, head_role_for(dept))], actor)
 
 
 def _policy_has_row(row: tuple[str, ...]) -> bool:
-    """True iff policy.csv already carries this row (whitespace-insensitive)."""
-    with open(_policy_csv(), encoding="utf-8") as fh:
-        for line in fh:
-            if line.lstrip().startswith("#"):
-                continue
-            if tuple(p.strip() for p in line.split(",")) == row:
-                return True
-    return False
+    """True iff the policy already carries this row (whitespace-insensitive)."""
+    return _policy_store().has_row(row)
+
+
+def _policy_store() -> Any:
+    """Where the dashboard reads/adds policy rows (Mk13 Phase 6): the shared database's
+    `policy_rules` when `DATABASE_URL` is set (the enforcer's own store, so its cache
+    and the dashboard's writes cannot disagree), else policy.csv via `_policy_csv()`."""
+    from app.db import is_enabled
+
+    if is_enabled():
+        return _get_components()["enforcer"].policy
+    return FilePolicyStore(_policy_csv)
 
 
 def _policy_csv() -> Path:
@@ -775,7 +802,7 @@ def _skill_registry() -> SkillRegistry:
     return _get_components()["skills"]
 
 
-def _skill_summary(skill: Any) -> dict[str, Any]:
+def _skill_summary(skill: Any, granted: set[str]) -> dict[str, Any]:
     return {
         "name": skill.name,
         "scope": skill.scope,
@@ -785,29 +812,29 @@ def _skill_summary(skill: Any) -> dict[str, Any]:
         "steps": skill.steps,
         "tool_calls": skill.tool_calls,
         "path": skill.path,
-        "policy_row": _has_policy_row(skill.name),
+        "policy_row": f"skill_{skill.name}" in granted,
     }
 
 
-def _has_policy_row(skill_name: str) -> bool:
-    """True iff policy.csv has a non-admin `p, role, dom, skill_<name>, use` row."""
-    needle = f"skill_{skill_name}"
-    with open(_policy_csv(), encoding="utf-8") as fh:
-        for line in fh:
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) == 5 and parts[0] == "p" and parts[1] != "admin" and parts[3] == needle:
-                return True
-    return False
+def _granted_skill_objs() -> set[str]:
+    """`skill_<name>` objects with a non-admin `p, role, dom, skill_<name>, use` row
+    (read once per request: on the shared database each read is a round trip)."""
+    return {
+        obj
+        for sub, _dom, obj, _act in _policy_store().rules().get("p", [])
+        if sub != "admin" and obj.startswith("skill_")
+    }
 
 
 @app.get("/api/skills")
 def list_skills(
     authorization: str | None = Header(default=None),
 ) -> dict:
-    """List all skills on disk (registry is the folder, hot-reloaded)."""
+    """List all skills (the skills/ folder, or the shared database; hot-reloaded)."""
     _verify_admin(authorization)
     skills, errors = _get_components()["skills"].load_with_errors()
-    return {"skills": [_skill_summary(s) for s in skills], "errors": errors}
+    granted = _granted_skill_objs()
+    return {"skills": [_skill_summary(s, granted) for s in skills], "errors": errors}
 
 
 @app.get("/api/skills/{name}")
@@ -835,7 +862,7 @@ def create_skill(
     registry = _get_components()["skills"]
     if registry.get(skill.name) is not None:
         raise HTTPException(status_code=409, detail=f"skill {skill.name!r} already exists")
-    path = registry.save(skill)
+    path = registry.save(skill, actor=claims["sub"])
     _get_components()["audit"].log(
         decision="ALLOW",
         resource={"type": "skill", "id": skill.name},
@@ -863,7 +890,7 @@ def update_skill(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if skill.name != name:
         raise HTTPException(status_code=409, detail="skill name in frontmatter must match the url")
-    path = registry.save(skill)
+    path = registry.save(skill, actor=claims["sub"])
     _get_components()["audit"].log(
         decision="ALLOW",
         resource={"type": "skill", "id": skill.name},
@@ -1611,7 +1638,7 @@ def integration_disconnect(
 # ---- Integrations catalog (admin-curated toolkits, Mk9 simplified) ----
 
 
-def _ensure_toolkit_policy_rows(toolkit: str) -> None:
+def _ensure_toolkit_policy_rows(toolkit: str, actor: str = "") -> None:
     """Grant every agent role read+write on a newly enabled toolkit (writes still HITL-gated by risk)."""
     rows = []
     for role, dept in (
@@ -1620,10 +1647,7 @@ def _ensure_toolkit_policy_rows(toolkit: str) -> None:
     ):
         rows.append(("p", role, dept, toolkit, "read"))
         rows.append(("p", role, dept, toolkit, "write"))
-    for row in rows:
-        if not _policy_has_row(row):
-            with open(_policy_csv(), "a", encoding="utf-8") as fh:
-                fh.write(f"p, {row[1]}, {row[2]}, {row[3]}, {row[4]}\n")
+    _policy_store().add_rows(rows, actor)
 
 
 @app.get("/api/integrations/catalog")
@@ -1675,7 +1699,7 @@ def integration_catalog_add(
     item = store.upsert_toolkit(toolkit, enabled=True, auth_config_id=auth_id or "", actor=claims["sub"])
     if tools:
         store.cache_toolkit_tools(toolkit, tools)
-    _ensure_toolkit_policy_rows(toolkit)
+    _ensure_toolkit_policy_rows(toolkit, claims["sub"])
     return {**item, "tools": len(tools), "note": f"{note}; {auth_note}"}
 
 
@@ -1691,7 +1715,7 @@ def integration_catalog_toggle(
         store = get_store()
         store.set_toolkit_enabled(name, req.enabled, actor=claims["sub"])
         if req.enabled:
-            _ensure_toolkit_policy_rows(name)
+            _ensure_toolkit_policy_rows(name, claims["sub"])
     except MemberError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"toolkit": name, "enabled": req.enabled}

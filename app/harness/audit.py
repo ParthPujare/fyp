@@ -12,6 +12,9 @@ is mirrored to a sidecar `.head` file — so editing, reordering, deleting, or
 truncating past entries is detectable via `verify_integrity()`. Lines written
 before this feature (no `entry`/`hash` envelope) are read as-is and reported as
 legacy/un-covered by the chain.
+
+With `DATABASE_URL` set, `open_audit_log` returns the shared-database twin
+(`app/harness/pg_audit.py`): same entries, same hash, one chain for every laptop.
 """
 
 from __future__ import annotations
@@ -69,19 +72,34 @@ def _thread_lock(path: Path) -> threading.Lock:
         return _THREAD_LOCKS.setdefault(key, threading.Lock())
 
 
+def resolve_key(hmac_key: str | bytes | None) -> bytes | None:
+    """The chain's HMAC key: the argument, else `SERVICES__AUDIT_HMAC_KEY`; blank means plain SHA-256."""
+    if hmac_key is None:
+        from app.config import get_settings
+
+        hmac_key = get_settings().services.audit_hmac_key
+    return (hmac_key.encode("utf-8") if isinstance(hmac_key, str) else hmac_key) or None
+
+
+def open_audit_log(path: str | Path) -> AuditLog:
+    """The shared Postgres chain when `DATABASE_URL` is set (named after the file's stem, so the
+    default `data/audit.jsonl` becomes log "audit"), else the local JSONL file."""
+    from app.db import is_enabled
+
+    if is_enabled():
+        from app.harness.pg_audit import PgAuditLog
+
+        return PgAuditLog(log_name=Path(path).stem)
+    return AuditLog(path)
+
+
 class AuditLog:
     def __init__(self, path: str | Path, hmac_key: str | bytes | None = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._head = self.path.with_name(self.path.name + ".head")
         self._lockfile = self.path.with_name(self.path.name + ".lock")
-        if hmac_key is None:
-            from app.config import get_settings
-
-            hmac_key = get_settings().services.audit_hmac_key
-        self._key: bytes | None = (
-            hmac_key.encode("utf-8") if isinstance(hmac_key, str) else hmac_key
-        ) or None
+        self._key = resolve_key(hmac_key)
 
     @contextmanager
     def _exclusive(self) -> Iterator[None]:
@@ -161,7 +179,8 @@ class AuditLog:
             self._write_head(entry_hash)
         return entry
 
-    def entries(self) -> list[dict[str, Any]]:
+    def entries(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        """Every entry in order, or only one run's (what the per-run evals need)."""
         if not self.path.exists():
             return []
         with self._exclusive(), self.path.open(encoding="utf-8") as fh:
@@ -170,12 +189,15 @@ class AuditLog:
                 if not line.strip():
                     continue
                 obj = json.loads(line)
-                result.append(obj.get("entry", obj))
+                entry = obj.get("entry", obj)
+                if run_id is None or entry.get("run_id") == run_id:
+                    result.append(entry)
             return result
 
-    def verify_integrity(self) -> tuple[bool, list[str]]:
+    def verify_integrity(self, *, full: bool = True) -> tuple[bool, list[str]]:
         """Recompute the chain. Returns (ok, issues). Detects edited/reordered/
-        deleted/legacy-after-hashed/missing-head vs truncation."""
+        deleted/legacy-after-hashed/missing-head vs truncation. (`full` exists for the
+        Postgres log's incremental mode; a local file is always re-read completely.)"""
         with self._exclusive():
             return self._verify_locked()
 

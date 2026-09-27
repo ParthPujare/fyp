@@ -153,6 +153,7 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
             return {**reset, "messages": [user_msg]}
 
         read_scopes: list[str] = []
+        facts_by_scope: dict[str, list[Any]] = {}
         candidates = [
             SCOPE_CENTRAL,
             scope_dept(str(claims.get("dept", ""))),
@@ -169,8 +170,8 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
             )
             if allowed:
                 read_scopes.append(scope)
+                facts_by_scope[scope] = items  # reuse: a second read per scope is a network trip
 
-        facts_by_scope = {scope: deps.store.items_in(scope_to_namespace(scope)) for scope in read_scopes}
         snapshot_text = build_snapshot(facts_by_scope, deps.memory.snapshot_max_chars)
         deps.trace.add_event(
             deps.run_id,

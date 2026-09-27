@@ -9,10 +9,38 @@ scopes; the harness computes those via Casbin).
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+MAX_QUERY_CHARS = 1_000
+_NON_ALNUM = re.compile(r"[\W_]+", re.UNICODE)  # mirrors SQL `[^[:alnum:]]+` in the Postgres index
+
+
+def normalise_query(text: str) -> str:
+    """Alphanumeric words separated by single spaces — the shape both back-ends index.
+
+    Shared by SQLite and Postgres so a query means the same everywhere. It also makes it impossible
+    for a query to carry FTS5/tsquery operators, quotes or NUL bytes (a NUL used to truncate the
+    SQLite FTS5 string and crash the recall tool with `unterminated string`).
+    """
+    return _NON_ALNUM.sub(" ", text).strip()[:MAX_QUERY_CHARS]
+
+
+class RecallIsolationError(RuntimeError):
+    """A search produced a row outside the caller's scopes. Fails closed: nothing is returned."""
+
+
+def check_in_scope(rows: list[dict[str, Any]], scopes: list[str]) -> list[dict[str, Any]]:
+    """Fail-closed layer shared by every episodic back-end: raise unless every row belongs to a
+    requested scope. A bug that widened a query must be loud, not a silent partial leak."""
+    allowed = set(scopes)
+    stray = sorted({r["scope"] for r in rows if r["scope"] not in allowed})
+    if stray:
+        raise RecallIsolationError(f"search returned rows from scopes outside the request: {stray}")
+    return rows
 
 
 class EpisodicStore:
@@ -70,7 +98,8 @@ class EpisodicStore:
         *,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
-        if not scopes:
+        words = normalise_query(query)
+        if not scopes or not words:
             return []
         placeholders = ", ".join("?" for _ in scopes)
         rows = self._conn.execute(
@@ -81,9 +110,9 @@ class EpisodicStore:
             ORDER BY rank
             LIMIT ?
             """,
-            (self._fts_query(query), *scopes, limit),
+            (self._fts_query(words), *scopes, limit),
         ).fetchall()
-        return [
+        hits = [
             {
                 "scope": r["scope"],
                 "run_id": r["run_id"],
@@ -94,6 +123,7 @@ class EpisodicStore:
             }
             for r in rows
         ]
+        return check_in_scope(hits, scopes)
 
     def transcripts_in(self, scope: str, *, limit: int = 20) -> list[dict[str, Any]]:
         rows = self._conn.execute(

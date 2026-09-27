@@ -10,7 +10,8 @@ Metrics produced
   attack_results.csv      per-attack pass counts from tests/attack (ASR, PDC evidence)
   tamper_detection.csv    audit-chain detection rate per mutation kind (M1-M4, M5 = full-FS attacker)
   audit_concurrency.csv   chain false-alarm rate under concurrent writers (integrity vs. availability)
-  memory_leakage.csv      Leakage(u,q) over randomized recall queries (target 0)
+  memory_leakage.csv      Leakage(u,q) over randomized recall queries, per back-end (target 0),
+                          with a non-vacuity column (own-canary queries that must be found)
   latency.csv             p50/p95/mean ms per op: enforce, audit.log, trace.add_event
 """
 
@@ -20,6 +21,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import random
 import statistics
 import subprocess
@@ -32,6 +34,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+os.environ["DATABASE_URL"] = ""  # never let a developer's real shared DB leak into the experiments
 RESULTS = Path(__file__).resolve().parent / "results"
 
 ATTACK_MAP = {  # tests/attack file -> attack ids (ref_docs/proposed_architecture.md §15)
@@ -196,22 +199,22 @@ def audit_concurrency(threads_list=(1, 2, 4, 8), per_thread: int = 15, reps: int
 
 
 # ------------------------------------------------------------------ leakage
-def memory_leakage(trials: int = 400) -> None:
-    print("[4/5] cross-scope recall leakage")
+def _leak_run(make_store, trials: int) -> dict:
+    """One randomized recall-isolation experiment against one episodic back-end."""
     from app.auth import users as auth_users
     from app.auth.store import MemberStore
     from app.config import get_settings
     from app.harness.enforcer import PolicyEnforcer
-    from app.memory.episodic import EpisodicStore
     from app.memory.recall import RecallService
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         tmpd = Path(tmp)
         prev = auth_users.get_store()
         auth_users.set_store(MemberStore(tmpd / "members.sqlite"))
+        cleanup = lambda: None
         try:
             enforcer = PolicyEnforcer()
-            epi = EpisodicStore(tmpd / "memory.sqlite")
+            epi, cleanup = make_store(tmpd)
             depts = ["marketing", "hr", "finance", "devops"]
             words = ["budget", "salary", "roadmap", "incident", "campaign", "ledger", "payroll", "deploy"]
             rng = random.Random(11)
@@ -224,7 +227,7 @@ def memory_leakage(trials: int = 400) -> None:
                                           f"{canary} {rng.choice(words)} {rng.choice(words)} {i}")
             recall = RecallService(epi, enforcer, get_settings().memory)
             users = [u for u in auth_users.get_store().list() if u.active and u.dept in depts]
-            leaked = total_hits = 0
+            r = {"queries": trials, "foreign_asks": 0, "leaks": 0, "own_asks": 0, "own_found": 0, "hits": 0}
             for _ in range(trials):
                 u = rng.choice(users)
                 claims = {"sub": u.username, "role": u.role, "dept": u.dept}
@@ -233,15 +236,59 @@ def memory_leakage(trials: int = 400) -> None:
                 # Only returned hit lines count ("[scope] transcript"); the empty-result
                 # message echoes the query (and thus the canary), which is not a leak.
                 hit_lines = [ln for ln in out.splitlines() if ln.startswith("[")]
-                foreign = [c for c, d in secret_of.items() if d != u.dept and any(c in ln for ln in hit_lines)]
-                total_hits += len(hit_lines)
-                leaked += 1 if foreign else 0
+                r["hits"] += len(hit_lines)
+                if secret_of[canary] == u.dept:  # non-vacuity: asking for your OWN canary must find it
+                    r["own_asks"] += 1
+                    r["own_found"] += 1 if any(canary in ln for ln in hit_lines) else 0
+                else:
+                    r["foreign_asks"] += 1
+                    r["leaks"] += 1 if any(canary in ln for ln in hit_lines) else 0
+                    r["leaks"] += sum(1 for ln in hit_lines if not ln.startswith(f"[dept/{u.dept}]") and not ln.startswith("[central]")
+                                      and not ln.startswith(f"[user/{u.username}]"))
         finally:
+            cleanup()
             auth_users.set_store(prev)
-    print(f"  queries={trials} results_with_foreign_canary={leaked} total_canary_hits={total_hits}")
-    _write("memory_leakage.csv", ["queries", "queries_with_leak", "leak_rate", "ub95", "hits_returned"],
-           [[trials, leaked, f"{leaked / trials:.4f}", f"{rule_of_three(trials) if leaked == 0 else float('nan'):.4f}",
-             total_hits]])
+    return r
+
+
+def memory_leakage(trials: int = 400, pg_url: str | None = None) -> None:
+    print("[4/5] cross-scope recall leakage (SQLite FTS5 and, if given, Postgres full-text)")
+    from app.memory.episodic import EpisodicStore
+
+    backends = [("sqlite-fts5", lambda tmpd: (EpisodicStore(tmpd / "memory.sqlite"), lambda: None))]
+    if pg_url:
+        def make_pg(_tmpd):
+            import uuid
+
+            import psycopg
+
+            from app.db import make_pool
+            from app.memory.pg_episodic import PgEpisodicStore
+
+            schema = "leak_" + uuid.uuid4().hex[:10]
+            admin = psycopg.connect(pg_url, autocommit=True)
+            admin.execute(f'CREATE SCHEMA "{schema}"')
+            pool = make_pool(pg_url, kwargs={"options": f"-c search_path={schema}"}, name=schema)
+
+            def cleanup():
+                pool.close()
+                admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+                admin.close()
+
+            return PgEpisodicStore(pool), cleanup
+
+        backends.append(("postgres-tsvector", make_pg))
+    rows = []
+    for name, factory in backends:
+        r = _leak_run(factory, trials)
+        ub = rule_of_three(r["foreign_asks"]) if r["leaks"] == 0 else float("nan")
+        rows.append([name, r["queries"], r["foreign_asks"], r["leaks"], f"{r['leaks'] / max(r['foreign_asks'], 1):.4f}",
+                     f"{ub:.4f}", r["own_asks"], r["own_found"], r["hits"]])
+        print(f"  {name:<18} foreign-canary queries={r['foreign_asks']} leaks={r['leaks']} | "
+              f"own-canary queries={r['own_asks']} found={r['own_found']}")
+    _write("memory_leakage.csv",
+           ["backend", "queries", "foreign_canary_queries", "leaks", "leak_rate", "ub95_if_zero",
+            "own_canary_queries", "own_found", "hit_lines_returned"], rows)
 
 
 # ------------------------------------------------------------------ latency
@@ -298,12 +345,14 @@ def latency(n: int = 2000, n_io: int = 100) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--skip-attacks", action="store_true")
+    ap.add_argument("--pg-url", default=os.environ.get("TEST_DATABASE_URL"),
+                    help="disposable Postgres to also measure (default: $TEST_DATABASE_URL); never a real database")
     args = ap.parse_args()
     if not args.skip_attacks:
         attack_results()
     tamper_detection()
     audit_concurrency()
-    memory_leakage()
+    memory_leakage(pg_url=args.pg_url)
     latency()
     print("done.")
 

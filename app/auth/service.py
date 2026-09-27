@@ -8,6 +8,9 @@ is reflected on the *next* claims read even with an existing token
 their already-issued tokens at enforcement time.
 """
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
@@ -17,7 +20,18 @@ from app.config import get_settings
 
 settings = get_settings()
 
-app = FastAPI(title="auth service", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Shared DB (Mk13): connect, migrate and pre-load the member cache at boot, so no user
+    pays that ~3 s (a dozen round trips to Neon) on their first request. No-op on SQLite."""
+    from app.db import is_enabled
+
+    if is_enabled():
+        users.get_store()
+    yield
+
+
+app = FastAPI(title="auth service", version="0.1.0", lifespan=_lifespan)
 
 
 class LoginRequest(BaseModel):

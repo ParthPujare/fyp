@@ -3,7 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import uuid
 from typing import Any
+
+# HERMETIC TESTS (Mk13). A developer's `.env` may hold the real, shared `DATABASE_URL`; pydantic
+# loads `.env` even when the shell variable is unset, and the store factories would then connect
+# the whole suite to that shared database (this actually happened once: migrations + demo seed
+# rows were written to a live Neon DB by a test run). An explicit empty environment variable wins
+# over `.env` and means "no shared database". This must run before any `app` module reads
+# settings. Postgres-backed tests build their own pools from TEST_DATABASE_URL instead.
+os.environ["DATABASE_URL"] = ""
 
 import httpx
 import pytest
@@ -202,19 +212,74 @@ def settings_with_timeout() -> Settings:
     return Settings(guardrails={"run_timeout_seconds": 0.05, "call_timeout_seconds": 5.0})
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _suite_never_touches_a_shared_database():
+    """Fail loudly (instead of silently writing to someone's Neon DB) if isolation ever breaks."""
+    from app.db import is_enabled
+
+    assert not is_enabled(), (
+        "tests must not run with DATABASE_URL active — that would read/write the shared database"
+    )
+
+
 @pytest.fixture(autouse=True)
-def member_store(tmp_path):
+def member_store(tmp_path, request):
     """Isolate the MemberStore per test (fresh, seeded tmp DB) so the suite never
-    touches the real `data/members.sqlite` (plan_mk2 Phase 1 test isolation)."""
+    touches the real `data/members.sqlite` (plan_mk2 Phase 1 test isolation).
+
+    `TEST_BACKEND=postgres` (with TEST_DATABASE_URL) runs the *whole suite* with the member
+    store on a throwaway Postgres schema instead — the regression check that the Postgres
+    store is a drop-in replacement (`make test-pg-full`)."""
     from app.auth import users as auth_users
     from app.auth.store import MemberStore
     from app.harness.audit import AuditLog
 
-    previous = auth_users.get_store()
-    store = MemberStore(
-        tmp_path / "members.sqlite",
-        audit=AuditLog(tmp_path / "members_audit.jsonl"),
-    )
+    previous = auth_users._STORE  # not get_store(): never construct a real store just to save it
+    audit = AuditLog(tmp_path / "members_audit.jsonl")
+    if os.environ.get("TEST_BACKEND") == "postgres" and TEST_URL:
+        from app.auth.pg_store import PgMemberStore
+
+        # its OWN schema (not the `pg` fixture's): tests that ask for `pg` expect a pristine one
+        pool, _admin, _schema, cleanup = _private_pg_schema()
+        request.addfinalizer(cleanup)
+        store = PgMemberStore(pool, audit=audit)  # production cache TTLs: exercises the cache too
+    else:
+        store = MemberStore(tmp_path / "members.sqlite", audit=audit)
     auth_users.set_store(store)
     yield store
     auth_users.set_store(previous)
+
+
+# ------------------------------------------------------------------ Postgres (Mk13)
+# Postgres-backed tests run only when TEST_DATABASE_URL points at a disposable database
+# (`make test-pg` starts one in Docker); otherwise they skip and the suite stays offline.
+TEST_URL = os.environ.get("TEST_DATABASE_URL")
+
+
+def _private_pg_schema():
+    """Create a throwaway schema + a pool confined to it; returns (pool, admin, schema, cleanup)."""
+    import psycopg
+
+    from app.db import make_pool
+
+    schema = "t_" + uuid.uuid4().hex[:12]
+    admin = psycopg.connect(TEST_URL, autocommit=True)
+    admin.execute(f'CREATE SCHEMA "{schema}"')
+    pool = make_pool(TEST_URL, kwargs={"options": f"-c search_path={schema}"}, max_size=8, name=schema)
+
+    def cleanup() -> None:
+        pool.close()
+        admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+        admin.close()
+
+    return pool, admin, schema, cleanup
+
+
+@pytest.fixture
+def pg():
+    """(pool, admin_conn, schema): a pool whose connections are confined to a private schema."""
+    if not TEST_URL:
+        pytest.skip("set TEST_DATABASE_URL (make test-pg) for Postgres tests")
+    pool, admin, schema, cleanup = _private_pg_schema()
+    yield pool, admin, schema
+    cleanup()

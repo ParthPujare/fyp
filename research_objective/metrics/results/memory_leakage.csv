@@ -1,2 +1,3 @@
-queries,queries_with_leak,leak_rate,ub95,hits_returned
-400,0,0.0000,0.0075,244
+backend,queries,foreign_canary_queries,leaks,leak_rate,ub95_if_zero,own_canary_queries,own_found,hit_lines_returned
+sqlite-fts5,600,459,0,0.0000,0.0065,141,131,342
+postgres-tsvector,600,459,0,0.0000,0.0065,141,131,342

@@ -93,9 +93,25 @@ D(use S)=Allow ∧ ∀i D(tᵢ)=Allow`. A skill visible to a role therefore cann
 
 **Theorem 2 (Scope isolation — I2, Option B).** For every query `q` and claims `c`,
 `Leakage(c,q) = |Recall(q,c) ∩ ¬R(c)| / |Recall(q,c)| = 0`. *Sketch:* `RecallService.readable_scopes` builds
-the scope list from `memory_allowed` and passes only that list to the FTS5 query; no code path searches another scope.
+the scope list from `memory_allowed` and passes only that list to the store; no code path searches another scope.
 The snapshot path in `load_memory` reads only scopes for which `memory_allowed(scope,"read")` is true. PII masking
 (`sanitize.py`) is applied on the tool-result and recall paths and to persisted trajectory text. ∎
+
+*Defence in depth (Mk13 Phase 4, shared Postgres).* Once recall moved to a shared database the property could no
+longer rest on one `WHERE` clause. Measured on the target database, **Row Level Security is not an available
+backstop**: the application's role on Neon (`fyp_owner`) has `BYPASSRLS`, so a policy would appear to protect while
+enforcing nothing — deliberately not used. The guarantee is instead the conjunction of independent layers
+(`app/memory/pg_episodic.py`, `episodic.py`, `recall.py`): **L1** exact-match, parameterised scope predicate
+(`scope = ANY(?)`; never `LIKE`, never case-folded); **L2** fail-closed check of every returned row
+(`check_in_scope` raises `RecallIsolationError`, returning nothing rather than a partial result); **L3** an
+independent policy re-check of each hit's scope in `RecallService` (a store returning foreign rows still cannot
+reach the model), degrading the tool to "unavailable" on an L2 trip; **L4** the query text is normalised to
+alphanumeric words and compiled with `phraseto_tsquery`, so no tsquery/FTS5 operator, quote or NUL byte can
+reach the index (this also fixed a pre-existing crash: a NUL in a query truncated the SQLite FTS5 string).
+The property then holds if *any one* of L1–L3 is correct. Evidence that the tests can detect a leak (mutation
+testing): with L1 removed and L2/L3 disabled, 1 190 leaked results over 555 queries; with `=` weakened to a
+prefix `LIKE`, `dept/hr` returned `dept/hr2`, `dept/hr/x`, …; with the query normalisation removed and
+`to_tsquery` used, operator injection crashes the search — all three caught by `tests/test_pg_phase4.py`.
 *Weakness to disclose:* masking is field-name + regex based (email, SSN) — it is not a general DLP, so I2's PII clause
 is only as strong as `SENSITIVE_FIELDS` and the regexes.
 
@@ -192,7 +208,8 @@ enforcer/materialisation code, not the policy itself. Say so, or add an independ
 | Tamper detection M1 edit / M2 delete / M3 reorder / M4 truncate | 50/50 each (100 %) | `tamper_detection.csv` |
 | Tamper detection M5 (attacker recomputes chain + head), plain SHA-256 chain | **0/50** | `tamper_detection.csv` |
 | Same attacker vs HMAC-keyed chain (M5b) | 50/50 | `tamper_detection.csv` |
-| Leakage over 400 randomized recall queries | 0 leaking queries (95 % UB 0.74 %) | `memory_leakage.csv` |
+| Leakage, randomized recall (SQLite FTS5 **and** Postgres tsvector), 459 foreign-canary queries each | 0 leaks on both (95 % UB 0.65 %); non-vacuity: 131/141 own-canary queries found | `memory_leakage.csv` |
+| Recall-isolation test suite (`tests/test_pg_phase4.py`) | 555-query randomized property × 5 callers, 45 adversarial query strings, 11 confusable scope names, fail-closed and end-to-end chats — pass on both back-ends; 3/3 injected leak bugs detected | — |
 | Audit chain false alarm with concurrent writers (after fix G4) | 0/3 at 1, 2, 4 and 8 writers, no entries lost (was 3/3 broken at ≥ 2 writers) | `audit_concurrency.csv` |
 | Latency p50 / p95 (after G4; machine load varies run to run) | `enforce` allow 0.6 / 0.7 ms; deny 1.3 / 1.6 ms; `audit.log` 17 / 31 ms (includes the new cross-process lock); `trace.add_event` 3.8 / 5.5 ms | `latency.csv` |
 

@@ -44,6 +44,9 @@ def _ns_tuple(ns_str: str) -> tuple[str, ...]:
 
 class SqliteBaseStore(BaseStore):
     supports_ttl = False
+    # Insertion-order tiebreak for equal timestamps: SQLite's implicit `rowid`; the Postgres
+    # subclass uses its explicit `seq` column (same meaning: kept across upserts).
+    _TIE = "rowid"
 
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
@@ -76,17 +79,20 @@ class SqliteBaseStore(BaseStore):
         results: list[Result] = [None] * len(ops)
         with self._conn:
             for i, op in enumerate(ops):
-                if isinstance(op, GetOp):
-                    results[i] = self._get(op)
-                elif isinstance(op, PutOp):
-                    self._put(op)
-                elif isinstance(op, SearchOp):
-                    results[i] = self._search(op)
-                elif isinstance(op, ListNamespacesOp):
-                    results[i] = self._list_namespaces(op)
-                else:  # pragma: no cover - BaseStore only sends these four
-                    raise TypeError(f"unsupported op: {type(op).__name__}")
+                results[i] = self._run_op(op)
         return results
+
+    def _run_op(self, op: Op) -> Result:
+        if isinstance(op, GetOp):
+            return self._get(op)
+        if isinstance(op, PutOp):
+            self._put(op)
+            return None
+        if isinstance(op, SearchOp):
+            return self._search(op)
+        if isinstance(op, ListNamespacesOp):
+            return self._list_namespaces(op)
+        raise TypeError(f"unsupported op: {type(op).__name__}")  # pragma: no cover - only four exist
 
     async def abatch(self, ops: Iterable[Op]) -> list[Result]:
         return self.batch(ops)
@@ -120,7 +126,7 @@ class SqliteBaseStore(BaseStore):
         rows = self._conn.execute(
             "SELECT ns, key, value, created_at, updated_at FROM memory_items "
             "WHERE ns = ? OR ns LIKE ? "
-            "ORDER BY updated_at DESC, rowid DESC",
+            f"ORDER BY updated_at DESC, {self._TIE} DESC",
             (_ns_str(prefix), _ns_str(prefix) + _NS_SEP + "%"),
         ).fetchall()
         items: list[SearchItem] = []
@@ -223,7 +229,7 @@ class SqliteBaseStore(BaseStore):
         # "oldest-out" eviction non-deterministic when two writes share a clock tick.
         rows = self._conn.execute(
             "SELECT ns, key, value, created_at, updated_at FROM memory_items "
-            "WHERE ns = ? ORDER BY updated_at " + order + ", rowid " + order,
+            "WHERE ns = ? ORDER BY updated_at " + order + f", {self._TIE} " + order,
             (_ns_str(namespace),),
         ).fetchall()
         return [i for r in rows if (i := self._row_to_item(r)) is not None]

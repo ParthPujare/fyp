@@ -7,14 +7,17 @@ is no code path that searches a scope the caller cannot read.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from app.agent.tools import ToolResult
 from app.config import MemorySettings
 from app.harness.enforcer import PolicyEnforcer
 from app.harness.sanitize import sanitize_text
-from app.memory.episodic import EpisodicStore
+from app.memory.episodic import EpisodicStore, RecallIsolationError
 from app.memory.scopes import SCOPE_CENTRAL, scope_dept, scope_user
+
+log = logging.getLogger(__name__)
 
 
 class RecallService:
@@ -42,7 +45,16 @@ class RecallService:
 
     def recall(self, query: str, claims: dict[str, Any]) -> ToolResult:
         scopes = self.readable_scopes(claims)
-        hits = self._episodic.search(query, scopes, limit=self._settings.recall_top_k)
+        try:
+            hits = self._episodic.search(query, scopes, limit=self._settings.recall_top_k)
+        except RecallIsolationError:
+            # The store's own fail-closed check tripped: a query returned rows outside the caller's
+            # scopes. Return NOTHING (never a partial result) and make noise so it gets fixed.
+            log.error("recall isolation violation blocked for %s (query withheld from logs)", claims.get("sub"))
+            return ToolResult(ok=False, reason="isolation", content="recall is temporarily unavailable")
+        # Layer 3 (independent of the store): re-ask the policy engine about every hit's own scope.
+        # If a store ever returned a row it should not have, it dies here instead of reaching the model.
+        hits = [h for h in hits if self._enforcer.memory_allowed(h["scope"], "read", claims)]
         if not hits:
             return ToolResult(
                 ok=True,

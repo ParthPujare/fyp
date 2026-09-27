@@ -3,7 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_JWT_SECRET = "dev-secret-change-me-0123456789abcdef"  # >=32 bytes for HS256
@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     app_name: str = "fyp-agent-harness"
     env: str = "dev"
 
+    # Shared Postgres (Neon) connection string — Mk13. Unset/blank = every store keeps its
+    # local SQLite file under data/ (the default for offline dev and the test suite).
+    # Use Neon's *pooled* host (`…-pooler…`) here; see app/db/pool.py.
+    database_url: str | None = None
+
     jwt: JWTSettings = JWTSettings()
     llm: LLMSettings = LLMSettings()
     services: ServiceSettings = ServiceSettings()
@@ -97,6 +102,14 @@ class Settings(BaseSettings):
     composio: ComposioSettings = ComposioSettings()
 
     model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _blank_database_url_is_unset(cls, value: object) -> object:
+        # `DATABASE_URL=` in .env arrives as "" — that means "not configured", not a DSN.
+        if value is None or not str(value).strip():
+            return None
+        return str(value).strip()
 
     @model_validator(mode="after")
     def _no_dev_secrets_outside_dev(self) -> "Settings":

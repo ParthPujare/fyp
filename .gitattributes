@@ -3,3 +3,4 @@
 # ("$'\r': command not found"). Force LF regardless of the checkout platform.
 *.sh text eol=lf
 Dockerfile text eol=lf
+*.sql text eol=lf

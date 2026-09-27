@@ -1137,13 +1137,17 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       </div>
       <div class="status muted">run_id <code>${esc(item.run_id || "")}</code></div>
       <pre style="white-space:pre-wrap;color:var(--muted);font-size:12px">${esc(JSON.stringify(payload, null, 2))}</pre>
-      <div class="row">
+      ${item.resumable_here === false
+        ? `<div class="status" style="color:#fef08a">This run's saved chat state was not found (the chat was deleted?), so it can no longer be resumed.</div>`
+        : `<div class="row">
         <button class="ok" data-act="approve" data-id="${esc(item.id)}">Approve</button>
         <button class="bad" data-act="reject" data-id="${esc(item.id)}">Reject</button>
-      </div>
+      </div>`}
       <div class="status" data-status=""></div>`;
-    ctx.querySelector("[data-act=approve]").addEventListener("click", () => decide(item.id, true, ctx, decideBase, reload));
-    ctx.querySelector("[data-act=reject]").addEventListener("click", () => decide(item.id, false, ctx, decideBase, reload));
+    if (item.resumable_here !== false) {
+      ctx.querySelector("[data-act=approve]").addEventListener("click", () => decide(item.id, true, ctx, decideBase, reload));
+      ctx.querySelector("[data-act=reject]").addEventListener("click", () => decide(item.id, false, ctx, decideBase, reload));
+    }
     return ctx;
   }
 

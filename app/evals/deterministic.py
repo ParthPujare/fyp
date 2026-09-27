@@ -29,13 +29,15 @@ class DeterministicEvaluator:
 
     def evaluate(self, run_id: str) -> EvalResult:
         tree = self.trace.get_run_tree(run_id)
+        # this run's decisions only, read once (on the shared DB: one indexed query, not the whole log)
+        decisions = self.audit.entries(run_id=run_id) if self.audit is not None else []
         return EvalResult(
             suite="deterministic",
             checks=[
                 self._integrity(run_id),
                 self._completeness(tree),
-                self._rbac_contract(run_id, tree),
-                self._audit_pairs(run_id, tree),
+                self._rbac_contract(decisions, tree),
+                self._audit_pairs(decisions, tree),
                 self._audit_integrity(),
                 self._guardrails(tree),
             ],
@@ -78,7 +80,7 @@ class DeterministicEvaluator:
             score=1.0 if not missing else 0.0,
         )
 
-    def _rbac_contract(self, run_id: str, tree: list[dict[str, Any]]) -> EvalCheck:
+    def _rbac_contract(self, decisions: list[dict[str, Any]], tree: list[dict[str, Any]]) -> EvalCheck:
         """RBAC contract: no resource traced as allowed while audit denied it,
         and every denied outcome is justified by a real audit decision."""
         if self.audit is None:
@@ -86,9 +88,7 @@ class DeterministicEvaluator:
 
         denied_by_audit: set[tuple[str, str]] = set()
         allowed_by_audit: set[tuple[str, str]] = set()
-        for entry in self.audit.entries():
-            if entry.get("run_id") != run_id:
-                continue
+        for entry in decisions:
             res = entry.get("resource") or {}
             if res.get("type") not in ("tool", "skill"):
                 continue
@@ -147,7 +147,7 @@ class DeterministicEvaluator:
             score=1.0 if not violations else 0.0,
         )
 
-    def _audit_pairs(self, run_id: str, tree: list[dict[str, Any]]) -> EvalCheck:
+    def _audit_pairs(self, decisions: list[dict[str, Any]], tree: list[dict[str, Any]]) -> EvalCheck:
         """Every audit decision for the run maps back to a trace event (the audit
         and trace logs share event conventions — plan_mk1_core_harness.md §7/§12)."""
         if self.audit is None:
@@ -157,9 +157,7 @@ class DeterministicEvaluator:
             e for e in tree if e["type"] in (TraceEventType.TOOL_CALL.value, TraceEventType.SKILL_USE.value, TraceEventType.MEMORY_WRITE.value)
         ]
         missing: list[str] = []
-        for entry in self.audit.entries():
-            if entry.get("run_id") != run_id:
-                continue
+        for entry in decisions:
             res = entry.get("resource") or {}
             rtype, rid = res.get("type"), res.get("id")
             matches = [e for e in events if _event_matches(e, rtype, rid)]
@@ -177,7 +175,8 @@ class DeterministicEvaluator:
         (plan_mk1_core_harness.md §14 "audit + trace are append-only, hashed")."""
         if self.audit is None:
             return EvalCheck(name="audit_integrity", passed=True, score=1.0, detail="audit not provided; skipped")
-        ok, issues = self.audit.verify_integrity()
+        # incremental on the shared DB (only rows since the last verification; the first is full)
+        ok, issues = self.audit.verify_integrity(full=False)
         return EvalCheck(
             name="audit_integrity",
             passed=ok,

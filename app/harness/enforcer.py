@@ -15,6 +15,11 @@ lazily on the next enforce call after any member create/update/deactivate/reset.
 Tool scopes are `dept:action` (e.g. `crm:read`) and map to Casbin
 `(obj=dept, act=action)`. The subject is the authenticated user (`sub`) resolved
 to a role via its `g` role-assignment.
+
+Since Mk13 Phase 6 the `p` rows come from a policy store (`app/harness/policy_store.py`):
+`policy.csv` by default, the shared database's `policy_rules` when `DATABASE_URL` is set. The
+rebuild trigger is `(members_version, policy version)`: a changed file (mtime/size) or a rule
+added on any laptop (which bumps `members_version`) rebuilds on the next enforce call.
 """
 
 from __future__ import annotations
@@ -27,11 +32,16 @@ import casbin
 
 from app.agent.tools import ToolSpec
 from app.auth.users import get_store
+from app.harness.policy_store import (
+    MODEL_PATH,
+    POLICY_DIR,
+    POLICY_PATH,
+    FilePolicyStore,
+    open_policy_store,
+)
 from app.memory.scopes import SCOPE_CENTRAL
 
-POLICY_DIR = Path(__file__).resolve().parent / "policies"
-MODEL_PATH = POLICY_DIR / "model.conf"
-POLICY_PATH = POLICY_DIR / "policy.csv"
+__all__ = ["MODEL_PATH", "POLICY_DIR", "POLICY_PATH", "PolicyEnforcer", "dept_of_scope", "head_role_for"]
 
 
 def head_role_for(dept: str) -> str:
@@ -49,18 +59,24 @@ class PolicyEnforcer:
     def __init__(
         self,
         model_path: str | Path = MODEL_PATH,
-        policy_path: str | Path = POLICY_PATH,
+        policy_path: str | Path | None = None,
+        *,
+        policy_store: Any = None,
     ):
+        """`policy_path` pins a CSV (tests, demos); `policy_store` injects a back-end; neither
+        means "the configured one" (shared database if `DATABASE_URL` is set, else policy.csv)."""
         self._model_path = str(model_path)
-        self._policy_path = str(policy_path)
+        if policy_path is not None:
+            policy_store = FilePolicyStore(policy_path)
+        self.policy = policy_store if policy_store is not None else open_policy_store()
         self._lock = threading.Lock()
-        self._members_version = -1
+        self._members_version: Any = -1
         self._build()
 
     # ---- g materialization + version guard ----
 
-    def _store_version(self) -> int:
-        return get_store().version
+    def _store_version(self) -> Any:
+        return (get_store().version, self.policy.version())
 
     def _member_assignments(self) -> list[tuple[str, str, str]]:
         """g rows for ACTIVE members only (unknown/disabled => no g => deny)."""
@@ -71,13 +87,15 @@ class PolicyEnforcer:
         ]
 
     def _build(self) -> None:
-        enforcer = casbin.Enforcer(self._model_path, self._policy_path)
+        # Read the version BEFORE the data: a change landing mid-build then leaves the recorded
+        # version stale, so the next call rebuilds again (never the reverse: new data, old flag).
+        version = self._store_version()
+        enforcer = casbin.Enforcer(self._model_path, self.policy.casbin_source())
         enforcer.load_policy()
-        _enforcer = enforcer
         for sub, role, dept in self._member_assignments():
-            _enforcer.add_role_for_user_in_domain(sub, role, dept)
-        self._enforcer = _enforcer
-        self._members_version = self._store_version()
+            enforcer.add_role_for_user_in_domain(sub, role, dept)
+        self._enforcer = enforcer
+        self._members_version = version
 
     def _sync_g(self) -> None:
         """Rebuild g under the lock if the member store changed (stale-g fix)."""

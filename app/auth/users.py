@@ -35,11 +35,22 @@ class User:
 _STORE: MemberStore | None = None
 
 
+def _open_member_store() -> MemberStore:
+    """Shared Postgres when `DATABASE_URL` is set (Mk13), else the local SQLite file."""
+    from app.db import is_enabled
+
+    if is_enabled():
+        from app.auth.pg_store import PgMemberStore
+
+        return PgMemberStore()
+    return MemberStore()
+
+
 def get_store() -> MemberStore:
     """The shared MemberStore (swappable by tests via `set_store`)."""
     global _STORE
     if _STORE is None:
-        _STORE = MemberStore()
+        _STORE = _open_member_store()
     return _STORE
 
 

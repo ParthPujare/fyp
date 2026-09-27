@@ -226,12 +226,23 @@ class TraceStore:
             ).fetchall()
             heads = {r["run_id"]: r["head_hash"] for r in conn.execute("SELECT run_id, head_hash FROM trace_runs").fetchall()}
 
-        ok = True
-        issues: list[str] = []
-        by_run: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        by_run: dict[str, list[Any]] = defaultdict(list)
         for r in rows:
             by_run[r["run_id"]].append(r)
+        return self._check_chains(by_run, heads)
 
+    def flush(self, run_id: str | None = None) -> None:
+        """Persist any buffered events. SQLite writes immediately, so this is a no-op here;
+        the Postgres store batches a run's events and writes them in one round trip."""
+        return
+
+    def _check_chains(
+        self, by_run: dict[str, list[Any]], heads: dict[str, str]
+    ) -> tuple[bool, list[str]]:
+        """Recompute every run's hash chain from its event rows (`row["seq"]`, `row["actor"]` as
+        JSON text, ...) and compare with the stored head. Shared by all trace back-ends."""
+        ok = True
+        issues: list[str] = []
         for rid, events in by_run.items():
             prev_expected = GENESIS
             last_hash: str | None = None

@@ -55,7 +55,7 @@ class SkillRegistry:
         scope_segments = skill.scope.replace("/", "/").split("/")
         return self.root.joinpath(*scope_segments, skill.name)
 
-    def save(self, skill: Skill) -> Path:
+    def save(self, skill: Skill, actor: str = "") -> Path:
         """Write a skill.md to disk (create/update), hot-reloaded on next read.
 
         The resolved path must stay inside the registry root: a crafted
@@ -97,6 +97,17 @@ class SkillRegistry:
             path = path.parent
 
     # ---- schema ----
+
+    @staticmethod
+    def open(root: str | Path | None = None) -> SkillRegistry:
+        """Shared database when `DATABASE_URL` is set (Mk13 Phase 6), else the `skills/` folder."""
+        from app.db import is_enabled
+
+        if is_enabled():
+            from app.skills.pg_registry import shared_registry
+
+            return shared_registry()
+        return SkillRegistry(root)
 
     @staticmethod
     def schema_for(skill: Skill) -> dict[str, Any]:

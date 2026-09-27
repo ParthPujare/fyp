@@ -2,6 +2,9 @@
 # Launch all seven local processes on ports 8000-8006 (runtime topology, see ref_docs/proposed_architecture.md §2).
 set -euo pipefail
 
+# Shared database (Mk13): migrate first if DATABASE_URL is configured (no-op otherwise).
+uv run python -m app.db migrate --if-configured
+
 uv run uvicorn app.auth.service:app --port 8000 &
 uv run uvicorn app.gateway.app:app --port 8001 &
 uv run uvicorn app.services.crm:app --port 8002 &

@@ -99,6 +99,96 @@ its own private volume (its own members, chats, approvals). Everyone starts from
 demo accounts and diverges from there. A single shared database for the whole team is the next
 part of Mk13 (Neon Postgres, Phases 1–6 of the plan) and is **not built yet**.
 
+## Shared database (Neon Postgres) — Mk13, in progress
+
+Goal: every teammate's app reads and writes **one** cloud database instead of private files.
+**Status: Phase 5 of 6.** With `DATABASE_URL` set (see below) these are now **shared by everyone**:
+
+| Shared now | Still per-machine (moves in a later phase) |
+|---|---|
+| members, passwords, roles, departments | policy rules and skills (Phase 6) |
+| each member's LLM keys, Composio key, connected apps, toolkit catalog | |
+| approvals queue — **decide from any machine** | |
+| memory facts (central / department / personal) | |
+| chat history and threads, paused runs | |
+| run traces / trajectory viewer | |
+| episodic recall — "remember what we discussed" (scope-isolated, see below) | |
+| audit log — one tamper-evident hash chain written by every laptop | |
+
+Without `DATABASE_URL` nothing changes: everything stays in local SQLite files.
+Plan and design notes: `ref_docs/plans/plan_mk13_docker_cloud_db.md`.
+
+**What you will notice**
+- **The shared database starts with only the 5 demo accounts.** Accounts and chats you made earlier
+  live in your old local files and are *not* copied (re-create accounts once in Members; everyone sees them).
+- **Changes by teammates appear quickly, not instantly.** Members/departments within ~1 s; LLM
+  keys, connections and the toolkit catalog within ~30 s. Your *own* changes show immediately.
+- **A chat started on one machine can be continued, and its approval decided, on another.**
+  A run paused for approval on your laptop can be approved by an admin on theirs; it resumes there.
+- **A run's trace appears when the run finishes** (or pauses), not while it is still executing — events are
+  batched into one write. A process that crashes mid-run loses that run's progress; the user re-sends.
+- **Speed:** the database is ~100–150 ms away, so cache misses cost a round trip each. Measured on
+  real Neon from Docker: a warm chat turn ~1 s with a mock model (3–4 statements: one checkpoint read,
+  one checkpoint write, one batched trace write), the first turn of a new chat 2–4 s.
+- **Recall is shared but still scope-isolated.** A teammate's recall can only ever return transcripts from scopes their
+  role may read (their department, their own, central). Four independent layers enforce this and a test suite
+  attacks it (see the plan, Phase 4). Search is exact-word and phrase based: no stemming ("budgets" ≠ "budget")
+  and no accent folding. Transcripts you had in your old local files are not copied.
+- **One audit chain for the whole team.** Every policy decision from every laptop is appended to the same
+  hash chain in the database (your old `data/audit.jsonl` is not copied). If you use
+  `SERVICES__AUDIT_HMAC_KEY`, **every laptop must have the same key** — otherwise each reports the others'
+  entries as tampered. `python -m app.db verify-audit` checks the whole chain. Appends are one round trip
+  (~0.15 s) normally; when several laptops write at the same moment they queue (measured ceiling ≈ one append
+  per round trip for the whole team, ~7/s). The audit log is append-only and is never pruned.
+- **Policy rules and skills are shared.** A department registered, a toolkit enabled or a skill created/edited
+  in the dashboard on any laptop is live on every laptop within ~1 s — no restart. The first start on an empty
+  database copies `app/harness/policies/policy.csv` and `skills/` in; **after that the database is the source of
+  truth**, and editing those files in git does nothing until someone runs
+  `python -m app.db sync-config` (`--dry-run` first to see the differences). It adds new rules/skills; it
+  removes rules deleted from `policy.csv` only with `--prune` (rules added from the dashboard are never
+  removed), and replaces a skill edited in the dashboard only with `--overwrite-skills`.
+- **Storage:** the free tier is 512 MB. A chat's saved state grows with every turn, so occasionally run
+  `python -m app.db prune --chats` (keeps each chat's latest checkpoint; history and paused runs keep
+  working) and, if needed, `--traces-older-than 30` and `--episodic-older-than 90`. Add `--dry-run` to see what would go.
+
+**One-time setup (whoever owns the database — 5 minutes, free, no card):**
+1. Sign up at [neon.com](https://neon.com), **Create project** (pick the region nearest your team).
+2. On the project page click **Connect**, tick **Connection pooling**, copy the connection string
+   (its host contains `-pooler`).
+3. Put it in `.env` as `DATABASE_URL=…` (see `.env.example`). Keep it private — anyone with it can
+   read the whole database. Share it with teammates over a private channel, never git.
+4. `docker compose up -d --build`, then verify:
+   `docker compose exec app python -m app.db check` → should print `connect : OK`, the server
+   version, and `migration: 0001_baseline applied`.
+
+**Each teammate:** put the same `DATABASE_URL` in their own `.env` — that is the only step.
+
+| Command | What it does |
+|---|---|
+| `docker compose exec app python -m app.db check` | connect, time it, show migration state (never prints the password) |
+| `docker compose exec app python -m app.db status` | list migrations: applied / pending / edited / unknown |
+| `docker compose exec app python -m app.db prune --chats --dry-run` | see how much saved chat state could be freed |
+| `docker compose exec app python -m app.db verify-audit` | walk the whole shared audit chain; exit 1 and list the problems if it was tampered with |
+| `docker compose exec app python -m app.db sync-config --dry-run` | compare this checkout's `policy.csv` / `skills/` with the shared database (drop `--dry-run` to apply) |
+| `make db-check` · `make db-migrate` · `make db-prune` · `make db-sync-config` | same, for the native (non-Docker) setup |
+
+If the container exits right after `docker compose up`, read `docker compose logs app` — a bad
+password, wrong host or missing database is reported in plain words within seconds (wrong
+password / typo'd host / unknown database do **not** retry). A cold Neon (idle >5 min) can take a
+few seconds to wake; that is retried automatically.
+
+**Testing the Postgres code without Neon:** `make test-pg` starts a throwaway Postgres in Docker
+(port 55432), runs the whole suite including the Postgres-backed tests, and removes it;
+`make test-pg-full` additionally runs the *entire* existing suite with the member store on
+Postgres (the check that it is a drop-in replacement). Plain `pytest` skips all of that, so the
+offline suite stays offline. **Tests can never reach your real `DATABASE_URL`**: `tests/conftest.py`
+blanks it before anything loads and a session fixture fails loudly if it is ever active. Use `127.0.0.1`, not `localhost`,
+in any local connection string — on Windows `localhost` tries IPv6 first and can stall ~30 s.
+
+**Adding a migration (later phases):** new file `app/db/migrations/NNNN_short_name.sql`, next number,
+plain SQL, no `BEGIN/COMMIT`, additive changes only. Never edit an applied migration — the runner
+stores each file's checksum and stops if it changed (add a new migration instead).
+
 ## Native setup (development, running tests, editing code)
 
 Requires [uv](https://docs.astral.sh/uv/) and Python ≥ 3.12. Use this for `uv run pytest` /
@@ -348,7 +438,7 @@ Automated coverage: `tests/test_memory_web.py` (268 offline tests total).
 
 - **`filter_tools`** — only the caller's role-permitted tool schemas enter the LLM context (a Marketing user never *sees* HR/Finance/DevOps tools).
 - **`intercept`** — every tool call is re-checked at runtime; an unauthorized call is physically blocked and returns a permission error, even if the model tries.
-- **`audit log`** — every ALLOW/DENY decision is appended to `data/audit.jsonl` (JSONL, `run_id`-linked with the trace).
+- **`audit log`** — every ALLOW/DENY decision is appended to `data/audit.jsonl` (JSONL, `run_id`-linked with the trace), or with `DATABASE_URL` set to the shared `audit_log` table (same entries, same hash chain).
 - Policies live in `app/harness/policies/{model.conf,policy.csv}`; adding a department is data, not code.
 
 Guardrails (configurable via `GUARDRAILS__*`): `max_steps=10`, `tool_budget=8`,

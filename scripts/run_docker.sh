@@ -11,6 +11,14 @@
 #                    instead of silently running on 6 of 7 services.
 set -euo pipefail
 
+# Shared database (Mk13): if DATABASE_URL is set, bring its schema up to date BEFORE any service
+# starts. Fail fast on purpose — once stores use the shared DB, silently falling back to local
+# SQLite would split the team's data. No DATABASE_URL = local SQLite, this is a no-op.
+python -m app.db migrate --if-configured || {
+  echo "run_docker.sh: database migration failed — fix DATABASE_URL (see 'python -m app.db check') and restart." >&2
+  exit 1
+}
+
 pids=()
 for spec in \
   "app.auth.service:8000" \

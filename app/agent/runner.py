@@ -10,17 +10,18 @@ decision. Every run is traced (run_start → nodes → tool_calls → memory →
 
 from __future__ import annotations
 
-import sqlite3
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from app.agent.checkpoints import invoke_options, make_checkpointer
 from app.agent.graph import AgentDeps, build_agent_graph
 from app.agent.guardrails import make_tracker
 from app.agent.tools import TOOL_REGISTRY, ToolExecutor, tool_schema
 from app.config import Settings, get_settings
 from app.evals import eval_enabled_for_judge, evaluate_run
-from app.harness.audit import AuditLog
+from app.harness.audit import AuditLog, open_audit_log
 from app.harness.enforcer import PolicyEnforcer
 from app.harness.filter import filter_tools
 from app.llm.base import LLMProvider
@@ -28,11 +29,23 @@ from app.llm.factory import get_provider, get_provider_for_user
 from app.llm.mock import MockLLM
 from app.memory.approvals import ApprovalStore
 from app.memory.episodic import EpisodicStore
+from app.memory.factory import open_approval_store, open_base_store, open_episodic_store
 from app.memory.recall import RecallService
 from app.memory.store import SqliteBaseStore
+from app.ops.factory import open_trace_store
 from app.ops.schema import TraceEventType
 from app.ops.store import TraceStore
 from app.skills.registry import SkillRegistry
+
+log = logging.getLogger(__name__)
+
+
+def _flush_trace(trace: Any, run_id: str) -> None:
+    """Persist buffered trace events (a no-op on SQLite). Tracing must never fail a chat."""
+    try:
+        trace.flush(run_id)
+    except Exception:
+        log.exception("trace flush failed for run %s", run_id)
 
 
 @dataclass
@@ -67,6 +80,20 @@ def _suspended_reply(tier: str | None, tool: str | None, approval_id: str | None
     )
 
 
+def run_state_is_local(checkpointer: Any, thread_id: str) -> bool:
+    """Can this process load the checkpoint a suspended run needs in order to resume?
+
+    With a shared database every machine sees every run's checkpoint, so this is normally True
+    everywhere; False means the chat was deleted (or, on local SQLite, started on another
+    machine). Deciding an approval whose run cannot resume would record the decision and then
+    fail, and a decided approval cannot be re-decided — so callers check this first.
+    """
+    try:
+        return checkpointer.get_tuple({"configurable": {"thread_id": thread_id}}) is not None
+    except Exception:  # noqa: BLE001 - unreadable checkpoint store: treat as not resumable
+        return False
+
+
 def _saved_key_id(checkpointer: Any, thread_id: str) -> str | None:
     """The BYOK key id stored in the thread's latest checkpoint (None if absent)."""
     try:
@@ -75,13 +102,6 @@ def _saved_key_id(checkpointer: Any, thread_id: str) -> str | None:
         return values.get("key_id") or None
     except Exception:  # noqa: BLE001 - best effort: fall back to the default provider
         return None
-
-
-def _make_checkpointer(settings: Settings):
-    from langgraph.checkpoint.sqlite import SqliteSaver
-
-    conn = sqlite3.connect(settings.services.checkpoint_path, check_same_thread=False)
-    return SqliteSaver(conn)
 
 
 def _build_deps(
@@ -103,26 +123,26 @@ def _build_deps(
     key_id: str | None = None,
 ) -> tuple[AgentDeps, Any]:
     if store is None:
-        store = SqliteBaseStore(settings.services.memory_path)
+        store = open_base_store(settings.services.memory_path)
     if trace is None:
-        trace = TraceStore(settings.services.data_dir / "trace.sqlite")
+        trace = open_trace_store(settings.services.data_dir / "trace.sqlite")
     if enforcer is None:
         enforcer = PolicyEnforcer()
     if audit is None:
-        audit = AuditLog(settings.services.audit_path)
+        audit = open_audit_log(settings.services.audit_path)
     provider = provider or get_provider_for_user(settings, claims.get("sub"), store, key_id=key_id)
     executor = executor or ToolExecutor(settings=settings)
     if episodic is None:
-        episodic = EpisodicStore(settings.services.memory_path)
+        episodic = open_episodic_store(settings.services.memory_path)
     if approvals is None:
-        approvals = ApprovalStore(settings.services.memory_path)
+        approvals = open_approval_store(settings.services.memory_path)
     if recall is None:
         recall = RecallService(episodic, enforcer, settings.memory)
     if checkpointer is None:
-        checkpointer = _make_checkpointer(settings)
+        checkpointer = make_checkpointer(settings)
 
     actor = {"sub": claims["sub"], "role": claims["role"], "dept": claims["dept"]}
-    skills = SkillRegistry(settings.skills.skills_dir)
+    skills = SkillRegistry.open(settings.skills.skills_dir)
     visible_skills = [s for s in skills.load_all() if enforcer.skill_allowed(s.name, claims)]
     internal_schemas = [tool_schema(t) for t in filter_tools(TOOL_REGISTRY.values(), enforcer, claims)]
     try:
@@ -215,68 +235,76 @@ def run_agent(
         thread_id = f"run-{uuid.uuid4()}"
 
     if trace is None:
-        trace = TraceStore(settings.services.data_dir / "trace.sqlite")
+        trace = open_trace_store(settings.services.data_dir / "trace.sqlite")
     actor = {"sub": claims["sub"], "role": claims["role"], "dept": claims["dept"]}
     run_id = str(uuid.uuid4())
     trace.start_run(actor, {"message": message}, run_id=run_id)
 
-    deps, checkpointer = _build_deps(
-        claims,
-        settings=settings,
-        provider=provider,
-        executor=executor,
-        trace=trace,
-        enforcer=enforcer,
-        audit=audit,
-        store=store,
-        episodic=episodic,
-        approvals=approvals,
-        recall=recall,
-        run_id=run_id,
-        thread_id=thread_id,
-        checkpointer=checkpointer,
-        key_id=key_id,
-    )
-    trace = deps.trace
-    actor = deps.actor
-
-    graph = build_agent_graph(deps, checkpointer=checkpointer)
-    initial: dict[str, Any] = {"claims": claims, "input": message, "key_id": key_id}
+    deps = None
     try:
-        final_state = graph.invoke(initial, config={"configurable": {"thread_id": thread_id}})
-    except Exception as exc:
-        trace.end_run(run_id, {"error": str(exc)})
-        raise
+        deps, checkpointer = _build_deps(
+            claims,
+            settings=settings,
+            provider=provider,
+            executor=executor,
+            trace=trace,
+            enforcer=enforcer,
+            audit=audit,
+            store=store,
+            episodic=episodic,
+            approvals=approvals,
+            recall=recall,
+            run_id=run_id,
+            thread_id=thread_id,
+            checkpointer=checkpointer,
+            key_id=key_id,
+        )
+        trace = deps.trace
+        actor = deps.actor
 
-    interrupts = final_state.get("__interrupt__") or []
-    interrupted = bool(interrupts)
-    approval_id, tier, tool = _suspension(interrupts)
-    if interrupted:
-        trace.add_event(run_id, TraceEventType.GUARDRAIL, actor, {"type": "hitl_suspend", "approval_id": approval_id})
-
-    reply = final_state.get("reply") or (
-        _suspended_reply(tier, tool, approval_id) if interrupted else "no reply produced"
-    )
-    if not interrupted:
-        trace.end_run(run_id, {"output": reply})
-        if evals_enabled:
-            _fire_evals(
-                deps=deps,
-                run_id=run_id,
-                settings=settings,
-                judge_provider=judge_provider,
+        graph = build_agent_graph(deps, checkpointer=checkpointer)
+        initial: dict[str, Any] = {"claims": claims, "input": message, "key_id": key_id}
+        try:
+            final_state = graph.invoke(
+                initial,
+                config={"configurable": {"thread_id": thread_id}},
+                **invoke_options(checkpointer),
             )
+        except Exception as exc:
+            trace.end_run(run_id, {"error": str(exc)})
+            raise
 
-    return AgentResult(
-        reply=reply,
-        run_id=run_id,
-        guardrail_hits=deps.tracker.hits,
-        tool_calls=deps.executed_calls,
-        thread_id=thread_id,
-        interrupted=interrupted,
-        approval_id=approval_id,
-        approval_tier=tier if interrupted else None,
-    )
+        interrupts = final_state.get("__interrupt__") or []
+        interrupted = bool(interrupts)
+        approval_id, tier, tool = _suspension(interrupts)
+        if interrupted:
+            trace.add_event(run_id, TraceEventType.GUARDRAIL, actor, {"type": "hitl_suspend", "approval_id": approval_id})
+
+        reply = final_state.get("reply") or (
+            _suspended_reply(tier, tool, approval_id) if interrupted else "no reply produced"
+        )
+        if not interrupted:
+            trace.end_run(run_id, {"output": reply})
+            if evals_enabled:
+                _fire_evals(
+                    deps=deps,
+                    run_id=run_id,
+                    settings=settings,
+                    judge_provider=judge_provider,
+                )
+
+        return AgentResult(
+            reply=reply,
+            run_id=run_id,
+            guardrail_hits=deps.tracker.hits,
+            tool_calls=deps.executed_calls,
+            thread_id=thread_id,
+            interrupted=interrupted,
+            approval_id=approval_id,
+            approval_tier=tier if interrupted else None,
+        )
+    finally:
+        _flush_trace(deps.trace if deps is not None else trace, run_id)
 
 
 def resume_agent(
@@ -304,7 +332,7 @@ def resume_agent(
     run again instead of being reported as finished."""
     settings = settings or get_settings()
     if approvals is None:
-        approvals = ApprovalStore(settings.services.memory_path)
+        approvals = open_approval_store(settings.services.memory_path)
     entry = approvals.get(approval_id)
     if entry is None:
         raise KeyError(f"approval {approval_id!r} not found")
@@ -314,65 +342,71 @@ def resume_agent(
     run_id = entry["run_id"]
     thread_id = entry["thread_id"]
     if checkpointer is None:
-        checkpointer = _make_checkpointer(settings)
+        checkpointer = make_checkpointer(settings)
     if key_id is None:
         key_id = _saved_key_id(checkpointer, thread_id)
-    deps, checkpointer = _build_deps(
-        entry["actor"],
-        settings=settings,
-        provider=provider,
-        executor=executor,
-        trace=trace,
-        enforcer=enforcer,
-        audit=audit,
-        store=store,
-        episodic=episodic,
-        approvals=approvals,
-        recall=recall,
-        run_id=run_id,
-        thread_id=thread_id,
-        checkpointer=checkpointer,
-        key_id=key_id,
-    )
-    graph = build_agent_graph(deps, checkpointer=checkpointer)
-    from langgraph.types import Command
-
+    deps = None
     try:
-        final_state = graph.invoke(
-            Command(resume=entry["status"] == "approved"),
-            config={"configurable": {"thread_id": thread_id}},
+        deps, checkpointer = _build_deps(
+            entry["actor"],
+            settings=settings,
+            provider=provider,
+            executor=executor,
+            trace=trace,
+            enforcer=enforcer,
+            audit=audit,
+            store=store,
+            episodic=episodic,
+            approvals=approvals,
+            recall=recall,
+            run_id=run_id,
+            thread_id=thread_id,
+            checkpointer=checkpointer,
+            key_id=key_id,
         )
-    except Exception as exc:
-        deps.trace.end_run(run_id, {"error": str(exc)})
-        raise
-    interrupts = final_state.get("__interrupt__") or []
-    interrupted = bool(interrupts)
-    next_id, tier, tool = _suspension(interrupts)
-    if interrupted:
-        # A further gated call/write: the run is still suspended, so do not close the
-        # trace or fire evals — the next decision resumes it again.
-        deps.trace.add_event(
-            run_id, TraceEventType.GUARDRAIL, deps.actor, {"type": "hitl_suspend", "approval_id": next_id}
-        )
-    reply = final_state.get("reply") or (
-        _suspended_reply(tier, tool, next_id) if interrupted else "no reply produced"
-    )
-    if not interrupted:
-        deps.trace.end_run(run_id, {"output": reply, "resumed": True})
-        if evals_enabled:
-            _fire_evals(
-                deps=deps,
-                run_id=run_id,
-                settings=settings,
-                judge_provider=judge_provider,
+        graph = build_agent_graph(deps, checkpointer=checkpointer)
+        from langgraph.types import Command
+
+        try:
+            final_state = graph.invoke(
+                Command(resume=entry["status"] == "approved"),
+                config={"configurable": {"thread_id": thread_id}},
+                **invoke_options(checkpointer),
             )
-    return AgentResult(
-        reply=reply,
-        run_id=run_id,
-        guardrail_hits=deps.tracker.hits,
-        tool_calls=deps.executed_calls,
-        thread_id=thread_id,
-        interrupted=interrupted,
-        approval_id=next_id if interrupted else approval_id,
-        approval_tier=tier if interrupted else None,
-    )
+        except Exception as exc:
+            deps.trace.end_run(run_id, {"error": str(exc)})
+            raise
+        interrupts = final_state.get("__interrupt__") or []
+        interrupted = bool(interrupts)
+        next_id, tier, tool = _suspension(interrupts)
+        if interrupted:
+            # A further gated call/write: the run is still suspended, so do not close the
+            # trace or fire evals — the next decision resumes it again.
+            deps.trace.add_event(
+                run_id, TraceEventType.GUARDRAIL, deps.actor, {"type": "hitl_suspend", "approval_id": next_id}
+            )
+        reply = final_state.get("reply") or (
+            _suspended_reply(tier, tool, next_id) if interrupted else "no reply produced"
+        )
+        if not interrupted:
+            deps.trace.end_run(run_id, {"output": reply, "resumed": True})
+            if evals_enabled:
+                _fire_evals(
+                    deps=deps,
+                    run_id=run_id,
+                    settings=settings,
+                    judge_provider=judge_provider,
+                )
+        return AgentResult(
+            reply=reply,
+            run_id=run_id,
+            guardrail_hits=deps.tracker.hits,
+            tool_calls=deps.executed_calls,
+            thread_id=thread_id,
+            interrupted=interrupted,
+            approval_id=next_id if interrupted else approval_id,
+            approval_tier=tier if interrupted else None,
+        )
+    finally:
+        if deps is not None:
+            _flush_trace(deps.trace, run_id)

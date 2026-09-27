@@ -14,35 +14,43 @@ so tests can override them with in-process components.
 from __future__ import annotations
 
 import inspect
-import sqlite3
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
-from app.agent.runner import AgentResult, resume_agent, run_agent
+from app.agent.checkpoints import list_user_threads, make_checkpointer
+from app.agent.runner import AgentResult, resume_agent, run_agent, run_state_is_local
 from app.auth.jwt import AuthError, verify_token
-from app.auth.users import is_active_member
+from app.auth.users import get_store, is_active_member
 from app.config import get_settings
-from app.harness.audit import AuditLog
+from app.harness.audit import open_audit_log
 from app.harness.enforcer import PolicyEnforcer
 from app.memory.approvals import ApprovalStore
-from app.memory.episodic import EpisodicStore
+from app.memory.factory import open_approval_store, open_base_store, open_episodic_store
 from app.memory.recall import RecallService
-from app.memory.store import SqliteBaseStore
-from app.ops.store import TraceStore
+from app.ops.factory import open_trace_store
+from app.skills.registry import SkillRegistry
 
 settings = get_settings()
 
-app = FastAPI(title="harness gateway", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Shared DB (Mk13): build the stores/enforcer at boot (connect + migration check + cache
+    pre-load) instead of on the first chat. No-op on SQLite, where construction is instant."""
+    from app.db import is_enabled
+
+    if is_enabled():
+        _get_components()
+        get_store()
+        SkillRegistry.open().load_all()  # Phase 6: seed-if-empty + cache the shared skills
+    yield
 
 
-def _checkpointer():
-    from langgraph.checkpoint.sqlite import SqliteSaver
-
-    conn = sqlite3.connect(settings.services.checkpoint_path, check_same_thread=False)
-    return SqliteSaver(conn)
+app = FastAPI(title="harness gateway", version="0.1.0", lifespan=_lifespan)
 
 
 _components: dict[str, Any] | None = None
@@ -53,13 +61,13 @@ def _get_components() -> dict[str, Any]:
     global _components
     if _components is None:
         _components = {
-            "trace": TraceStore(settings.services.data_dir / "trace.sqlite"),
+            "trace": open_trace_store(settings.services.data_dir / "trace.sqlite"),
             "enforcer": PolicyEnforcer(),
-            "audit": AuditLog(settings.services.audit_path),
-            "store": SqliteBaseStore(settings.services.memory_path),
-            "episodic": EpisodicStore(settings.services.memory_path),
-            "approvals": ApprovalStore(settings.services.memory_path),
-            "checkpointer": _checkpointer(),
+            "audit": open_audit_log(settings.services.audit_path),
+            "store": open_base_store(settings.services.memory_path),
+            "episodic": open_episodic_store(settings.services.memory_path),
+            "approvals": open_approval_store(settings.services.memory_path),
+            "checkpointer": make_checkpointer(settings),
         }
         _components["recall"] = RecallService(
             _components["episodic"], _components["enforcer"], settings.memory
@@ -250,17 +258,7 @@ def thread_history(
 def list_threads(req: ThreadListRequest) -> list[str]:
     claims = _verified_active(req.token)
     username = claims["sub"]
-    conn = sqlite3.connect(settings.services.checkpoint_path, check_same_thread=False)
-    try:
-        rows = conn.execute(
-            "SELECT DISTINCT thread_id FROM checkpoints WHERE thread_id LIKE ? OR thread_id LIKE ?",
-            (f"user:{username}", f"user:{username}:%"),
-        ).fetchall()
-        threads = [r[0] for r in rows]
-    except sqlite3.Error:
-        threads = []
-    finally:
-        conn.close()
+    threads = list_user_threads(username, settings)
     if not threads:  # brand-new user: offer the default chat (deleted chats must not reappear)
         threads.insert(0, f"user:{username}")
     return threads
@@ -284,6 +282,13 @@ def decide_approval(
         raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
     if entry["status"] != "pending":
         raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
+    from app.db import is_enabled
+
+    if is_enabled() and not run_state_is_local(_get_components()["checkpointer"], entry["thread_id"]):
+        raise HTTPException(
+            status_code=409,
+            detail="this run's saved state was not found (was the chat deleted?), so it cannot be resumed",
+        )
     try:
         approvals.decide(approval_id, req.approve, claims["sub"])
     except KeyError as exc:

@@ -270,7 +270,15 @@ def _now() -> str:
 
 
 class MemberStore:
-    """SQLite-backed identity store (single source of truth, plan_mk2 §3.2)."""
+    """SQLite-backed identity store (single source of truth, plan_mk2 §3.2).
+
+    `PgMemberStore` (app/auth/pg_store.py) runs this same code on the shared Postgres by
+    overriding `_connect`/`_init_schema` — keep SQL here portable (`?` placeholders, no
+    SQLite-only functions, `ON CONFLICT` upserts, ANSI `CAST`).
+    """
+
+    # Exception type(s) a unique/PK violation raises on this back-end (overridden for Postgres).
+    INTEGRITY_ERRORS: tuple[type[Exception], ...] = (sqlite3.IntegrityError,)
 
     def __init__(self, path: str | Path | None = None, audit: Any = None):
         self.path = Path(path) if path is not None else get_settings().services.members_path
@@ -407,7 +415,8 @@ class MemberStore:
                 for m in SEED_MEMBERS:
                     conn.execute(
                         "INSERT INTO members (username, password_hash, role, dept, scopes,"
-                        " active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                        " active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)"
+                        " ON CONFLICT(username) DO NOTHING",
                         (
                             m["username"],
                             hash_password(m["password"]),
@@ -424,7 +433,8 @@ class MemberStore:
                 for d in SEED_DEPARTMENTS:
                     conn.execute(
                         "INSERT INTO departments (name, service, service_url, resources, role,"
-                        " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                        " ON CONFLICT(name) DO NOTHING",
                         (
                             d["name"],
                             d["service"],
@@ -462,9 +472,9 @@ class MemberStore:
     def _audit_entry(self, actor: str, action: str, rtype: str, rid: str) -> None:
         log = self._audit_log
         if log is None:
-            from app.harness.audit import AuditLog
+            from app.harness.audit import open_audit_log
 
-            log = AuditLog(get_settings().services.audit_path)
+            log = open_audit_log(get_settings().services.audit_path)
         actor_claims = {
             "sub": actor,
             "role": "",
@@ -499,7 +509,7 @@ class MemberStore:
         """Increment `members_version` inside the caller's transaction so the
         PolicyEnforcer's lazy g rebuild detects the change (plan_mk2 §8)."""
         conn.execute(
-            "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'members_version'"
+            "UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'members_version'"
         )
 
     # ---- reads (public) ----
@@ -741,7 +751,7 @@ class MemberStore:
                     "UPDATE member_llm_keys SET model = ?, base_url = ?, active = ?, updated_at = ? WHERE id = ?",
                     (new_model, new_base_url, 1 if new_active else 0, now, key_id),
                 )
-        except sqlite3.IntegrityError as exc:
+        except self.INTEGRITY_ERRORS as exc:
             raise MemberError(f"Failed to update LLM key: {exc}") from exc
         finally:
             conn.close()
@@ -826,7 +836,8 @@ class MemberStore:
             (key_id, username),
         )
 
-    def _llm_key_row(self, query: str, params: tuple[Any, ...]) -> tuple[str, str, str, str] | None:
+    def _fetch_llm_key(self, query: str, params: tuple[Any, ...]) -> tuple[str, str, str, str] | None:
+        """(provider, model, ENCRYPTED api key, base_url) — never decrypts, so it is safe to cache."""
         conn = self._connect()
         try:
             row = conn.execute(query, params).fetchone()
@@ -834,10 +845,16 @@ class MemberStore:
             conn.close()
         if not row:
             return None
+        return row["provider"], row["model"], row["api_key_encrypted"], row["base_url"] or ""
+
+    def _llm_key_row(self, query: str, params: tuple[Any, ...]) -> tuple[str, str, str, str] | None:
+        raw = self._fetch_llm_key(query, params)
+        if raw is None:
+            return None
         from app.auth.crypto import decrypt_secret
 
-        decrypted = decrypt_secret(row["api_key_encrypted"])
-        return row["provider"], row["model"], decrypted, row["base_url"] or ""
+        provider, model, encrypted, base_url = raw
+        return provider, model, decrypt_secret(encrypted), base_url
 
     def _audit_key(self, actor: str, action: str, username: str) -> None:
         self._audit_entry(actor, action, "llm_key", username)
@@ -949,6 +966,8 @@ class MemberStore:
     _CATALOG_SEEDS = ("gmail", "github")
 
     def _ensure_catalog_seeds(self) -> None:
+        if getattr(self, "_catalog_seeded", False):
+            return  # once per process: on the shared DB each call would be a network write
         conn = self._connect()
         try:
             with conn:
@@ -960,6 +979,7 @@ class MemberStore:
                     )
         finally:
             conn.close()
+        self._catalog_seeded = True
 
     def list_toolkits(self, enabled_only: bool = False) -> list[dict[str, Any]]:
         self._ensure_catalog_seeds()
@@ -1103,19 +1123,22 @@ class MemberStore:
         now = _now()
         conn = self._connect()
         try:
-            conn.execute(
-                "INSERT INTO members (username, password_hash, role, dept, scopes, active,"
-                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
-                (
-                    username,
-                    hash_password(password),
-                    role,
-                    dept,
-                    json.dumps(scopes or []),
-                    now,
-                    now,
-                ),
-            )
+            try:
+                conn.execute(
+                    "INSERT INTO members (username, password_hash, role, dept, scopes, active,"
+                    " created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                    (
+                        username,
+                        hash_password(password),
+                        role,
+                        dept,
+                        json.dumps(scopes or []),
+                        now,
+                        now,
+                    ),
+                )
+            except self.INTEGRITY_ERRORS as exc:  # lost a race with another creator
+                raise MemberExistsError(f"member {username!r} already exists") from exc
             self._bump_version(conn)
             conn.commit()
         finally:
