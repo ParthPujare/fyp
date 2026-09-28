@@ -170,6 +170,7 @@ def _resumable_here(entry: dict[str, Any]) -> bool:
 
 def _approval_view(item: dict[str, Any]) -> dict[str, Any]:
     dept = ApprovalStore.dept_of(item)
+    status = item["status"]
     return {
         "id": item["id"],
         "run_id": item["run_id"],
@@ -177,8 +178,15 @@ def _approval_view(item: dict[str, Any]) -> dict[str, Any]:
         "resource": item["resource"],
         "actor": item["actor"],
         "payload": _mask_payload(item["payload"]),
-        "status": item["status"],
+        "status": status,
         "created_ts": item["created_ts"],
+        "decided_ts": item.get("decided_ts"),
+        "decided_by": item.get("decided_by"),
+        "resumed_by": item.get("resumed_by"),
+        "resumed_at": item.get("resumed_at"),
+        # Decided but not yet resumed on the owner's machine (Mk14): the owner
+        # polls this and resumes locally so their own model/keys are used.
+        "needs_resume": status in ("approved", "rejected") and not item.get("resumed_by"),
         "tier": "dept" if dept is not None else item["resource"].get("type", "memory"),
         "dept": dept,
         "resumable_here": _resumable_here(item),
@@ -475,13 +483,32 @@ def decide_approval(
     resumer: Annotated[Any, Depends(get_resumer)],
     approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
     authorization: str | None = Header(default=None),
+    defer: bool = Query(default=False),
 ) -> dict[str, Any]:
+    """Admin decision (Mk14: `?defer=1` records the decision without resuming).
+
+    Deferred mode is the org path: any admin may approve, and the originator's
+    own machine later resumes via `POST .../resume` so their model/keys run.
+    Coupled mode (`defer=0`, default) keeps single-PC behavior unchanged.
+    """
     claims = _verify_admin(authorization)
     entry = approvals.get(approval_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
     if entry["status"] != "pending":
         raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
+    if defer:
+        _decide_or_http_error(approvals, approval_id, req.approve, claims["sub"])
+        decided = approvals.get(approval_id)
+        return {
+            "approval_id": approval_id,
+            "status": decided["status"],
+            "thread_id": decided["thread_id"],
+            "reply": None,
+            "interrupted": True,
+            "next_approval_id": None,
+            "needs_resume": True,
+        }
     if not _resumable_here(entry):
         raise HTTPException(status_code=409, detail=RESUME_ELSEWHERE)
     _decide_or_http_error(approvals, approval_id, req.approve, claims["sub"])
@@ -504,8 +531,9 @@ def decide_dept_approval(
     resumer: Annotated[Any, Depends(get_resumer)],
     approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
     authorization: str | None = Header(default=None),
+    defer: bool = Query(default=False),
 ) -> dict[str, Any]:
-    """A head decides an item from their OWN dept queue (Mk12).
+    """A head decides an item from their OWN dept queue (Mk12 + Mk14 defer).
 
     Cross-dept decides are 403; an admin deciding an escalated dept item must use
     the admin endpoint. Any single head's decision resolves (multiple heads allowed).
@@ -516,10 +544,22 @@ def decide_dept_approval(
         raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
     if entry["status"] != "pending":
         raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
-    if not _resumable_here(entry):
-        raise HTTPException(status_code=409, detail=RESUME_ELSEWHERE)
     if ApprovalStore.dept_of(entry) != str(claims.get("dept", "")):
         raise HTTPException(status_code=403, detail="not your department's approval")
+    if defer:
+        _decide_or_http_error(approvals, approval_id, req.approve, claims["sub"])
+        decided = approvals.get(approval_id)
+        return {
+            "approval_id": approval_id,
+            "status": decided["status"],
+            "thread_id": decided["thread_id"],
+            "reply": None,
+            "interrupted": True,
+            "next_approval_id": None,
+            "needs_resume": True,
+        }
+    if not _resumable_here(entry):
+        raise HTTPException(status_code=409, detail=RESUME_ELSEWHERE)
     _decide_or_http_error(approvals, approval_id, req.approve, claims["sub"])
     result = resumer(approval_id)
     decided = approvals.get(approval_id)
@@ -531,6 +571,94 @@ def decide_dept_approval(
         "interrupted": result.interrupted,
         "next_approval_id": result.approval_id if result.interrupted else None,
     }
+
+
+def _resume_owned(
+    approval_id: str,
+    claims: dict[str, Any],
+    resumer: Any,
+    approvals: ApprovalStore,
+) -> dict[str, Any]:
+    """Owner-only resume shared by the admin and dept resume routes (Mk14)."""
+    entry = approvals.get(approval_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
+    actor = entry.get("actor") or {}
+    if str(actor.get("sub", "")) != str(claims.get("sub", "")):
+        raise HTTPException(status_code=403, detail="only the requester may resume this run")
+    if entry["status"] not in ("approved", "rejected"):
+        raise HTTPException(status_code=409, detail=f"approval {approval_id!r} has not been decided")
+    if not _resumable_here(entry):
+        raise HTTPException(status_code=409, detail=RESUME_ELSEWHERE)
+    try:
+        result = resumer(approval_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    decided = approvals.get(approval_id)
+    return {
+        "approval_id": approval_id,
+        "status": decided["status"],
+        "thread_id": result.thread_id,
+        "reply": result.reply,
+        "interrupted": result.interrupted,
+        "next_approval_id": result.approval_id if result.interrupted else None,
+    }
+
+
+@app.post("/api/approvals/{approval_id}/resume")
+def resume_approval(
+    approval_id: str,
+    resumer: Annotated[Any, Depends(get_resumer)],
+    approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Resume a decided approval on the requester's own machine (Mk14).
+
+    Any active member may call this, but only for approvals whose `actor` is
+    themselves — this is what keeps per-member models/keys local when the
+    decision came from another PC. Wait-for-owner: no admin fallback.
+    """
+    claims, _token = _verified_member(authorization)
+    return _resume_owned(approval_id, claims, resumer, approvals)
+
+
+@app.post("/api/dept/approvals/{approval_id}/resume")
+def resume_dept_approval(
+    approval_id: str,
+    resumer: Annotated[Any, Depends(get_resumer)],
+    approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Dept-scoped twin of the owner resume (Mk14): owner + own dept required."""
+    claims, _token = _verified_member(authorization)
+    entry = approvals.get(approval_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
+    dept = ApprovalStore.dept_of(entry)
+    if dept is not None and dept != str(claims.get("dept", "")):
+        raise HTTPException(status_code=403, detail="not your department's approval")
+    return _resume_owned(approval_id, claims, resumer, approvals)
+
+
+@app.get("/api/approvals/by-thread/{thread_id:path}")
+def approvals_by_thread(
+    thread_id: str,
+    approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
+    authorization: str | None = Header(default=None),
+) -> list[dict[str, Any]]:
+    """Decided-or-pending approvals for one thread (Mk14 owner poll).
+
+    Owners see their own threads; admins see any thread. Powers auto-resume
+    without scanning the full pending queues.
+    """
+    claims, _token = _verified_member(authorization)
+    username = str(claims.get("sub", ""))
+    is_admin = str(claims.get("role", "")) == "admin"
+    if not is_admin and thread_id != f"user:{username}" and not thread_id.startswith(f"user:{username}:"):
+        raise HTTPException(status_code=403, detail="not your thread")
+    return [_approval_view(i) for i in approvals.for_thread(thread_id)]
 
 
 @app.get("/api/users")

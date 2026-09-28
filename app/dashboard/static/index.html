@@ -959,8 +959,28 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   }
 
   // After a run suspends for approval, poll the thread so the resumed reply shows up
-  // without the member having to re-open the chat (approvals happen in another session).
+  // without the member having to re-open the chat (Mk14: approvals may be decided
+  // on another PC — the owner auto-resumes here so their own model/keys run).
   function stopSuspendWatch() { if (suspendWatch) { clearTimeout(suspendWatch.timer); suspendWatch = null; } }
+  async function resumeNow(approvalId, threadId) {
+    const status = $("chat-status");
+    const bodies = { method: "POST", headers: { "content-type": "application/json" }, body: "{}" };
+    const bases = ["/api/approvals/", "/api/dept/approvals/"];
+    let out = null, lastErr = null;
+    for (const base of bases) {
+      try {
+        out = await api(base + encodeURIComponent(approvalId) + "/resume", bodies);
+        break;
+      } catch (e) { lastErr = e; }
+    }
+    if (!out) { if (status) status.textContent = "resume: " + (lastErr && lastErr.message || "failed"); return; }
+    try {
+      if (status) status.textContent = "resumed — chat updated";
+      pushTranscript("assistant", renderChatTurn(out));
+      if (out.interrupted && out.approval_id && out.thread_id) watchSuspended(out.thread_id);
+      else await loadThreadHistory(threadId || currentThreadId);
+    } catch (e) { if (status) status.textContent = "resume: " + e.message; }
+  }
   function watchSuspended(threadId) {
     stopSuspendWatch();
     const state = { threadId, base: null, until: Date.now() + 15 * 60 * 1000, timer: null };
@@ -968,6 +988,17 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     const tick = async () => {
       if (suspendWatch !== state || Date.now() > state.until || currentThreadId !== threadId) { stopSuspendWatch(); return; }
       try {
+        // 1. Owner-side resume: a decision made on another PC shows up here first.
+        try {
+          const items = await api("/api/approvals/by-thread/" + encodeURIComponent(threadId));
+          const mine = (items || []).filter((a) => a && a.needs_resume
+            && a.actor && identities[active] && a.actor.sub === identities[active].claims.sub);
+          if (mine.length && currentThreadId === threadId) {
+            await resumeNow(mine[0].id, threadId);
+            stopSuspendWatch();
+            return;
+          }
+        } catch (e) { /* approvals poll is best-effort; fall through to history */ }
         const hist = await api("/api/chat/threads/" + encodeURIComponent(threadId) + "/history");
         const n = (hist.messages || []).filter((m) => m.role === "assistant").length;
         if (state.base === null) state.base = n;
@@ -1094,7 +1125,8 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
         : (identities.admin
           ? "switch to the admin session and open Approvals to approve it."
           : "an admin must approve it (Approvals tab).");
-      html += `<div class="status" style="color:#fef08a">&#9209; run suspended (approval <code>${esc(out.approval_id)}</code>) — ${esc(hint)} This chat updates by itself once it is decided.</div>`;
+      html += `<div class="status" style="color:#fef08a">&#9209; run suspended (approval <code>${esc(out.approval_id)}</code>) — ${esc(hint)} This chat updates by itself once it is decided.`
+        + ` <button class="ghost" onclick="resumeNow('${esc(out.approval_id)}', '${esc(out.thread_id || "")}')">Resume now</button></div>`;
     }
     if (out.connect_required && out.connect_required.length) {
       html += `<div class="card" style="margin-top:8px"><b>Connect to continue:</b> `
@@ -1155,10 +1187,13 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     const btn = card.querySelector("[data-status]");
     btn.textContent = "deciding...";
     try {
-      const out = await api(decideBase + encodeURIComponent(id) + "/decide",
+      // Mk14 org mode: record the decision here; the requester's own machine
+      // resumes via .../resume so their model/keys run (single-PC ?defer=0 path
+      // is unchanged server-side for callers that omit it).
+      const out = await api(decideBase + encodeURIComponent(id) + "/decide?defer=1",
         { method: "POST", headers: { "content-type": "application/json" },
           body: JSON.stringify({ approve }) });
-      btn.textContent = out.status + " — reply: " + out.reply;
+      btn.textContent = out.status + (out.needs_resume ? " — waiting on requester to resume" : (" — reply: " + out.reply));
       btn.classList.add("muted");
       card.querySelectorAll("button[data-act]").forEach((b) => (b.disabled = true));
       setTimeout(reload, 1200);

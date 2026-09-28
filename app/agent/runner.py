@@ -339,6 +339,16 @@ def resume_agent(
     if entry["status"] not in ("approved", "rejected"):
         raise ValueError(f"approval {approval_id!r} has not been decided")
 
+    # Mk14 single-resume gate: exactly one process may resume a decided approval.
+    # The claim lives here (not in the endpoints) so dashboard, gateway, dept and
+    # direct `resume_agent` callers share one atomic gate; losers get ValueError.
+    actor = entry.get("actor") or {}
+    owner = str(actor.get("sub", ""))
+    claim = getattr(approvals, "claim_resume", None)
+    if callable(claim) and owner:
+        claim(approval_id, owner)
+        entry = approvals.get(approval_id) or entry
+
     run_id = entry["run_id"]
     thread_id = entry["thread_id"]
     if checkpointer is None:

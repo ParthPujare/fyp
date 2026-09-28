@@ -117,6 +117,11 @@ class ThreadListRequest(BaseModel):
 class ApprovalDecisionRequest(BaseModel):
     approve: bool
     token: str  # admin JWT — the decider is derived from verified claims, never trusted input
+    defer: bool = False  # Mk14: record the decision without resuming (owner resumes later)
+
+
+class ApprovalResumeRequest(BaseModel):
+    token: str  # owner JWT — resumer identity is the approval's actor, never the approver
 
 
 @app.get("/health")
@@ -272,7 +277,11 @@ def decide_approval(
     approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
 ) -> dict:
     """Admin-only HITL decision. The caller must present an active admin JWT; the
-    decider identity comes from the verified claims (never from the body)."""
+    decider identity comes from the verified claims (never from the body).
+
+    Mk14: `defer=True` records the decision without resuming (owner resumes on
+    their own machine); default coupled mode is unchanged.
+    """
     claims = _verified_active(req.token)
     if claims.get("role") != "admin":
         raise HTTPException(status_code=403, detail="only admins may decide approvals")
@@ -282,6 +291,23 @@ def decide_approval(
         raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
     if entry["status"] != "pending":
         raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
+    if req.defer:
+        try:
+            approvals.decide(approval_id, req.approve, claims["sub"])
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+        except ValueError as exc:  # lost a race with another decider
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        decided = approvals.get(approval_id)
+        return {
+            "approval_id": approval_id,
+            "status": decided["status"],
+            "thread_id": decided["thread_id"],
+            "reply": None,
+            "interrupted": True,
+            "next_approval_id": None,
+            "needs_resume": True,
+        }
     from app.db import is_enabled
 
     if is_enabled() and not run_state_is_local(_get_components()["checkpointer"], entry["thread_id"]):
@@ -296,6 +322,51 @@ def decide_approval(
     except ValueError as exc:  # lost a race with another decider
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     result = resumer(approval_id)
+    decided = approvals.get(approval_id)
+    return {
+        "approval_id": approval_id,
+        "status": decided["status"],
+        "thread_id": result.thread_id,
+        "reply": result.reply,
+        "interrupted": result.interrupted,
+        "next_approval_id": result.approval_id if result.interrupted else None,
+    }
+
+
+@app.post("/approvals/{approval_id}/resume")
+def resume_approval(
+    approval_id: str,
+    req: ApprovalResumeRequest,
+    resumer: Annotated[Any, Depends(get_resumer)],
+    approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
+) -> dict:
+    """Owner-only resume of a decided approval (Mk14, wait-for-owner).
+
+    Any active member may call this, but only for approvals whose `actor` is
+    themselves, so per-member models/keys stay on the owner's machine.
+    """
+    claims = _verified_active(req.token)
+    entry = approvals.get(approval_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
+    actor = entry.get("actor") or {}
+    if str(actor.get("sub", "")) != str(claims.get("sub", "")):
+        raise HTTPException(status_code=403, detail="only the requester may resume this run")
+    if entry["status"] not in ("approved", "rejected"):
+        raise HTTPException(status_code=409, detail=f"approval {approval_id!r} has not been decided")
+    from app.db import is_enabled
+
+    if is_enabled() and not run_state_is_local(_get_components()["checkpointer"], entry["thread_id"]):
+        raise HTTPException(
+            status_code=409,
+            detail="this run's saved state was not found (was the chat deleted?), so it cannot be resumed",
+        )
+    try:
+        result = resumer(approval_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     decided = approvals.get(approval_id)
     return {
         "approval_id": approval_id,

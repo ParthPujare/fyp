@@ -42,10 +42,18 @@ class ApprovalStore:
                     status TEXT NOT NULL,
                     created_ts TEXT NOT NULL,
                     decided_ts TEXT,
-                    decided_by TEXT
+                    decided_by TEXT,
+                    resumed_by TEXT,
+                    resumed_at TEXT
                 )
                 """
             )
+            # Older dev files predate Mk14: add the resume-claim columns if missing.
+            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(approvals)").fetchall()}
+            if "resumed_by" not in cols:
+                self._conn.execute("ALTER TABLE approvals ADD COLUMN resumed_by TEXT")
+            if "resumed_at" not in cols:
+                self._conn.execute("ALTER TABLE approvals ADD COLUMN resumed_at TEXT")
 
     def create(
         self,
@@ -129,6 +137,39 @@ class ApprovalStore:
         """Pending memory approvals owned by one department's head (Mk12)."""
         return [i for i in self.pending_items() if self.dept_of(i) == dept]
 
+    def for_thread(self, thread_id: str) -> list[dict[str, Any]]:
+        """Every approval for one thread, newest last (Mk14 owner-resume poll)."""
+        rows = self._conn.execute(
+            "SELECT * FROM approvals WHERE thread_id = ? ORDER BY created_ts",
+            (thread_id,),
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def claim_resume(self, approval_id: str, owner: str) -> dict[str, Any]:
+        """Atomically claim the single resume of a decided approval (Mk14).
+
+        Exactly one caller wins; losers get `ValueError` (already resumed) or
+        `KeyError` (unknown id), mirroring `decide()`. The winner must then call
+        `resume_agent()`; a crash between claim and resume leaves the row claimed,
+        so the owner re-polls and an operator can inspect `resumed_by/at`.
+        """
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE approvals SET resumed_by = ?, resumed_at = ? "
+                "WHERE id = ? AND status IN ('approved', 'rejected') AND resumed_by IS NULL",
+                (owner, datetime.now(UTC).isoformat(), approval_id),
+            )
+        if cur.rowcount == 0:
+            row = self._conn.execute(
+                "SELECT status, resumed_by FROM approvals WHERE id = ?", (approval_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"approval {approval_id!r} not found")
+            if row["status"] not in (STATUS_APPROVED, STATUS_REJECTED):
+                raise ValueError(f"approval {approval_id!r} has not been decided")
+            raise ValueError(f"approval {approval_id!r} already resumed by {row['resumed_by']}")
+        return self.get(approval_id)  # type: ignore[return-value]
+
     def decide(self, approval_id: str, approve: bool, admin: str) -> dict[str, Any]:
         """Atomically move a pending approval to approved/rejected.
 
@@ -154,6 +195,14 @@ class ApprovalStore:
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        # Mk14 columns may be absent on old DBs (migrations apply on Postgres;
+        # SQLite alters lazily in _init_schema, PgSession Row misses keys safely).
+        def _col(name: str) -> Any:
+            try:
+                return row[name]
+            except (KeyError, IndexError):
+                return None
+
         return {
             "id": row["id"],
             "run_id": row["run_id"],
@@ -165,6 +214,8 @@ class ApprovalStore:
             "created_ts": row["created_ts"],
             "decided_ts": row["decided_ts"],
             "decided_by": row["decided_by"],
+            "resumed_by": _col("resumed_by"),
+            "resumed_at": _col("resumed_at"),
         }
 
     def close(self) -> None:
