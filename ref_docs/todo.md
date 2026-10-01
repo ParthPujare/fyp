@@ -70,43 +70,9 @@ For ambiguous tasks, ask clarifying questions rather than assuming intent — si
 
 ---
 
-## 7. Connect external tools (direct + via Composio) for real tool-calling — DONE (Mk9, session 021 live Gmail)
-
-Make tool-calling actually useful so this becomes a real harness, not just chat + memory:
-
-- Support connecting to various tools **directly** plus through an aggregator like **Composio** (or equivalent platform).
-- Connected tools become callable by the agent (LangGraph tool nodes), scoped per-user via their own credentials/keys.
-- Skills (`app/skills/`) become the abstraction layer over connected tools rather than canned markdown scripts.
-
-> Status 2026-09-13: done — see item 4 (Mk9).
-
----
-
-## 8. Switch model for the active key via the chat interface — DONE (Mk10/Mk11: chat key/model picker)
-
-- Allow the user to **switch the model used with their active API key** from within the chat UI (e.g. model picker/dropdown in the dashboard chat surface).
-- Applies per-session/user without re-entering the key; gateway rebuilds the per-user provider (LiteLLM) for the selected model.
-- Fall back to the default/mock provider behavior when no key is set (preserves offline demo).
-
-> Status 2026-09-13: done — chat key/model picker (`chat-model-select`, per-key models) + Account pick-or-type model list with local-model Detect; stale-key fallback keeps mock behavior (session 022).
-
----
-
 ## 9. Self-edit codebase via the chat UI (lowest priority) — OPEN
 
 - Allow fixes/updates to the codebase to be made **through the chat UI** (agent edits code, user reviews/applies).
-- Lowest priority — treat as a stretch goal after tool connectivity (7) and model switching (8) are solid.
-
----
-
-## 10. personal DB provisioning with request-access flow — OPEN
-
-If the agent doesn't have access to an external DB/source, it should request access on the user's behalf, then auto-connect once granted:
-
-- e.g. new marketing employee wants to research old campaigns but lacks access → asks the agent → agent files an access request to the data owner/admin.
-- On approval, the harness provisions the connection (credentials, scoped read access) and the agent can then query/answer from that DB.
-- Needs: per-source access policy, pending-request state + notifications, audit trail, and least-privilege / revocable grants.
+- Lowest priority — treat as a stretch goal after tool connectivity (7) and model switching (8) are solid.  
 
 ## 11. After creating an ID provide some sets of feature so that for each approval is not required. 
-
-## 12. Centralise the entire db on some cloud platform . (highest priority)
