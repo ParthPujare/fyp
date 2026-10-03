@@ -176,8 +176,55 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       <div id="approvals"></div>
     </div>
     <div id="dept-approvals-view" class="hidden">
-      <h2>Department approvals <span class="muted" style="font-weight:normal;font-size:13px">(your dept's pending memory writes)</span></h2>
+      <h2>Department approvals <span class="muted" style="font-weight:normal;font-size:13px">(your department's pending memory writes and tool actions — step 1)</span></h2>
       <div id="dept-approvals"></div>
+    </div>
+    <div id="dept-team-view" class="hidden">
+      <h2>My department <span class="muted" style="font-weight:normal;font-size:13px" id="team-dept"></span></h2>
+      <div class="card">
+        <h3>Members</h3>
+        <div class="row" style="margin-bottom:8px">
+          <input type="text" id="team-username" placeholder="new@acme.com" autocomplete="off">
+          <input type="password" id="team-password" placeholder="password (min 6 chars)" autocomplete="new-password">
+          <button id="team-gen" class="ghost">Generate</button>
+          <button id="team-add">+ Add member</button>
+        </div>
+        <div class="muted" style="font-size:12px">New members join your department with its member role. Heads and admins are managed by an admin.</div>
+        <div class="status" id="team-status"></div>
+        <table><thead><tr><th>Username</th><th>Role</th><th>State</th><th>Joined</th><th></th></tr></thead>
+          <tbody id="team-members"></tbody></table>
+      </div>
+      <div class="card">
+        <h3>Always allowed <span class="muted" style="font-weight:normal">(exact actions that no longer need your approval)</span></h3>
+        <table><thead><tr><th>Member</th><th>Action</th><th>Exact arguments</th><th>Allowed by</th><th></th></tr></thead>
+          <tbody id="team-allowlist"></tbody></table>
+        <div class="status" id="team-allow-status"></div>
+      </div>
+      <div class="card">
+        <h3>Department skills</h3>
+        <div id="team-skills"></div>
+        <div id="team-skill-editor" class="hidden">
+          <h3 id="team-skill-title">Edit skill</h3>
+          <textarea id="team-skill-content" rows="20" style="width:100%;background:#0b1220;color:var(--fg);border:1px solid var(--line);border-radius:6px;font:13px/1.5 ui-monospace,monospace;padding:10px"></textarea>
+          <div class="row" style="margin-top:8px">
+            <button id="team-skill-save">Save</button>
+            <button class="ghost" id="team-skill-cancel">Cancel</button>
+          </div>
+          <div class="status" id="team-skill-status"></div>
+        </div>
+      </div>
+    </div>
+    <div id="allowlist-view" class="hidden">
+      <h2>Always allowed <span class="muted" style="font-weight:normal;font-size:13px">(approve-once rules: one member, one action, one exact set of arguments)</span></h2>
+      <div class="row" style="margin-bottom:12px">
+        <input type="text" id="allow-member" placeholder="filter by member" autocomplete="off">
+        <input type="text" id="allow-dept" placeholder="filter by department" autocomplete="off">
+        <button class="ghost" id="allow-refresh">Refresh</button>
+        <span class="muted">Revoking a rule sends the member's next identical request back for approval. Critical tools and central memory can never be listed here.</span>
+      </div>
+      <table><thead><tr><th>Member</th><th>Dept</th><th>Action</th><th>Exact arguments</th><th>Allowed by</th><th></th></tr></thead>
+        <tbody id="allowlist"></tbody></table>
+      <div class="status" id="allow-status"></div>
     </div>
     <div id="users-view" class="hidden">
       <h2>Members</h2>
@@ -208,7 +255,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       <h2>Departments</h2>
       <div class="row" style="margin-bottom:12px">
         <button id="add-dept">+ Register department</button>
-        <span class="muted">Registration stores the dept record and appends <code>p, &lt;role&gt;, &lt;name&gt;, *, *</code> to <code>policy.csv</code> so the role is immediately grantable.</span>
+        <span class="muted">Registration stores the dept record and adds the member + head policy rows (own resources, dept/user memory, recall) so the roles are immediately grantable.</span>
       </div>
       <div id="dept-editor" class="hidden">
         <h3>Register department</h3>
@@ -218,6 +265,10 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
           <input type="text" id="dept-url" placeholder="service URL, e.g. http://127.0.0.1:8007" autocomplete="off">
           <input type="text" id="dept-resources" placeholder="resources — comma separated" autocomplete="off">
           <input type="text" id="dept-role" placeholder="role (default: <name>_agent)" autocomplete="off">
+          <select id="dept-mode" title="Who approves this department's requests">
+            <option value="head-only">head-only</option>
+            <option value="head+admin">head + admin</option>
+          </select>
         </div>
         <div class="row" style="margin-top:8px">
           <button id="dept-save">Register</button>
@@ -225,8 +276,10 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
         </div>
         <div class="status" id="dept-status"></div>
       </div>
-      <table><thead><tr><th>Name</th><th>Service</th><th>URL</th><th>Resources</th><th>Members</th><th>Role</th></tr></thead>
+      <table><thead><tr><th>Name</th><th>Service</th><th>URL</th><th>Resources</th><th>Members</th><th>Role</th><th>Heads</th><th>Approvals</th></tr></thead>
         <tbody id="depts"></tbody></table>
+      <div class="status muted">Approvals: <code>head-only</code> — the department head decides. <code>head + admin</code> — the head approves first, then an admin. A switch applies to new requests only; requests already waiting keep their route. Critical tools always need head, then admin. A department with no active head escalates to admins.</div>
+      <div class="status" id="depts-status"></div>
     </div>
     <div id="skills-view" class="hidden">
       <h2>Skills <span class="muted" style="font-weight:normal;font-size:13px">(folder/markdown registry — edits hot-reload on the next run)</span></h2>
@@ -274,9 +327,10 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   const TOKENS = { admin: "harness_admin_token", member: "harness_member_token" };
   const CLAIMS = { admin: "harness_admin_claims", member: "harness_member_claims" };
   const TAB_LABELS = { chat: "Chat", account: "Account", approvals: "Approvals", "dept-approvals": "Dept approvals",
-                       users: "Members", depts: "Departments", skills: "Skills", memory: "Memory", ops: "Ops" };
+                       "dept-team": "My department", users: "Members", depts: "Departments", allowlist: "Always allowed",
+                       skills: "Skills", memory: "Memory", ops: "Ops" };
   const ALL_TABS = Object.keys(TAB_LABELS);
-  const ADMIN_TABS = ["approvals", "users", "depts", "skills", "memory", "ops"];
+  const ADMIN_TABS = ["approvals", "users", "depts", "allowlist", "skills", "memory", "ops"];
 
   let identities = { admin: null, member: null };
   let active = null;          // "admin" | "member" | null
@@ -371,9 +425,11 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     if (!active || !identities[active]) return [];
     const role = identities[active].claims.role;
     if (role === "admin") return ADMIN_TABS;
-    // Mk12: dept heads get their own approvals queue, separate from the admin queue,
-    // plus the read-only Memory tab (own scopes via /api/memory/me, like members).
-    if (isHeadRole(role)) return ["dept-approvals", "memory"];
+    // Mk12: dept heads get their own approvals queue, separate from the admin queue.
+    // Mk15: plus their department (roster, scoped member management, always-allowed
+    // rules, dept skills) and a Memory tab where their own dept scope is editable.
+    // Chat + Account come first for everyone (see renderNav).
+    if (isHeadRole(role)) return ["dept-approvals", "dept-team", "memory"];
     // Mk8: members get a read-only Memory tab (own scopes via /api/memory/me).
     return ["memory"];
   }
@@ -436,6 +492,8 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     if (tab === "account") { loadAccount(); loadIntegrations(); }
     if (tab === "approvals") loadApprovals();
     if (tab === "dept-approvals") loadDeptApprovals();
+    if (tab === "dept-team") loadTeam();
+    if (tab === "allowlist") loadAllowlist();
     if (tab === "users") loadUsers();
     if (tab === "depts") loadDepts();
     if (tab === "skills") loadSkills();
@@ -847,7 +905,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       localStorage.setItem("harness_active", label);
       loginMode = null;
       $("user").value = ""; $("pass").value = "";
-      currentTab = label === "admin" ? "approvals" : "chat";
+      currentTab = defaultTabFor(body.claims.role);
       render();
       loadCurrent();
     } catch (e) { alert(e.message); }
@@ -991,8 +1049,13 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
         // 1. Owner-side resume: a decision made on another PC shows up here first.
         try {
           const items = await api("/api/approvals/by-thread/" + encodeURIComponent(threadId));
-          const mine = (items || []).filter((a) => a && a.needs_resume
-            && a.actor && identities[active] && a.actor.sub === identities[active].claims.sub);
+          const own = (items || []).filter((a) => a && a.actor && identities[active]
+            && a.actor.sub === identities[active].claims.sub);
+          // Mk15 two-step chain: keep polling the same approval through step 1 -> step 2;
+          // it only becomes resumable once the last step is decided.
+          const waiting = own.find((a) => a.status === "pending");
+          if (waiting && currentThreadId === threadId) $("chat-status").textContent = waitingText(waiting);
+          const mine = own.filter((a) => a.needs_resume);
           if (mine.length && currentThreadId === threadId) {
             await resumeNow(mine[0].id, threadId);
             stopSuspendWatch();
@@ -1012,6 +1075,14 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       if (suspendWatch === state) state.timer = setTimeout(tick, 4000);
     };
     state.timer = setTimeout(tick, 4000);
+  }
+
+  function waitingText(a) {
+    const steps = a.steps || [];
+    const headStep = steps.find((s) => s.level === "head" && s.decision === "approved");
+    if (a.level === "admin" && headStep) return "step 1 approved by " + headStep.by + " — waiting on an admin (step 2 of 2)";
+    if (a.level === "head") return "waiting on your department head" + (a.total_steps === 2 ? " (step 1 of 2)" : "");
+    return "waiting on an admin";
   }
 
   async function loadThreadHistory(t) {
@@ -1120,7 +1191,13 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     if (out.interrupted && out.approval_id) {
       // Tool actions (e.g. sending email) and central-memory writes are admin-only;
       // only department-memory writes go to the department head first.
-      const hint = out.approval_tier === "dept"
+      // Mk15: the route says who — head only, head then admin, or an admin.
+      const route = out.approval_route;
+      const hint = route === "head+admin"
+        ? "your department head must approve it first (step 1 of 2), then an admin (step 2)."
+        : route === "head-only"
+        ? "your department head must approve it."
+        : (out.approval_tier === "dept" && !route)
         ? "your department head (or an admin, if the department has none) must approve it."
         : (identities.admin
           ? "switch to the admin session and open Approvals to approve it."
@@ -1152,28 +1229,75 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
 
   // ---- Approvals --------------------------------------------------------------
 
+  function fmtTs(ts) { return String(ts || "").slice(0, 19).replace("T", " "); }
+
+  // Mk15: where the item is in its route. head-only / admin-only = one step;
+  // head+admin = "Step 1 head -> Step 2 admin".
+  function stepPills(item) {
+    const steps = item.steps || [];
+    if ((item.total_steps || 1) === 1) {
+      const who = item.route === "head-only" ? "department head" : "admin";
+      return `<span class="pill">1 step · ${esc(who)}</span>`;
+    }
+    const headDone = steps.find((s) => s.level === "head" && s.decision === "approved");
+    return `<span class="pill ${headDone ? "active" : ""}">Step 1 head ${headDone ? "✓ " + esc(headDone.by) : "· pending"}</span>`
+      + `<span class="pill ${item.level === "admin" ? "active" : ""}">Step 2 admin · ${item.level === "admin" ? "pending" : "after step 1"}</span>`;
+  }
+
+  function stepHistory(item) {
+    return (item.steps || []).map((s) =>
+      `<div class="status muted">${esc(s.level)} step: <b>${esc(s.decision)}</b> by ${esc(s.by)} at ${esc(fmtTs(s.at))}`
+      + (s.comment ? ` — “${esc(s.comment)}”` : "") + (s.always_allow ? " · asked to always allow" : "") + `</div>`).join("");
+  }
+
   function approvalCard(item, decideBase, reload) {
     const actor = item.actor || {}, res = item.resource || {}, payload = item.payload || {};
     const ctx = document.createElement("div");
     ctx.className = "card";
-    const tierPill = item.tier && item.tier !== res.type
-      ? `<span class="pill">${esc(item.tier)}${item.dept ? " · " + esc(item.dept) : ""}</span>` : "";
+    const tierPill = item.dept
+      ? `<span class="pill">dept · ${esc(item.dept)}</span>`
+      : (item.tier && item.tier !== res.type ? `<span class="pill">${esc(item.tier)}</span>` : "");
+    const adminQueue = decideBase === "/api/approvals/";
+    let banner = "";
+    if (adminQueue && item.needs_admin && (item.steps || []).length) {
+      banner = `<div class="status" style="color:var(--ok)">Step 1 ✓ — the department head approved this. Your decision is final (step 2).</div>`;
+    } else if (adminQueue && item.dept && item.level === "head") {
+      banner = `<div class="status" style="color:#fef08a">Escalated: ${esc(item.dept)} has no active department head, so this is yours to decide.</div>`;
+    } else if (adminQueue && item.dept) {
+      banner = `<div class="status" style="color:#fef08a">Escalated: ${esc(item.dept)} had no active department head when this was requested.</div>`;
+    } else if (!adminQueue && item.total_steps === 2) {
+      banner = `<div class="status muted">Your approval sends this on to an admin (step 2). A reject is final.</div>`;
+    }
+    const allowTip = item.allowlist_eligible
+      ? "Skip approval next time this member requests exactly this action with exactly these arguments."
+      : "Critical tools and central memory need approval every time.";
     ctx.innerHTML = `
       <div class="row">
         <span class="badge ${item.status}">${esc(item.status)}</span>
         <span><b>${esc(res.type)}:</b> <code>${esc(res.id || "")}</code></span>
         ${tierPill}
+        ${stepPills(item)}
         <span class="muted">by ${esc(actor.sub || "")} (${esc(actor.role || "")} / ${esc(actor.dept || "")})</span>
         <span class="pill">thread ${esc(item.thread_id || "")}</span>
-        <span class="pill">${esc((item.created_ts || "").slice(0, 19).replace("T", " "))}</span>
+        <span class="pill">${esc(fmtTs(item.created_ts))}</span>
       </div>
       <div class="status muted">run_id <code>${esc(item.run_id || "")}</code></div>
+      ${banner}
+      ${stepHistory(item)}
       <pre style="white-space:pre-wrap;color:var(--muted);font-size:12px">${esc(JSON.stringify(payload, null, 2))}</pre>
       ${item.resumable_here === false
         ? `<div class="status" style="color:#fef08a">This run's saved chat state was not found (the chat was deleted?), so it can no longer be resumed.</div>`
-        : `<div class="row">
+        : `<div class="row" style="margin-bottom:8px">
+        <input type="text" data-comment placeholder="comment (optional)" style="flex:1" autocomplete="off">
+        <label class="${item.allowlist_eligible ? "" : "muted"}" title="${esc(allowTip)}">
+          <input type="checkbox" data-always ${item.allowlist_eligible ? "" : "disabled"}>
+          Always allow this exact action
+        </label>
+      </div>
+      <div class="row">
         <button class="ok" data-act="approve" data-id="${esc(item.id)}">Approve</button>
         <button class="bad" data-act="reject" data-id="${esc(item.id)}">Reject</button>
+        <span class="muted" style="font-size:12px">Unticked = approve once.</span>
       </div>`}
       <div class="status" data-status=""></div>`;
     if (item.resumable_here !== false) {
@@ -1186,14 +1310,20 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   async function decide(id, approve, card, decideBase, reload) {
     const btn = card.querySelector("[data-status]");
     btn.textContent = "deciding...";
+    const always = !!(approve && card.querySelector("[data-always]") && card.querySelector("[data-always]").checked);
+    const commentBox = card.querySelector("[data-comment]");
+    const comment = commentBox && commentBox.value.trim() ? commentBox.value.trim() : null;
     try {
       // Mk14 org mode: record the decision here; the requester's own machine
       // resumes via .../resume so their model/keys run (single-PC ?defer=0 path
       // is unchanged server-side for callers that omit it).
       const out = await api(decideBase + encodeURIComponent(id) + "/decide?defer=1",
         { method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ approve }) });
-      btn.textContent = out.status + (out.needs_resume ? " — waiting on requester to resume" : (" — reply: " + out.reply));
+          body: JSON.stringify({ approve, always_allow: always, comment }) });
+      btn.textContent = out.next_level === "admin"
+        ? "step 1 approved — now waiting on an admin (step 2)"
+        : out.status + (always ? " (always allowed from now on)" : "")
+          + (out.needs_resume ? " — waiting on requester to resume" : (" — reply: " + out.reply));
       btn.classList.add("muted");
       card.querySelectorAll("button[data-act]").forEach((b) => (b.disabled = true));
       setTimeout(reload, 1200);
@@ -1218,6 +1348,163 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       if (!items.length) { $("dept-approvals").innerHTML = '<p class="muted">No pending department approvals.</p>'; return; }
       items.forEach((item) => $("dept-approvals").appendChild(approvalCard(item, "/api/dept/approvals/", loadDeptApprovals)));
     } catch (e) { $("dept-approvals").textContent = "error: " + e.message; }
+  }
+
+  // ---- Always allowed (Mk15: approve-once rules) ----
+  function allowArgs(rule) {
+    const a = rule.args || {};
+    const shown = a.text !== undefined ? a.text : JSON.stringify(a.args !== undefined ? a.args : a);
+    return `<code title="${esc(rule.args_hash)}">${esc(String(shown).slice(0, 160))}</code>`;
+  }
+
+  function allowRows(rules, withDept) {
+    return rules.map((r, i) =>
+      `<tr><td>${esc(r.member)}</td>${withDept ? `<td>${esc(r.dept)}</td>` : ""}<td><code>${esc(r.action)}</code></td>
+       <td>${allowArgs(r)}</td>
+       <td>${esc(r.created_by)} <span class="muted">${esc(fmtTs(r.created_at))}</span></td>
+       <td style="text-align:right"><button class="bad" data-revoke="${i}">Revoke</button></td></tr>`).join("");
+  }
+
+  async function revokeRule(rule, statusEl, reload) {
+    if (!confirm(`Revoke this rule for ${rule.member}? Their next identical request will need approval again.`)) return;
+    try {
+      // The action contains ":" and "/" (memory:dept/<name>:add) — keep the slashes as path
+      // separators and encode everything else.
+      const action = rule.action.split("/").map(encodeURIComponent).join("/");
+      await api("/api/allowlist/" + encodeURIComponent(rule.member) + "/" + action + "/" + encodeURIComponent(rule.args_hash),
+        { method: "DELETE" });
+      statusEl.textContent = "revoked";
+      reload();
+    } catch (e) { statusEl.textContent = "error: " + e.message; }
+  }
+
+  async function loadAllowlist() {
+    const host = $("allowlist");
+    try {
+      const params = [];
+      if ($("allow-member").value.trim()) params.push("member=" + encodeURIComponent($("allow-member").value.trim()));
+      if ($("allow-dept").value.trim()) params.push("dept=" + encodeURIComponent($("allow-dept").value.trim()));
+      const rules = await api("/api/allowlist" + (params.length ? "?" + params.join("&") : ""));
+      host.innerHTML = rules.length ? allowRows(rules, true)
+        : '<tr><td colspan="6" class="muted">No always-allowed rules. A head or admin creates one by ticking “Always allow this exact action” when approving.</td></tr>';
+      host.querySelectorAll("[data-revoke]").forEach((b) =>
+        b.addEventListener("click", () => revokeRule(rules[Number(b.dataset.revoke)], $("allow-status"), loadAllowlist)));
+    } catch (e) { host.innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`; }
+  }
+
+  // ---- My department (Mk15: head roster, scoped member management, dept rules + skills) ----
+  let teamSkill = null;
+
+  function loadTeam() {
+    const claims = identities[active].claims;
+    $("team-dept").textContent = "(" + claims.dept + ")";
+    loadTeamMembers();
+    loadTeamAllowlist();
+    loadTeamSkills();
+  }
+
+  async function loadTeamMembers() {
+    const host = $("team-members");
+    const me = identities[active].claims.sub;
+    try {
+      const members = await api("/api/dept/members");
+      host.innerHTML = members.map((m) => {
+        // Heads and admins (and yourself) are managed by an admin, not from here.
+        const manageable = m.username !== me && m.role !== "admin" && !isHeadRole(m.role);
+        const actions = !manageable ? '<span class="muted">managed by admin</span>'
+          : (m.active
+              ? `<button class="bad" data-team-off="${esc(m.username)}">Deactivate</button>`
+              : `<button class="ok" data-team-on="${esc(m.username)}">Re-activate</button>`)
+            + ` <button class="ghost" data-team-reset="${esc(m.username)}">Reset password</button>`;
+        return `<tr><td>${esc(m.username)}</td><td>${esc(m.role)}</td>
+          <td><span class="badge ${m.active ? "approved" : "rejected"}">${m.active ? "active" : "disabled"}</span></td>
+          <td class="muted">${esc(fmtTs(m.created_at))}</td><td style="text-align:right">${actions}</td></tr>`;
+      }).join("");
+      host.querySelectorAll("[data-team-off]").forEach((b) =>
+        b.addEventListener("click", () => patchTeamMember(b.dataset.teamOff, { active: false })));
+      host.querySelectorAll("[data-team-on]").forEach((b) =>
+        b.addEventListener("click", () => patchTeamMember(b.dataset.teamOn, { active: true })));
+      host.querySelectorAll("[data-team-reset]").forEach((b) =>
+        b.addEventListener("click", () => {
+          const pw = prompt("New password for " + b.dataset.teamReset + " (min 6 characters):", randPass());
+          if (pw === null) return;
+          if (pw.trim().length < 6) { $("team-status").textContent = "password must be at least 6 characters"; return; }
+          patchTeamMember(b.dataset.teamReset, { password_reset: pw.trim() }, "password reset for " + b.dataset.teamReset + ": " + pw.trim());
+        }));
+    } catch (e) { host.innerHTML = `<tr><td colspan="5">${esc(e.message)}</td></tr>`; }
+  }
+
+  async function patchTeamMember(username, body, okText) {
+    try {
+      await api("/api/dept/members/" + encodeURIComponent(username), { method: "PATCH",
+        headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      $("team-status").textContent = okText || "saved";
+      loadTeamMembers();
+    } catch (e) { $("team-status").textContent = "error: " + e.message; }
+  }
+
+  async function addTeamMember() {
+    const username = $("team-username").value.trim();
+    const password = $("team-password").value.trim();
+    if (!username) { $("team-status").textContent = "username required"; return; }
+    if (password.length < 6) { $("team-status").textContent = "password must be at least 6 characters"; return; }
+    try {
+      const out = await api("/api/dept/members", { method: "POST",
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ username, password }) });
+      $("team-status").textContent = "added " + out.username + " (" + out.role + ")";
+      $("team-username").value = ""; $("team-password").value = "";
+      loadTeamMembers();
+    } catch (e) { $("team-status").textContent = "error: " + e.message; }
+  }
+
+  async function loadTeamAllowlist() {
+    const host = $("team-allowlist");
+    try {
+      const rules = await api("/api/allowlist");
+      host.innerHTML = rules.length ? allowRows(rules, false)
+        : '<tr><td colspan="5" class="muted">Nothing is always allowed. Tick “Always allow this exact action” when approving to add a rule.</td></tr>';
+      host.querySelectorAll("[data-revoke]").forEach((b) =>
+        b.addEventListener("click", () => revokeRule(rules[Number(b.dataset.revoke)], $("team-allow-status"), loadTeamAllowlist)));
+    } catch (e) { host.innerHTML = `<tr><td colspan="5">${esc(e.message)}</td></tr>`; }
+  }
+
+  async function loadTeamSkills() {
+    const host = $("team-skills");
+    try {
+      const out = await api("/api/dept/skills");
+      host.innerHTML = "";
+      if (!out.skills.length) { host.innerHTML = '<p class="muted">Your department has no skills yet (an admin creates them).</p>'; return; }
+      out.skills.forEach((sk) => {
+        const row = elm(`<div class="row" style="margin:6px 0">
+          <b>${esc(sk.name)}</b><span class="pill">v${esc(sk.version)}</span>
+          ${sk.policy_row ? '<span class="badge approved">usable</span>' : '<span class="badge rejected">no policy row — ask an admin</span>'}
+          <span class="muted" style="flex:1">${esc(sk.trigger)}</span>
+          <button class="ghost" data-team-skill="${esc(sk.name)}">Edit</button></div>`);
+        row.querySelector("[data-team-skill]").addEventListener("click", () => openTeamSkill(sk.name));
+        host.appendChild(row);
+      });
+    } catch (e) { host.textContent = "error: " + e.message; }
+  }
+
+  async function openTeamSkill(name) {
+    try {
+      const out = await api("/api/dept/skills/" + encodeURIComponent(name));
+      teamSkill = name;
+      $("team-skill-title").textContent = "Edit skill: " + name;
+      $("team-skill-content").value = out.content;
+      $("team-skill-status").textContent = "";
+      $("team-skill-editor").classList.remove("hidden");
+    } catch (e) { $("team-skills").textContent = "error: " + e.message; }
+  }
+
+  async function saveTeamSkill() {
+    if (!teamSkill) return;
+    try {
+      await api("/api/dept/skills/" + encodeURIComponent(teamSkill), { method: "PUT",
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ content: $("team-skill-content").value }) });
+      $("team-skill-status").textContent = "saved → will hot-reload on the next run";
+      loadTeamSkills();
+    } catch (e) { $("team-skill-status").textContent = "error: " + e.message; }
   }
 
   // ---- Members (plan_mk2 Phase 4) ----
@@ -1346,10 +1633,35 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   async function loadDepts() {
     try {
       const depts = await api("/api/departments");
-      $("depts").innerHTML = depts.map((d) =>
-        `<tr><td>${esc(d.name)}</td><td>${esc(d.service)}</td><td><code>${esc(d.service_url)}</code></td>
-         <td>${esc(d.resources.join(", "))}</td><td>${esc(d.members.join(", "))}</td><td>${esc(d.role || "")}</td></tr>`).join("");
-    } catch (e) { $("depts").innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`; }
+      $("depts").innerHTML = depts.map((d) => {
+        // The admin domain and policy-only (unregistered) names have no head/member flow.
+        const switchable = d.registered && d.name !== "admin";
+        const mode = switchable
+          ? `<select data-mode="${esc(d.name)}">
+               <option value="head-only" ${d.approval_mode === "head-only" ? "selected" : ""}>head-only</option>
+               <option value="head+admin" ${d.approval_mode === "head+admin" ? "selected" : ""}>head + admin</option>
+             </select>`
+          : `<span class="muted">—</span>`;
+        const heads = d.name === "admin" ? `<span class="muted">—</span>`
+          : (d.head_count > 0 ? String(d.head_count)
+            : `<span class="badge pending" title="No active head: this department's requests escalate to admins">0 · escalates</span>`);
+        return `<tr><td>${esc(d.name)}</td><td>${esc(d.service)}</td><td><code>${esc(d.service_url)}</code></td>
+         <td>${esc(d.resources.join(", "))}</td><td>${esc(d.members.join(", "))}</td><td>${esc(d.role || "")}</td>
+         <td>${heads}</td><td>${mode}</td></tr>`;
+      }).join("");
+      $("depts").querySelectorAll("[data-mode]").forEach((sel) =>
+        sel.addEventListener("change", () => setDeptMode(sel.dataset.mode, sel.value)));
+    } catch (e) { $("depts").innerHTML = `<tr><td colspan="8">${esc(e.message)}</td></tr>`; }
+  }
+
+  async function setDeptMode(name, mode) {
+    const status = $("depts-status");
+    try {
+      await api("/api/departments/" + encodeURIComponent(name), { method: "PATCH",
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ approval_mode: mode }) });
+      status.textContent = `${name}: approvals are now ${mode} — applies to new requests only.`;
+    } catch (e) { status.textContent = "error: " + e.message; }
+    loadDepts();
   }
 
   async function saveDept() {
@@ -1359,6 +1671,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       service_url: $("dept-url").value.trim(),
       resources: splitScopes($("dept-resources").value),
       role: $("dept-role").value.trim(),
+      approval_mode: $("dept-mode").value,
     };
     if (!payload.name) { $("dept-status").textContent = "name required"; return; }
     try {
@@ -1377,6 +1690,13 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   $("add-dept").addEventListener("click", () => $("dept-editor").classList.remove("hidden"));
   $("dept-save").addEventListener("click", saveDept);
   $("dept-cancel").addEventListener("click", () => $("dept-editor").classList.add("hidden"));
+  $("team-add").addEventListener("click", addTeamMember);
+  $("team-gen").addEventListener("click", () => { const el = $("team-password"); el.type = "text"; el.value = randPass(); });
+  $("team-skill-save").addEventListener("click", saveTeamSkill);
+  $("team-skill-cancel").addEventListener("click", () => { teamSkill = null; $("team-skill-editor").classList.add("hidden"); });
+  $("allow-refresh").addEventListener("click", loadAllowlist);
+  ["allow-member", "allow-dept"].forEach((id) =>
+    $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") loadAllowlist(); }));
 
   // ---- Skills ----
   let editingSkill = null;
@@ -1464,7 +1784,10 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       const scopes = await api(isAdmin() ? "/api/memory" : "/api/memory/me");
       $("memory").innerHTML = "";
       if (!scopes.length) { $("memory").innerHTML = '<p class="muted">No readable memory scopes for this identity.</p>'; return; }
-      scopes.forEach((s) => $("memory").appendChild(memoryScope(s, isAdmin())));
+      // Mk15: a head manages their own department's scope; everything else stays read-only.
+      const claims = identities[active].claims;
+      const ownDept = isHeadRole(claims.role) ? "dept/" + claims.dept : null;
+      scopes.forEach((s) => $("memory").appendChild(memoryScope(s, isAdmin() || s.scope === ownDept)));
     } catch (e) { $("memory").textContent = "error: " + e.message; }
   }
 

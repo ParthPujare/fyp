@@ -26,9 +26,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.agent.checkpoints import make_checkpointer
+from app.agent.routing import entry_allowlist_eligible
 from app.agent.runner import resume_agent, run_state_is_local
 from app.auth.jwt import AuthError, verify_token
 from app.auth.store import (
+    APPROVAL_MODE_HEAD_ONLY,
+    DepartmentError,
     DepartmentExistsError,
     LockoutGuardError,
     MemberError,
@@ -42,7 +45,14 @@ from app.harness.policy_store import FilePolicyStore
 from app.harness.sanitize import MASK
 from app.llm.base import strip_routing_prefix
 from app.llm.registry import PROVIDERS, is_supported, normalize_provider_type
-from app.memory.approvals import ApprovalStore
+from app.memory.approval_flow import (
+    DecisionError,
+    apply_decision,
+    check_decision,
+    decision_response,
+    is_head,
+)
+from app.memory.approvals import LEVEL_ADMIN, LEVEL_HEAD, ROUTE_HEAD_ADMIN, ApprovalStore
 from app.memory.edit import MemoryEditor
 from app.memory.factory import open_approval_store, open_base_store, open_episodic_store
 from app.memory.recall import RecallService
@@ -146,12 +156,19 @@ def _verify_dept_head(authorization: str | None) -> dict[str, Any]:
 
 def _active_head_count(dept: str) -> int:
     """Active `{dept}_head` members owning this dept (Mk12 escalation check)."""
-    from app.harness.enforcer import head_role_for
+    return get_store().active_head_count(dept)
 
-    head_role = head_role_for(dept)
-    return sum(
-        1 for m in get_store().list() if m.active and m.role == head_role and m.dept == dept
-    )
+
+def _verify_admin_or_head(authorization: str | None) -> tuple[dict[str, Any], bool]:
+    """(claims, is_admin) for the surfaces admins and department heads share (Mk15).
+
+    A head gets their own department's slice; everyone else is refused."""
+    claims, _token = _verified_member(authorization)
+    if claims.get("role") == "admin":
+        return claims, True
+    if is_head(claims):
+        return claims, False
+    raise HTTPException(status_code=403, detail="only admins and department heads may access this API")
 
 
 RESUME_ELSEWHERE = (
@@ -171,6 +188,9 @@ def _resumable_here(entry: dict[str, Any]) -> bool:
 def _approval_view(item: dict[str, Any]) -> dict[str, Any]:
     dept = ApprovalStore.dept_of(item)
     status = item["status"]
+    level = ApprovalStore.level_of(item)
+    route = ApprovalStore.route_of(item)
+    is_memory = (item.get("resource") or {}).get("type") == "memory"
     return {
         "id": item["id"],
         "run_id": item["run_id"],
@@ -187,20 +207,85 @@ def _approval_view(item: dict[str, Any]) -> dict[str, Any]:
         # Decided but not yet resumed on the owner's machine (Mk14): the owner
         # polls this and resumes locally so their own model/keys are used.
         "needs_resume": status in ("approved", "rejected") and not item.get("resumed_by"),
-        "tier": "dept" if dept is not None else item["resource"].get("type", "memory"),
+        "tier": "dept" if dept is not None and is_memory else item["resource"].get("type", "memory"),
         "dept": dept,
         "resumable_here": _resumable_here(item),
+        # Mk15: which step it waits on (head | admin | done), its creation-time route, and
+        # the decisions so far ({level, by, at, decision, comment, always_allow}).
+        "level": level,
+        "route": route,
+        "total_steps": 2 if route == ROUTE_HEAD_ADMIN else 1,
+        "steps": item.get("steps") or [],
+        "action": item.get("action"),
+        "needs_admin": status == "pending" and level == LEVEL_ADMIN,
+        "allowlist_eligible": entry_allowlist_eligible(item),
     }
 
 
 def _decide_or_http_error(approvals: ApprovalStore, approval_id: str, approve: bool, decider: str) -> None:
-    """Record a decision; a lost race with another decider is a 409, not a 500."""
+    """Record a terminal decision; a lost race with another decider is a 409, not a 500."""
     try:
         approvals.decide(approval_id, approve, decider)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _decide(
+    approval_id: str,
+    req: DecideRequest,
+    claims: dict[str, Any],
+    *,
+    as_level: str,
+    defer: bool,
+    resumer: Any,
+    approvals: ApprovalStore,
+) -> dict[str, Any]:
+    """Shared body of the admin and dept decide routes (Mk14 defer + Mk15 steps).
+
+    A lost race with another decider is a 409, not a 500. A head's step-1 approve on a
+    `head+admin` item records the step and stops: the item moves to the admin queue and
+    nothing resumes until the admin step is decided.
+    """
+    try:
+        entry = check_decision(
+            approvals,
+            approval_id,
+            claims,
+            approve=req.approve,
+            as_level=as_level,
+            always_allow=req.always_allow,
+        )
+        hands_to_admin = (
+            as_level == LEVEL_HEAD and req.approve and ApprovalStore.route_of(entry) == ROUTE_HEAD_ADMIN
+        )
+        if not defer and not hands_to_admin and not _resumable_here(entry):
+            raise HTTPException(status_code=409, detail=RESUME_ELSEWHERE)
+        decided = apply_decision(
+            approvals,
+            get_store(),
+            approval_id,
+            claims,
+            approve=req.approve,
+            as_level=as_level,
+            always_allow=req.always_allow,
+            comment=req.comment,
+        )
+    except DecisionError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+    if defer or decided["status"] == "pending":
+        return decision_response(decided)
+    result = resumer(approval_id)
+    decided = approvals.get(approval_id)
+    return {
+        "approval_id": approval_id,
+        "status": decided["status"],
+        "thread_id": result.thread_id,
+        "reply": result.reply,
+        "interrupted": result.interrupted,
+        "next_approval_id": result.approval_id if result.interrupted else None,
+    }
 
 
 def get_resumer():
@@ -302,6 +387,8 @@ class ChatRequest(BaseModel):
 
 class DecideRequest(BaseModel):
     approve: bool
+    always_allow: bool = False  # Mk15: also allow this exact action for this member from now on
+    comment: str | None = None
 
 
 class SkillWriteRequest(BaseModel):
@@ -451,16 +538,22 @@ def pending_approvals(
     approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
     authorization: str | None = Header(default=None),
 ) -> list[dict[str, Any]]:
-    """Admin queue: central + tool gates + ESCALATED dept items (Mk12).
+    """Admin queue: central + admin-only tool gates + ESCALATIONS only (Mk12, Mk15).
 
-    A dept-tier item owned by a dept with ≥1 active head stays in that head's
-    queue only; it surfaces here iff the dept has no active head (fallback).
+    A department item reaches an admin in exactly two ways: (i) it is at its admin step —
+    a `head+admin` item whose head already approved ("Step 1 ✓"), or one created while the
+    department had no active head; (ii) it still waits on a head but the department has
+    none left. Head-only items a head can decide never appear here (audit/Ops only).
     """
     _verify_admin(authorization)
     out: list[dict[str, Any]] = []
     for item in approvals.pending_items():
         dept = ApprovalStore.dept_of(item)
-        if dept is not None and _active_head_count(dept) > 0:
+        if (
+            dept is not None
+            and ApprovalStore.level_of(item) == LEVEL_HEAD
+            and _active_head_count(dept) > 0
+        ):
             continue
         out.append(_approval_view(item))
     return out
@@ -471,7 +564,7 @@ def pending_dept_approvals(
     approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
     authorization: str | None = Header(default=None),
 ) -> list[dict[str, Any]]:
-    """A head's own-dept queue — separate from the admin queue (Mk12)."""
+    """A head's own-dept queue (step 1) — separate from the admin queue (Mk12, Mk15)."""
     claims = _verify_dept_head(authorization)
     return [_approval_view(i) for i in approvals.pending_for_dept(str(claims.get("dept", "")))]
 
@@ -485,43 +578,18 @@ def decide_approval(
     authorization: str | None = Header(default=None),
     defer: bool = Query(default=False),
 ) -> dict[str, Any]:
-    """Admin decision (Mk14: `?defer=1` records the decision without resuming).
+    """Admin decision — always terminal (Mk14: `?defer=1` records it without resuming).
 
     Deferred mode is the org path: any admin may approve, and the originator's
     own machine later resumes via `POST .../resume` so their model/keys run.
     Coupled mode (`defer=0`, default) keeps single-PC behavior unchanged.
+    An item a head rejected is already `rejected`: deciding it again is a 409 (Mk15:
+    a head reject is final, an admin cannot revive it).
     """
     claims = _verify_admin(authorization)
-    entry = approvals.get(approval_id)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
-    if entry["status"] != "pending":
-        raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
-    if defer:
-        _decide_or_http_error(approvals, approval_id, req.approve, claims["sub"])
-        decided = approvals.get(approval_id)
-        return {
-            "approval_id": approval_id,
-            "status": decided["status"],
-            "thread_id": decided["thread_id"],
-            "reply": None,
-            "interrupted": True,
-            "next_approval_id": None,
-            "needs_resume": True,
-        }
-    if not _resumable_here(entry):
-        raise HTTPException(status_code=409, detail=RESUME_ELSEWHERE)
-    _decide_or_http_error(approvals, approval_id, req.approve, claims["sub"])
-    result = resumer(approval_id)
-    decided = approvals.get(approval_id)
-    return {
-        "approval_id": approval_id,
-        "status": decided["status"],
-        "thread_id": result.thread_id,
-        "reply": result.reply,
-        "interrupted": result.interrupted,
-        "next_approval_id": result.approval_id if result.interrupted else None,
-    }
+    return _decide(
+        approval_id, req, claims, as_level=LEVEL_ADMIN, defer=defer, resumer=resumer, approvals=approvals
+    )
 
 
 @app.post("/api/dept/approvals/{approval_id}/decide")
@@ -533,44 +601,17 @@ def decide_dept_approval(
     authorization: str | None = Header(default=None),
     defer: bool = Query(default=False),
 ) -> dict[str, Any]:
-    """A head decides an item from their OWN dept queue (Mk12 + Mk14 defer).
+    """A head decides step 1 of an item from their OWN dept queue (Mk12 + Mk14 + Mk15).
 
     Cross-dept decides are 403; an admin deciding an escalated dept item must use
     the admin endpoint. Any single head's decision resolves (multiple heads allowed).
+    On a `head+admin` item an approve hands it to the admin queue (`next_level=admin`,
+    nothing resumes yet); a reject is final.
     """
     claims = _verify_dept_head(authorization)
-    entry = approvals.get(approval_id)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
-    if entry["status"] != "pending":
-        raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
-    if ApprovalStore.dept_of(entry) != str(claims.get("dept", "")):
-        raise HTTPException(status_code=403, detail="not your department's approval")
-    if defer:
-        _decide_or_http_error(approvals, approval_id, req.approve, claims["sub"])
-        decided = approvals.get(approval_id)
-        return {
-            "approval_id": approval_id,
-            "status": decided["status"],
-            "thread_id": decided["thread_id"],
-            "reply": None,
-            "interrupted": True,
-            "next_approval_id": None,
-            "needs_resume": True,
-        }
-    if not _resumable_here(entry):
-        raise HTTPException(status_code=409, detail=RESUME_ELSEWHERE)
-    _decide_or_http_error(approvals, approval_id, req.approve, claims["sub"])
-    result = resumer(approval_id)
-    decided = approvals.get(approval_id)
-    return {
-        "approval_id": approval_id,
-        "status": decided["status"],
-        "thread_id": result.thread_id,
-        "reply": result.reply,
-        "interrupted": result.interrupted,
-        "next_approval_id": result.approval_id if result.interrupted else None,
-    }
+    return _decide(
+        approval_id, req, claims, as_level=LEVEL_HEAD, defer=defer, resumer=resumer, approvals=approvals
+    )
 
 
 def _resume_owned(
@@ -804,12 +845,158 @@ def reset_password(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+# ---- Department head: roster + scoped member management (Mk15) ----
+
+
+class DeptMemberCreateRequest(BaseModel):
+    username: str
+    password: str
+    role: str = ""  # blank = the department's member role; head/admin roles are refused
+
+
+class DeptMemberUpdateRequest(BaseModel):
+    active: bool | None = None
+    password_reset: str | None = None
+
+
+def _dept_member_role(dept: str) -> str:
+    rec = get_store().get_department(dept)
+    return (rec.role if rec is not None and rec.role else "") or f"{dept}_agent"
+
+
+def _dept_member_view(m: Any) -> dict[str, Any]:
+    return {"username": m.username, "role": m.role, "active": m.active, "created_at": m.created_at}
+
+
+@app.get("/api/dept/members")
+def dept_members(authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+    """A head's own-department roster, read from the store."""
+    claims = _verify_dept_head(authorization)
+    dept = str(claims.get("dept", ""))
+    return [_dept_member_view(m) for m in get_store().list() if m.dept == dept]
+
+
+@app.post("/api/dept/members")
+def create_dept_member(
+    req: DeptMemberCreateRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """A head adds a member to their OWN department with the department's member role.
+
+    Heads cannot mint heads or admins (403) and cannot choose another department: the
+    dept comes from the head's verified claims, never from the body."""
+    claims = _verify_dept_head(authorization)
+    dept = str(claims.get("dept", ""))
+    username = (req.username or "").strip()
+    if not username:
+        raise HTTPException(status_code=422, detail="username is required")
+    if len(req.password or "") < 6:
+        raise HTTPException(status_code=422, detail="password must be at least 6 characters")
+    member_role = _dept_member_role(dept)
+    role = (req.role or "").strip() or member_role
+    if role != member_role:
+        raise HTTPException(
+            status_code=403,
+            detail=f"a department head can only add members with the role {member_role!r}",
+        )
+    store = get_store()
+    # Same scopes as an existing colleague with that role (a head cannot hand out new ones).
+    peer = next((m for m in store.list() if m.dept == dept and m.role == role), None)
+    try:
+        member = store.create(
+            username,
+            req.password,
+            role=role,
+            dept=dept,
+            scopes=list(peer.scopes) if peer is not None else [],
+            actor=claims["sub"],
+        )
+    except MemberExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except MemberError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _dept_member_view(member)
+
+
+@app.patch("/api/dept/members/{username}")
+def update_dept_member(
+    username: str,
+    req: DeptMemberUpdateRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """A head (de)activates or resets the password of a member of their OWN department.
+
+    No role/dept changes (a head cannot promote), and never another head, an admin, or
+    themselves — those stay with the admin."""
+    claims = _verify_dept_head(authorization)
+    dept = str(claims.get("dept", ""))
+    store = get_store()
+    target = store.get(username)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"member {username!r} not found")
+    if target.dept != dept:
+        raise HTTPException(status_code=403, detail="not a member of your department")
+    if target.role == "admin" or target.role.endswith("_head") or target.username == claims["sub"]:
+        raise HTTPException(status_code=403, detail="heads and admins are managed by an admin")
+    if req.active is None and req.password_reset is None:
+        raise HTTPException(status_code=422, detail="nothing to change: send active and/or password_reset")
+    if req.password_reset is not None and len(req.password_reset) < 6:
+        raise HTTPException(status_code=422, detail="password must be at least 6 characters")
+    try:
+        if req.password_reset is not None:
+            target = store.reset_password(username, req.password_reset, actor=claims["sub"])
+        if req.active is not None:
+            target = store.set_active(username, req.active, actor=claims["sub"])
+    except MemberError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _dept_member_view(target)
+
+
+# ---- Approve-once allowlist (Mk15, todo #11) ----
+
+
+@app.get("/api/allowlist")
+def list_allowlist(
+    authorization: str | None = Header(default=None),
+    dept: str | None = Query(default=None),
+    member: str | None = Query(default=None),
+) -> list[dict[str, Any]]:
+    """"Always allowed" rules: admins see all (optional `dept` / `member` filter), a head
+    sees their own department's."""
+    claims, is_admin = _verify_admin_or_head(authorization)
+    rules = get_store().allowlist_list(dept if is_admin else str(claims.get("dept", "")))
+    if member:
+        rules = [r for r in rules if r["member"] == member]
+    return rules
+
+
+@app.delete("/api/allowlist/{member}/{action:path}/{args_hash}")
+def revoke_allowlist(
+    member: str,
+    action: str,
+    args_hash: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Revoke a rule: the member's next identical request needs approval again.
+    Admins revoke any rule, a head only their own department's."""
+    claims, is_admin = _verify_admin_or_head(authorization)
+    store = get_store()
+    rule = store.allowlist_get(member, action, args_hash)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="allowlist rule not found")
+    if not is_admin and rule["dept"] != str(claims.get("dept", "")):
+        raise HTTPException(status_code=403, detail="not your department's rule")
+    store.allowlist_revoke(member, action, args_hash, actor=claims["sub"])
+    return {"member": member, "action": action, "args_hash": args_hash, "revoked": True}
+
+
 @app.get("/api/departments")
 def departments(
     authorization: str | None = Header(default=None),
 ) -> list[dict[str, Any]]:
     _verify_admin(authorization)
     store = get_store()
+    members = store.list()  # store-sourced (one read): never stale on the shared database
     dept_roles = [d.name for d in store.list_departments()]
     # policy.csv `p` rows can still introduce/denote knowable objects per domain;
     # merge them so the resource list stays accurate even before registration.
@@ -820,23 +1007,25 @@ def departments(
             if obj not in policy_objs[dom]:
                 policy_objs[dom].append(obj)
     rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
     for name in sorted(set(dept_roles) | set(policy_objs)):
-        seen.add(name)
         rec = store.get_department(name)
         resources = list(policy_objs.get(name, []))
         if rec is not None:
             for r in rec.resources:
                 if r not in resources:
                     resources.append(r)
+        head_role = f"{name}_head"
         rows.append(
             {
                 "name": name,
                 "service": rec.service if rec is not None else "",
                 "service_url": rec.service_url if rec is not None else "",
                 "resources": sorted(resources),
-                "members": [u.username for u in USERS.values() if u.dept == name],
+                "members": [m.username for m in members if m.dept == name],
                 "role": rec.role if rec is not None else "",
+                "approval_mode": rec.approval_mode if rec is not None else APPROVAL_MODE_HEAD_ONLY,
+                "head_count": sum(1 for m in members if m.active and m.dept == name and m.role == head_role),
+                "registered": rec is not None,
             }
         )
     return rows
@@ -848,6 +1037,11 @@ class DepartmentRegisterRequest(BaseModel):
     service_url: str = ""
     resources: list[str] = []
     role: str = ""
+    approval_mode: str = APPROVAL_MODE_HEAD_ONLY  # Mk15: head-only | head+admin
+
+
+class DepartmentUpdateRequest(BaseModel):
+    approval_mode: str
 
 
 @app.post("/api/departments")
@@ -856,38 +1050,82 @@ def register_department(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """Register a new department (plan_mk2 §2.2 / §4 row 4). The department
-    record lands in the store (replacing the hardcoded `_service_for` map) and a
-    default `p, <role>, <dept>, *, *` row is appended to policy.csv so the new
-    role is immediately grantable. Appending to the policy file is the one place
-    the dashboard writes it — kept tiny + explicit."""
+    record lands in the store (replacing the hardcoded `_service_for` map) and the
+    granular member + head `p` rows are added to the policy so the new roles are
+    immediately grantable. Adding these rows is the one place the dashboard writes
+    the policy — kept tiny + explicit."""
     claims = _verify_admin(authorization)
     store = get_store()
     name = (req.name or "").strip().lower()
     if not re.fullmatch(r"[a-z0-9_-]+", name or ""):
         raise HTTPException(status_code=422, detail="department name must be lowercase [a-z0-9_-]")
     role = (req.role or "").strip() or f"{name}_agent"
+    service = (req.service or "").strip()
+    resources = list(req.resources or [])
     try:
         store.register_department(
             name,
-            service=(req.service or "").strip(),
+            service=service,
             service_url=(req.service_url or "").strip(),
-            resources=list(req.resources or []),
+            resources=resources,
             role=role,
             actor=claims["sub"],
+            approval_mode=(req.approval_mode or APPROVAL_MODE_HEAD_ONLY).strip(),
         )
     except DepartmentExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    _append_policy_row(role, name, actor=claims["sub"])
+    except DepartmentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _append_policy_row(role, name, actor=claims["sub"], objects=[service, *resources])
     rec = store.get_department(name)
     assert rec is not None
     return rec.to_public()
 
 
-def _append_policy_row(role: str, dept: str, actor: str = "") -> None:
-    """Add `p, <role>, <dept>, *, *` (+ the Mk12 `{dept}_head` row) to the policy so
-    the role is grantable. The enforcer's version guard notices the change (file
-    mtime, or `members_version` on the shared database) and rebuilds on its next
-    call, so the newly-registered role takes effect without a restart.
+@app.patch("/api/departments/{name}")
+def update_department(
+    name: str,
+    req: DepartmentUpdateRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Switch a department's approval mode: `head-only` ↔ `head+admin` (Mk15, admin only).
+
+    Applies to items created from now on; an approval already in flight keeps the route
+    it was created with."""
+    claims = _verify_admin(authorization)
+    store = get_store()
+    if store.get_department(name) is None:
+        raise HTTPException(status_code=404, detail=f"department {name!r} not found")
+    try:
+        return store.set_department_mode(name, (req.approval_mode or "").strip(), actor=claims["sub"]).to_public()
+    except DepartmentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# What a department role may do besides its own tools (mirrors the seeded depts' rows).
+_BASE_ROLE_GRANTS: tuple[tuple[str, str], ...] = (
+    ("memory_central", "read"),
+    ("memory_dept", "read"),
+    ("memory_dept", "write"),
+    ("memory_user", "read"),
+    ("memory_user", "write"),
+    ("memory_recall", "use"),
+    ("pii_email", "read"),
+    ("skill_triage_incident", "use"),
+)
+
+
+def _append_policy_row(role: str, dept: str, actor: str = "", objects: list[str] | None = None) -> None:
+    """Add the granular `p` rows for a newly registered department's member role and its
+    Mk12 `{dept}_head` role — the same shape the seeded departments have: `read`/`create`
+    on each of the department's own tool objects (`objects`: its service label and
+    registered resources), plus dept/user memory, central read, recall, email PII and the
+    base skill. (Before Mk15 this wrote `p, <role>, <dept>, *, *`, which also granted
+    central-memory writes and every critical tool; rows written back then stay valid.)
+
+    The enforcer's version guard notices the change (file mtime, or `members_version`
+    on the shared database) and rebuilds on its next call, so the newly-registered role
+    takes effect without a restart.
 
     Idempotent: an equivalent row already present is left alone. Casbin
     ignores duplicate rows, but an unconditional append grows the file without
@@ -895,7 +1133,14 @@ def _append_policy_row(role: str, dept: str, actor: str = "") -> None:
     """
     from app.harness.enforcer import head_role_for
 
-    _policy_store().add_rows([("p", r, dept, "*", "*") for r in (role, head_role_for(dept))], actor)
+    tool_objs: list[str] = []
+    for obj in objects or []:
+        obj = (obj or "").strip().lower()
+        if re.fullmatch(r"[a-z0-9_]+", obj) and obj not in tool_objs:
+            tool_objs.append(obj)
+    grants = [(obj, act) for obj in tool_objs for act in ("read", "create")] + list(_BASE_ROLE_GRANTS)
+    rows = [("p", r, dept, obj, act) for r in (role, head_role_for(dept)) for obj, act in grants]
+    _policy_store().add_rows(rows, actor)
 
 
 def _policy_has_row(row: tuple[str, ...]) -> bool:
@@ -1048,6 +1293,64 @@ def delete_skill(
     return {"name": name, "deleted": True}
 
 
+# ---- Department head: own-department skills (Mk15) ----
+
+
+def _own_dept_skill(name: str, claims: dict[str, Any]) -> Any:
+    skill = _get_components()["skills"].get(name)
+    if skill is None:
+        raise HTTPException(status_code=404, detail=f"skill {name!r} not found")
+    if skill.scope != scope_dept(str(claims.get("dept", ""))):
+        raise HTTPException(status_code=403, detail="not your department's skill")
+    return skill
+
+
+@app.get("/api/dept/skills")
+def list_dept_skills(authorization: str | None = Header(default=None)) -> dict:
+    """Skills scoped to the head's own department (`scope: dept/<dept>`)."""
+    claims = _verify_dept_head(authorization)
+    own = scope_dept(str(claims.get("dept", "")))
+    skills, errors = _get_components()["skills"].load_with_errors()
+    granted = _granted_skill_objs()
+    return {"skills": [_skill_summary(s, granted) for s in skills if s.scope == own], "errors": errors}
+
+
+@app.get("/api/dept/skills/{name}")
+def get_dept_skill(name: str, authorization: str | None = Header(default=None)) -> dict:
+    claims = _verify_dept_head(authorization)
+    return {"content": render_skill(_own_dept_skill(name, claims))}
+
+
+@app.put("/api/dept/skills/{name}")
+def update_dept_skill(
+    name: str,
+    req: SkillWriteRequest,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """A head edits one of their OWN department's skills. The skill must stay in the
+    department (same name, same `dept/<dept>` scope); creating/deleting skills and the
+    policy rows that make them usable stay with the admin."""
+    claims = _verify_dept_head(authorization)
+    _own_dept_skill(name, claims)
+    try:
+        skill = parse_skill_document(req.content, fallback_name=name)
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if skill.name != name:
+        raise HTTPException(status_code=409, detail="skill name in frontmatter must match the url")
+    if skill.scope != scope_dept(str(claims.get("dept", ""))):
+        raise HTTPException(status_code=403, detail="a department skill must stay in your department's scope")
+    path = _get_components()["skills"].save(skill, actor=claims["sub"])
+    _get_components()["audit"].log(
+        decision="ALLOW",
+        resource={"type": "skill", "id": skill.name},
+        actor={"sub": claims["sub"], "role": claims["role"], "dept": claims["dept"]},
+        run_id="dashboard",
+        reason="head",
+    )
+    return {"name": skill.name, "path": str(path), "saved": True}
+
+
 # ---- Member memory read (plan_mk2 Phase 5) ----
 
 
@@ -1121,8 +1424,18 @@ def _audit_memory(claims: dict[str, Any], scope: str, action: str) -> None:
         resource={"type": "memory", "id": scope},
         actor={"sub": claims["sub"], "role": claims["role"], "dept": claims["dept"]},
         run_id="dashboard",
-        reason=f"admin:{action}",
+        reason=f"{'admin' if claims.get('role') == 'admin' else 'head'}:{action}",
     )
+
+
+def _verify_memory_editor(authorization: str | None, scope: str) -> dict[str, Any]:
+    """Admins edit any scope; a department head edits only `dept/<own dept>` (Mk15)."""
+    claims, _token = _verified_member(authorization)
+    if claims.get("role") == "admin":
+        return claims
+    if is_head(claims) and scope == scope_dept(str(claims.get("dept", ""))):
+        return claims
+    raise HTTPException(status_code=403, detail="only admins may access the dashboard API")
 
 
 @app.get("/api/memory")
@@ -1139,7 +1452,7 @@ def add_memory_fact(
     req: MemoryFactRequest,
     authorization: str | None = Header(default=None),
 ) -> dict:
-    claims = _verify_admin(authorization)
+    claims = _verify_memory_editor(authorization, scope)
     _validate_scope(scope)
     outcome = _get_components()["memory_editor"].add(scope, req.text)
     _audit_memory(claims, scope, outcome.op)
@@ -1153,7 +1466,7 @@ def update_memory_fact(
     req: MemoryItemRequest,
     authorization: str | None = Header(default=None),
 ) -> dict:
-    claims = _verify_admin(authorization)
+    claims = _verify_memory_editor(authorization, scope)
     _validate_scope(scope)
     store = _get_components()["store"]
     item = store.get(scope_to_namespace(scope), key)
@@ -1170,7 +1483,7 @@ def delete_memory_fact(
     key: str,
     authorization: str | None = Header(default=None),
 ) -> dict:
-    claims = _verify_admin(authorization)
+    claims = _verify_memory_editor(authorization, scope)
     _validate_scope(scope)
     store = _get_components()["store"]
     if store.get(scope_to_namespace(scope), key) is None:
@@ -1767,14 +2080,18 @@ def integration_disconnect(
 
 
 def _ensure_toolkit_policy_rows(toolkit: str, actor: str = "") -> None:
-    """Grant every agent role read+write on a newly enabled toolkit (writes still HITL-gated by risk)."""
+    """Grant every department's member role AND its head role read+write on a newly enabled
+    toolkit (writes still HITL-gated by risk). Departments come from the store, so ones
+    registered through the dashboard are covered too (Mk15: heads mirror their members)."""
+    from app.harness.enforcer import head_role_for
+
     rows = []
-    for role, dept in (
-        ("marketing_agent", "marketing"), ("hr_agent", "hr"),
-        ("finance_agent", "finance"), ("devops_agent", "devops"),
-    ):
-        rows.append(("p", role, dept, toolkit, "read"))
-        rows.append(("p", role, dept, toolkit, "write"))
+    for dept in get_store().list_departments():
+        if dept.name == "admin":
+            continue  # the admin wildcard row already covers it
+        for role in (dept.role or f"{dept.name}_agent", head_role_for(dept.name)):
+            rows.append(("p", role, dept.name, toolkit, "read"))
+            rows.append(("p", role, dept.name, toolkit, "write"))
     _policy_store().add_rows(rows, actor)
 
 

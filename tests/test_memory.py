@@ -344,8 +344,10 @@ def test_dept_write_suspends_for_head_approval(runner_factory, memory_store, app
     assert res.interrupted and res.approval_id is not None
     ns = scope_to_namespace(scope_dept("marketing"))
     assert memory_store.items_in(ns) == []
-    pending = approvals.pending_for_dept("marketing")
+    pending = [i for i in approvals.pending_items() if approvals.dept_of(i) == "marketing"]
     assert len(pending) == 1 and pending[0]["id"] == res.approval_id
+    # Mk15: marketing has no active head in this fixture, so the item escalates to an admin.
+    assert pending[0]["route"] == "admin-only" and approvals.level_of(pending[0]) == "admin"
 
 
 def test_user_write_is_self_scoped(runner_factory, memory_store):

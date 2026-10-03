@@ -3,6 +3,7 @@
 Known improvements to implement when the time comes. Not yet scheduled — tracked here so they don't get lost.
 
 Status review: 2026-09-13 (session 022) — items 2, 4, 7, 8 DONE; item 3 PARTIAL (LLM-first extraction live, keyword fallback retained); rest OPEN.
+Status review: 2026-10-03 (session 029) — item 11 DONE and the item-2 dept follow-ups closed (Mk15: two-level approvals, dept tools via head, useful heads).
 
 ---
 
@@ -27,6 +28,8 @@ Identity is currently just `admin` + department members. Add a **dept head** rol
 This interacts with the memory write path (`app/agent/graph.py` `reflect`, central-write HITL at line ~445) and the approvals model (`app/memory/approvals.py`), plus Casbin policy + member roles.
 
 > Status 2026-09-13: implemented — `{dept}_head` roles, dept-HITL gate in `reflect`, `GET/POST /api/dept/approvals/*`, admin escalation, head UI view. See `ref_docs/plans/plan_mk12_dept_head.md`.
+>
+> Status 2026-10-03 (Mk15, session 029): dept follow-ups closed — per-department `head-only` / `head+admin` mode, critical dept tools routed head → admin, head reject final, admin queue = escalations only, heads get chat/keys + roster + scoped member management + own-dept memory/skills. See `ref_docs/plans/plan_mk15_two_level_dept_approvals.md`.
 
 ---
 
@@ -75,4 +78,10 @@ For ambiguous tasks, ask clarifying questions rather than assuming intent — si
 - Allow fixes/updates to the codebase to be made **through the chat UI** (agent edits code, user reviews/applies).
 - Lowest priority — treat as a stretch goal after tool connectivity (7) and model switching (8) are solid.  
 
-## 11. After creating an ID provide some sets of feature so that for each approval is not required. 
+## 11. After creating an ID provide some sets of feature so that for each approval is not required. — DONE (Mk15, session 029)
+
+> Status 2026-10-03: implemented as an approve-once allowlist. When approving, a head (or admin) ticks
+> *Always allow this exact action*; the rule is keyed on `(member, action, args_hash)` — same member,
+> same action, byte-identical arguments — so an exact repeat no longer suspends while any change does.
+> Critical tools and central memory are never eligible. Admins list/revoke all rules (**Always allowed**
+> tab), heads their own department's. See `ref_docs/plans/plan_mk15_two_level_dept_approvals.md` §3.3.

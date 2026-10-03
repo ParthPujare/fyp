@@ -533,16 +533,24 @@ def test_dashboard_department_registration_writes_shared_rules(dashboard_on_pg):
     resp = client.post("/api/departments", json={"name": "legal", "service": "legal", "service_url": ""}, headers=AUTH)
     assert resp.status_code == 200, resp.text
     with store._pool.connection() as conn:
-        got = conn.execute("SELECT v0, source, created_by FROM policy_rules WHERE v1 = 'legal' ORDER BY v0").fetchall()
+        got = conn.execute(
+            "SELECT DISTINCT v0, source, created_by FROM policy_rules WHERE v1 = 'legal' ORDER BY v0"
+        ).fetchall()
     assert [(r["v0"], r["source"], r["created_by"]) for r in got] == [
         ("legal_agent", "dashboard", "admin@acme.com"),
         ("legal_head", "dashboard", "admin@acme.com"),
     ]
+    # Mk15: granular rows (own resources + dept/user memory), never the old `*, *` wildcard
+    assert store.has_row(("p", "legal_agent", "legal", "legal", "read"))
+    assert store.has_row(("p", "legal_head", "legal", "memory_dept", "write"))
+    assert not store.has_row(("p", "legal_agent", "legal", "*", "*"))
     listed = {d["name"] for d in client.get("/api/departments", headers=AUTH).json()}
     assert "legal" in listed
     # a toolkit grant goes to the same table
     dash._ensure_toolkit_policy_rows("slack", "admin@acme.com")
     assert store.has_row(("p", "hr_agent", "hr", "slack", "write"))
+    assert store.has_row(("p", "hr_head", "hr", "slack", "write"))  # Mk15: heads mirror members
+    assert store.has_row(("p", "legal_agent", "legal", "slack", "read"))  # registered depts too
 
 
 def test_dashboard_skill_editor_round_trip_on_the_database(dashboard_on_pg):

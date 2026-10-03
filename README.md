@@ -268,7 +268,9 @@ checkpointer; the frozen memory snapshot is loaded once per thread and reused.
 Central-tier memory writes and **`risk=critical` tools** (e.g. finance transfers)
 **suspend** the run for HITL approval; admins decide via
 `POST /approvals/{id}/decide` (JWT-verified, admin role required) or from the
-dashboard, and the run resumes.
+dashboard, and the run resumes. Since Mk15 a department's items go to its **head**
+first (see *Two-level department approvals* below); a `{dept}_head` JWT can call the
+same `decide` endpoint for its own department's step 1.
 
 ```bash
 curl -s -X POST localhost:8001/chat \
@@ -310,11 +312,58 @@ curl -s -X POST localhost:8001/chat \
   / Reject buttons that resume the exact suspended thread, a **Members** tab
   (add / edit role+dept+scopes / activate / deactivate / reset password, lockout-
   guarded, audit-logged) and a **Departments** tab (register a department — the
-  record lands in the store and a default `p, <role>, <dept>, *, *` row is
-  appended to `policy.csv` so its role is immediately grantable).
+  record lands in the store and granular member + head `p` rows are added to the
+  policy so its roles are immediately grantable; pick each department's approval
+  mode here).
 - **Any-member chat (Mk2)** — active members sign in and get the Chat tab; the
   dashboard `POST /api/chat` verifies the member JWT and forwards it to the
   gateway (no CORS). Admin + member sessions coexist with an identity switcher.
+
+### Two-level department approvals + approve-once allowlist (Mk15)
+
+Who must approve a gated item is decided in one place, `app/agent/routing.py`
+(`route_for`, pure and unit-tested):
+
+| Item | Route |
+|------|-------|
+| `user/*` memory | none (commits) |
+| `central` memory | admin only — never "always allowed" |
+| `dept/X` memory by a member | X's mode: **`head-only`** (default) or **`head+admin`**; X's own head auto-commits |
+| `risk=critical` tool by a member | always **head, then admin** — even in a `head-only` department |
+| `risk=write` tool by a member | not gated, unless `APPROVALS__GATE_WRITE_TOOLS=true` (then X's mode) |
+| anything from a department with no active head | admin only (escalation) |
+
+- **Mode per department** — an admin switches `head-only ↔ head+admin` in the
+  Departments tab (`PATCH /api/departments/{name}`). It applies to new requests only:
+  an approval keeps the route it was created with.
+- **One suspension, two steps** — the run suspends once. On a `head+admin` item the
+  head's approve only moves the row to the admin step (`level: head → admin`, still
+  `pending`, nothing resumes); the admin's decision is terminal and the requester's own
+  machine then resumes (Mk14). **A head reject is final** — an admin cannot revive it
+  (409). Every step is recorded on the row (`steps: [{level, by, at, decision,
+  comment}]`), audited (`head-hitl` / `admin-hitl`, attributed to the decider) and shown
+  in the Ops trajectory.
+- **Separate queues** — heads see step 1 of their own department
+  (`/api/dept/approvals/pending`); admins see central items, admin-only tools and
+  **escalations only**: items at the admin step ("Step 1 ✓") and items of departments
+  with no active head. A `head-only` item a head can decide never reaches the admin queue.
+- **Approve once vs always** (todo #11) — when approving, a head or admin can tick
+  *Always allow this exact action*. That creates an allowlist rule keyed on
+  `(member, action, args_hash)` — same member, same action
+  (`memory:<scope>:<op>` / `tool:<name>`), byte-identical canonical arguments. An exact
+  repeat then runs without suspending (audit `ALLOW reason=allowlist`); any changed
+  argument, or another member, goes back to a human. Critical tools and central memory
+  are never eligible (422). On a `head+admin` item the rule takes effect only once the
+  admin step approves. Rules are listed/revoked under **Always allowed** (admin: all;
+  head: own department) — `GET /api/allowlist`, `DELETE /api/allowlist/{member}/{action}/{args_hash}`.
+- **Useful heads** — a `{dept}_head` gets Chat + Account (own BYOK keys), the department
+  queue, a **My department** tab (roster, add a member with the department's member role,
+  deactivate / re-activate / reset password for own non-head members, the department's
+  always-allowed rules, edit own-department skills) and an editable `dept/<own>` scope in
+  the Memory tab. Heads cannot create heads or admins, change roles/departments, or touch
+  another department (403).
+- **Raw-API parity** — the gateway `POST /approvals/{id}/decide` accepts a head JWT with
+  the same step-1 rules, plus `always_allow` / `comment` in the body.
 
 ### Skills (Milestone 6)
 
@@ -515,6 +564,9 @@ instead of failing on the first message.
 - skills: parse/validation, skill RBAC matrix, per-role schema exposure, nested calls go through intercept (deny inside a skill), SKILL_USE trace + audit rows, hot reload on fresh settings
 - evals: deterministic checks pass on clean runs / fail on missing audit pairs, judge suite (scripted MockLLM verdicts, parse/invalid-score handling), EVAL events traced + integrity preserved, eval-on-completion-only, trajectory PII masking
 - attack: A1 policy-matrix oracle, A2/A3 prompt-injection (message + tool-output + memory poisoning), A4 skill misuse + registry path-escape, A5 loop-abuse (deny-storm / budget / steps / timeout), A6 HITL-bypass (pre-approval no-op, reject-never-executes, 403/401, double-decide), A7/A8 trace+audit integrity tamper detection
+- routing (Mk15): the routing table (`user→none`, `central→admin`, dept memory by mode, no-head escalation, critical → head+admin, write tools by flag, head/admin actors), allowlist keys (action, canonical args, volatile-key strip, eligibility)
+- two-level approvals (Mk15): store steps (`decide_step`, legacy rows, tool attribution), head-only and head+admin chains end to end (queues, step history, owner resume, audit `head-hitl`/`admin-hitl`, trace steps), reject-final 409, mode switch does not re-route, escalation, critical dept tools head-first, always-allow (exact repeat auto-commits, per-member, exact-args, effective only after the admin step, 422 ineligible, revoke), departments mode API, head roster + scoped member management, head dept memory/skills, gateway head decide twin
+- attack (Mk15): 2-head step-1 race / 2-admin step-2 race / head-vs-admin race / double owner resume — one winner each; allowlist bypass attempts (cross-member, tampered args, forged rule for a critical tool or central write, member minting/revoking rules, rule created after a reject)
 - smoke: role-aware hello for every role end-to-end
 
 ## Next milestones
@@ -522,4 +574,4 @@ instead of failing on the first message.
 1. **Plan Mk5** (`ref_docs/plans/plan_mk5_custom_byot.md`): finish the direct provider layer. Note the two Mk5 docs currently disagree — `plan_mk5_custom_byot.md` keeps the multi-tenant encrypted vault, `plan_mk5_local_byok.md` replaces it with single-user `.env` config. Pick one before building further.
 2. **Plan Mk2 Phase 6** (`ref_docs/plans/plan_mk2_web_ui_members.md`): report + recorded web demo — the only open Mk2 item.
 3. Mk1 stretch (weeks 15–16): `learn_skill` auto-gen + HITL; Telegram approval adapter; LangFuse adapter; trajectory search / replay / fork — remains optional.
-4. Backlog in `ref_docs/todo.md`: dept-head approval role for dept-tier writes, real external tools behind skills (Composio-style), per-user auto-generated skills, admin-only dual-session login.
+4. Backlog in `ref_docs/todo.md`: per-user auto-generated skills, clarifying questions, admin-only dual-session login. (Dept-head approvals, real external tools and approve-once rules are done — Mk12 / Mk9 / Mk15.)

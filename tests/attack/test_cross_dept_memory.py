@@ -106,8 +106,10 @@ def test_write_to_hr_and_central_is_denied_and_audited(tmp_path, dept_apps, exec
     resources = {(e["decision"], e["resource"]["type"], e["resource"]["id"]) for e in entries}
     assert ("DENY", "memory", "central") in resources  # alice cannot write central
     assert result.interrupted and result.approval_id is not None  # own dept write pends (Mk12)
-    pending = approvals.pending_for_dept("marketing")
+    pending = [i for i in approvals.pending_items() if approvals.dept_of(i) == "marketing"]
     assert len(pending) == 1 and pending[0]["id"] == result.approval_id
+    # Mk15: marketing has no active head in this fixture, so the item escalates to an admin.
+    assert pending[0]["route"] == "admin-only" and approvals.level_of(pending[0]) == "admin"
     assert "hiring freeze" not in {i.key for i in store.items_in(("central",))}
     assert "hiring freeze" not in {
         i.key for i in store.items_in(("dept", "hr"))

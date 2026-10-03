@@ -246,9 +246,17 @@ def test_register_department_through_api(client, tmp_policy, member_store):
     body = resp.json()
     assert body["name"] == "legal"
     assert body["role"] == "legal_agent"
-    # p row present in the (temp) policy file — exactly once, never duplicated
+    # granular p rows (Mk15) present in the (temp) policy file — exactly once, never the
+    # old over-broad `*, *` wildcard — for the member role AND its head role
     rows = tmp_policy.read_text(encoding="utf-8").splitlines()
-    assert rows.count("p, legal_agent, legal, *, *") == 1
+    assert "p, legal_agent, legal, *, *" not in rows
+    for role in ("legal_agent", "legal_head"):
+        assert rows.count(f"p, {role}, legal, contracts, read") == 1
+        assert rows.count(f"p, {role}, legal, legal, create") == 1
+        assert rows.count(f"p, {role}, legal, memory_dept, write") == 1
+        assert rows.count(f"p, {role}, legal, memory_central, read") == 1
+        assert f"p, {role}, legal, memory_central, write" not in rows
+    assert body["approval_mode"] == "head-only"
     # department visible in the list with members + resources
     depts = client.get("/api/departments", headers=AUTH).json()
     legal = next(d for d in depts if d["name"] == "legal")
@@ -258,10 +266,11 @@ def test_register_department_through_api(client, tmp_policy, member_store):
 
 
 def test_register_department_policy_row_is_grantable(client, tmp_policy, member_store):
-    """The appended `*, *` row grants the new role within its own domain."""
+    """The appended granular rows grant the new role its own resources — and only those."""
     client.post(
         "/api/departments",
-        json={"name": "legal", "service": "legal", "service_url": "http://127.0.0.1:8007"},
+        json={"name": "legal", "service": "legal", "service_url": "http://127.0.0.1:8007",
+              "resources": ["contracts"]},
         headers=AUTH,
     )
     member_store.create(
@@ -269,8 +278,13 @@ def test_register_department_policy_row_is_grantable(client, tmp_policy, member_
     )
     enforcer = PolicyEnforcer(policy_path=tmp_policy)
     assert enforcer.enforce("nora@acme.com", "legal", "contracts", "read") is True
+    assert enforcer.enforce("nora@acme.com", "legal", "memory_dept", "write") is True
     # ...but NOT in another domain
     assert enforcer.enforce("nora@acme.com", "hr", "hr", "read") is False
+    # Mk15: no wildcard any more — no central writes, no other department's critical tools
+    assert enforcer.enforce("nora@acme.com", "legal", "memory_central", "write") is False
+    assert enforcer.enforce("nora@acme.com", "legal", "finance", "transfer") is False
+    assert enforcer.enforce("nora@acme.com", "legal", "hr", "delete") is False
 
 
 def test_register_department_default_role_and_errors(client, tmp_policy):
@@ -302,10 +316,12 @@ def test_register_department_appends_new_row_once(client, tmp_policy):
         headers=AUTH,
     )
     assert resp.status_code == 200
-    assert lines().count("p, research_agent, research, *, *") == 1
+    assert lines().count("p, research_agent, research, research, read") == 1
+    assert lines().count("p, research_head, research, memory_dept, write") == 1
+    size = len(lines())
 
-    _append_policy_row("research_agent", "research")
-    assert lines().count("p, research_agent, research, *, *") == 1
+    _append_policy_row("research_agent", "research", objects=["research"])
+    assert len(lines()) == size  # idempotent: nothing appended twice
 
 
 def test_departments_unchanged_for_seeds(client):

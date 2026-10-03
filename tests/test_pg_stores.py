@@ -603,3 +603,87 @@ def test_one_shared_store_instance_is_safe_across_request_threads(pg):
         assert conn.execute("SELECT COUNT(*) AS n FROM approvals WHERE status = 'approved'").fetchone()["n"] == 12 * 12
     stats = pool.get_stats()
     assert stats["requests_waiting"] == 0 and stats["pool_available"] == stats["pool_size"]  # nothing leaked
+
+
+# ================================================================ contract: Mk15 levels + allowlist
+
+
+def test_mk15_approval_steps_on_both_backends(stores):
+    a = stores.approvals
+    res, actor = {"type": "memory", "id": "dept/hr"}, {"sub": "bob@acme.com"}
+    aid = a.create("run-s", "t-s", res, actor, {"op": "add", "text": "s"},
+                   route="head+admin", dept="hr", action="memory:dept/hr:add", args_hash="h1")
+    got = a.get(aid)
+    assert got["level"] == "head" and got["steps"] == [] and got["route"] == "head+admin"
+    assert got["action"] == "memory:dept/hr:add" and got["args_hash"] == "h1"
+    assert a.find("run-s", res, {"op": "add", "text": "s"}) == aid
+
+    mid = a.decide_step(aid, True, "hhead@acme.com", as_level="head", comment="ok", always_allow=True)
+    assert mid["status"] == "pending" and mid["level"] == "admin"
+    assert mid["steps"][0]["by"] == "hhead@acme.com" and mid["steps"][0]["always_allow"] is True
+    assert aid not in {i["id"] for i in a.pending_for_dept("hr")}
+    assert aid in {i["id"] for i in a.pending_for_level("admin")}
+    with pytest.raises(ValueError, match="waiting on an admin"):
+        a.decide_step(aid, True, "hhead@acme.com", as_level="head")
+    with pytest.raises(ValueError, match="has not been decided"):
+        a.claim_resume(aid, "bob@acme.com")
+
+    done = a.decide_step(aid, True, "admin@acme.com", as_level="admin")
+    assert done["status"] == "approved" and done["level"] == "done"
+    assert [s["level"] for s in done["steps"]] == ["head", "admin"]
+    assert a.claim_resume(aid, "bob@acme.com")["resumed_by"] == "bob@acme.com"
+
+    # a tool item is head-owned only through the dept column; legacy rows default to head/[]
+    tool = a.get(a.create("run-t", "t-t", {"type": "tool", "id": "finance_transfer"}, actor, {"k": 1}, dept="finance"))
+    assert a.dept_of(tool) == "finance" and a.level_of(tool) == "head"
+    plain = a.get(a.create("run-p", "t-p", {"type": "tool", "id": "finance_transfer"}, actor, {"k": 2}))
+    assert a.dept_of(plain) is None and a.level_of(plain) == "admin" and plain["steps"] == []
+
+
+def test_mk15_step_race_has_one_winner_on_both_backends(stores):
+    a = stores.approvals
+    res = {"type": "memory", "id": "dept/hr"}
+    for n in range(5):
+        aid = a.create(f"run-r{n}", "t", res, {"sub": "bob@acme.com"}, {"op": "add", "text": str(n)}, route="head+admin")
+        barrier, out = threading.Barrier(2), [None, None]
+
+        def worker(i, aid=aid, barrier=barrier, out=out):
+            barrier.wait()
+            try:
+                out[i] = a.decide_step(aid, True, f"head{i}@acme.com", as_level="head")
+            except ValueError as exc:
+                out[i] = exc
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert sum(isinstance(o, dict) for o in out) == 1, out
+        assert len(a.get(aid)["steps"]) == 1
+
+
+def test_mk15_department_mode_and_allowlist_on_both_backends(stores):
+    m = stores.members
+    assert m.get_department("marketing").approval_mode == "head-only"
+    before = m.version
+    assert m.set_department_mode("marketing", "head+admin", actor="admin@acme.com").approval_mode == "head+admin"
+    assert m.department_mode("marketing") == "head+admin" and m.version > before
+    assert m.register_department("legal", "legal", "", approval_mode="head+admin").approval_mode == "head+admin"
+    assert m.get_department("legal").to_public()["approval_mode"] == "head+admin"
+
+    assert m.active_head_count("marketing") == 0
+    m.create("mhead@acme.com", "head1234", role="marketing_head", dept="marketing")
+    assert m.active_head_count("marketing") == 1
+
+    args = {"op": "add", "text": "Our team prefers morning standups.", "match": None}
+    rule = m.allowlist_add("alice@acme.com", "memory:dept/marketing:add", "h1", args, "marketing", "mhead@acme.com")
+    assert rule["args"] == args and rule["dept"] == "marketing" and rule["created_by"] == "mhead@acme.com"
+    m.allowlist_add("alice@acme.com", "memory:dept/marketing:add", "h1", args, "marketing", "someone-else")
+    assert len(m.allowlist_list()) == 1 and m.allowlist_list("hr") == []
+    assert m.allowlist_match("alice@acme.com", "memory:dept/marketing:add", "h1") is True
+    assert m.allowlist_match("alice@acme.com", "memory:dept/marketing:add", "h2") is False
+    assert m.allowlist_match("bob@acme.com", "memory:dept/marketing:add", "h1") is False
+    assert m.allowlist_revoke("alice@acme.com", "memory:dept/marketing:add", "h1", actor="admin@acme.com") is True
+    assert m.allowlist_match("alice@acme.com", "memory:dept/marketing:add", "h1") is False  # no stale cache
+    assert m.allowlist_revoke("alice@acme.com", "memory:dept/marketing:add", "h1", actor="admin@acme.com") is False

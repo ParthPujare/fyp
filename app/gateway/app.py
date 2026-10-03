@@ -29,7 +29,14 @@ from app.auth.users import get_store, is_active_member
 from app.config import get_settings
 from app.harness.audit import open_audit_log
 from app.harness.enforcer import PolicyEnforcer
-from app.memory.approvals import ApprovalStore
+from app.memory.approval_flow import (
+    DecisionError,
+    apply_decision,
+    check_decision,
+    decision_response,
+    is_head,
+)
+from app.memory.approvals import LEVEL_ADMIN, LEVEL_HEAD, ROUTE_HEAD_ADMIN, ApprovalStore
 from app.memory.factory import open_approval_store, open_base_store, open_episodic_store
 from app.memory.recall import RecallService
 from app.ops.factory import open_trace_store
@@ -116,8 +123,10 @@ class ThreadListRequest(BaseModel):
 
 class ApprovalDecisionRequest(BaseModel):
     approve: bool
-    token: str  # admin JWT — the decider is derived from verified claims, never trusted input
+    token: str  # admin/head JWT — the decider is derived from verified claims, never trusted input
     defer: bool = False  # Mk14: record the decision without resuming (owner resumes later)
+    always_allow: bool = False  # Mk15: also allow this exact action for this member from now on
+    comment: str | None = None
 
 
 class ApprovalResumeRequest(BaseModel):
@@ -211,6 +220,8 @@ def chat(req: ChatRequest, runner: Annotated[Runner, Depends(get_runner)]) -> di
         "interrupted": result.interrupted,
         "approval_id": result.approval_id,
         "approval_tier": getattr(result, "approval_tier", None),
+        "approval_level": getattr(result, "approval_level", None),
+        "approval_route": getattr(result, "approval_route", None),
         "connect_required": connect_required,
     }
 
@@ -276,51 +287,60 @@ def decide_approval(
     resumer: Annotated[Any, Depends(get_resumer)],
     approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
 ) -> dict:
-    """Admin-only HITL decision. The caller must present an active admin JWT; the
-    decider identity comes from the verified claims (never from the body).
+    """HITL decision for admins and department heads. The caller must present an active
+    admin or `{dept}_head` JWT; the decider identity comes from the verified claims
+    (never from the body).
 
     Mk14: `defer=True` records the decision without resuming (owner resumes on
     their own machine); default coupled mode is unchanged.
+
+    Mk15 (same rules as the dashboard, for raw-API parity): an admin's decision is
+    terminal. A head decides step 1 of their OWN department's items — on a `head+admin`
+    item an approve only hands it to the admin step (`next_level=admin`, nothing
+    resumes); a reject is final and cannot be revived.
     """
     claims = _verified_active(req.token)
-    if claims.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="only admins may decide approvals")
+    if claims.get("role") == "admin":
+        as_level = LEVEL_ADMIN
+    elif is_head(claims):
+        as_level = LEVEL_HEAD
+    else:
+        raise HTTPException(status_code=403, detail="only admins or department heads may decide approvals")
 
-    entry = approvals.get(approval_id)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
-    if entry["status"] != "pending":
-        raise HTTPException(status_code=409, detail=f"approval {approval_id!r} already {entry['status']}")
-    if req.defer:
-        try:
-            approvals.decide(approval_id, req.approve, claims["sub"])
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
-        except ValueError as exc:  # lost a race with another decider
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        decided = approvals.get(approval_id)
-        return {
-            "approval_id": approval_id,
-            "status": decided["status"],
-            "thread_id": decided["thread_id"],
-            "reply": None,
-            "interrupted": True,
-            "next_approval_id": None,
-            "needs_resume": True,
-        }
-    from app.db import is_enabled
-
-    if is_enabled() and not run_state_is_local(_get_components()["checkpointer"], entry["thread_id"]):
-        raise HTTPException(
-            status_code=409,
-            detail="this run's saved state was not found (was the chat deleted?), so it cannot be resumed",
-        )
     try:
-        approvals.decide(approval_id, req.approve, claims["sub"])
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
-    except ValueError as exc:  # lost a race with another decider
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        entry = check_decision(
+            approvals,
+            approval_id,
+            claims,
+            approve=req.approve,
+            as_level=as_level,
+            always_allow=req.always_allow,
+        )
+        hands_to_admin = (
+            as_level == LEVEL_HEAD and req.approve and ApprovalStore.route_of(entry) == ROUTE_HEAD_ADMIN
+        )
+        if not req.defer and not hands_to_admin:
+            from app.db import is_enabled
+
+            if is_enabled() and not run_state_is_local(_get_components()["checkpointer"], entry["thread_id"]):
+                raise HTTPException(
+                    status_code=409,
+                    detail="this run's saved state was not found (was the chat deleted?), so it cannot be resumed",
+                )
+        decided = apply_decision(
+            approvals,
+            get_store(),
+            approval_id,
+            claims,
+            approve=req.approve,
+            as_level=as_level,
+            always_allow=req.always_allow,
+            comment=req.comment,
+        )
+    except DecisionError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+    if req.defer or decided["status"] == "pending":
+        return decision_response(decided)
     result = resumer(approval_id)
     decided = approvals.get(approval_id)
     return {

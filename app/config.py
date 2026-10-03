@@ -68,6 +68,14 @@ class GuardrailSettings(BaseModel):
     run_timeout_seconds: float = Field(default=120.0, gt=0)
 
 
+class ApprovalSettings(BaseModel):
+    """HITL approval routing (Mk15, see ref_docs/plans/plan_mk15_two_level_dept_approvals.md)."""
+
+    # `risk=critical` tools always suspend. Set this to also suspend `risk=write` department
+    # tools for the department head (these are the tool actions a head can "always allow").
+    gate_write_tools: bool = False
+
+
 class SkillSettings(BaseModel):
     """Skills registry location (folder/markdown registry, see plan_mk1_core_harness.md §9)."""
 
@@ -99,6 +107,7 @@ class Settings(BaseSettings):
     guardrails: GuardrailSettings = GuardrailSettings()
     memory: MemorySettings = MemorySettings()
     skills: SkillSettings = SkillSettings()
+    approvals: ApprovalSettings = ApprovalSettings()
     composio: ComposioSettings = ComposioSettings()
 
     model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")

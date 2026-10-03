@@ -57,22 +57,33 @@ class AgentResult:
     thread_id: str | None = None
     interrupted: bool = False
     approval_id: str | None = None
-    approval_tier: str | None = None  # "tool" | "central" | "dept" — who must approve
+    approval_tier: str | None = None  # "tool" | "central" | "dept" — what is being approved
+    approval_level: str | None = None  # Mk15: "head" | "admin" — the step it waits on first
+    approval_route: str | None = None  # Mk15: "head-only" | "head+admin" | "admin-only"
 
 
-def _suspension(interrupts: list[Any]) -> tuple[str | None, str | None, str | None]:
-    """(approval_id, tier, tool) from the first pending LangGraph interrupt payload."""
+def _suspension(interrupts: list[Any]) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    """(approval_id, tier, tool, level, route) from the first pending LangGraph interrupt."""
     if not interrupts:
-        return None, None, None
+        return None, None, None, None, None
     value = getattr(interrupts[0], "value", None) or {}
     tool = value.get("tool")
     tier = "tool" if tool else str(value.get("tier") or "central")
-    return value.get("approval_id"), tier, tool
+    return value.get("approval_id"), tier, tool, value.get("level"), value.get("route")
 
 
-def _suspended_reply(tier: str | None, tool: str | None, approval_id: str | None) -> str:
+def _suspended_reply(
+    tier: str | None, tool: str | None, approval_id: str | None, route: str | None = None
+) -> str:
     """Reply text for a run that paused for approval before producing an answer."""
-    who = "your department head or an admin" if tier == "dept" else "an admin"
+    if route == "head+admin":
+        who = "your department head and then an admin"
+    elif route == "head-only":
+        who = "your department head"
+    elif route == "admin-only":
+        who = "an admin"
+    else:
+        who = "your department head or an admin" if tier == "dept" else "an admin"
     what = f"run `{tool}`" if tool else "save this to shared memory"
     return (
         f"Waiting for approval: I need {who} to approve before I {what}. "
@@ -176,6 +187,7 @@ def _build_deps(
         memory=settings.memory,
         thread_id=thread_id,
         skills=skills,
+        gate_write_tools=settings.approvals.gate_write_tools,
     )
     return deps, checkpointer
 
@@ -276,12 +288,12 @@ def run_agent(
 
         interrupts = final_state.get("__interrupt__") or []
         interrupted = bool(interrupts)
-        approval_id, tier, tool = _suspension(interrupts)
+        approval_id, tier, tool, level, route = _suspension(interrupts)
         if interrupted:
             trace.add_event(run_id, TraceEventType.GUARDRAIL, actor, {"type": "hitl_suspend", "approval_id": approval_id})
 
         reply = final_state.get("reply") or (
-            _suspended_reply(tier, tool, approval_id) if interrupted else "no reply produced"
+            _suspended_reply(tier, tool, approval_id, route) if interrupted else "no reply produced"
         )
         if not interrupted:
             trace.end_run(run_id, {"output": reply})
@@ -302,6 +314,8 @@ def run_agent(
             interrupted=interrupted,
             approval_id=approval_id,
             approval_tier=tier if interrupted else None,
+            approval_level=level if interrupted else None,
+            approval_route=route if interrupted else None,
         )
     finally:
         _flush_trace(deps.trace if deps is not None else trace, run_id)
@@ -388,7 +402,7 @@ def resume_agent(
             raise
         interrupts = final_state.get("__interrupt__") or []
         interrupted = bool(interrupts)
-        next_id, tier, tool = _suspension(interrupts)
+        next_id, tier, tool, level, route = _suspension(interrupts)
         if interrupted:
             # A further gated call/write: the run is still suspended, so do not close the
             # trace or fire evals — the next decision resumes it again.
@@ -396,7 +410,7 @@ def resume_agent(
                 run_id, TraceEventType.GUARDRAIL, deps.actor, {"type": "hitl_suspend", "approval_id": next_id}
             )
         reply = final_state.get("reply") or (
-            _suspended_reply(tier, tool, next_id) if interrupted else "no reply produced"
+            _suspended_reply(tier, tool, next_id, route) if interrupted else "no reply produced"
         )
         if not interrupted:
             deps.trace.end_run(run_id, {"output": reply, "resumed": True})
@@ -416,6 +430,8 @@ def resume_agent(
             interrupted=interrupted,
             approval_id=next_id if interrupted else approval_id,
             approval_tier=tier if interrupted else None,
+            approval_level=level if interrupted else None,
+            approval_route=route if interrupted else None,
         )
     finally:
         if deps is not None:

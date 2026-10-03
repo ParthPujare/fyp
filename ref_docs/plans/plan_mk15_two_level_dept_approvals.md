@@ -2,7 +2,7 @@
 
 ## Metadata
 - Date: 2026-10-01
-- Status: PLANNED (not started — documentation only, no code changed)
+- Status: **Phases 0–5 BUILT 2026-10-03 (session 029)** — offline suite green on SQLite; NOT yet verified: Postgres run (`make test-pg`), migration 0008 on live Neon, 2-PC browser sign-off (§6). Build notes: §9.
 - Follows: Mk12 (dept head, single-level), Mk13 (shared DB, Docker), Mk14 (owner resume, defer/poll/claim)
 - Closes: `ref_docs/todo.md` dept follow-ups + item #11 (approve-once vs every-time)
 - Scale / runtime (carried from Mk14): unbounded members by design, max 5 PCs / 5 concurrent users in testing; `make run` native demo, Docker keeps working; sharing = `DATABASE_URL` only (`JWT__SECRET`, `LLM__FERNET_KEY`, Composio stay per-PC).
@@ -131,3 +131,19 @@ Backfill: existing `pending` rows keep `level='head'`; `departments` rows defaul
 
 ## 8. Open question for build start
 Q1 (needs 1-line answer before Phase 1): should `risk=critical` dept tools ALWAYS force `head+admin` even in a `head-only` department (recommended), or does `head-only` mean even critical is head-only? Plan defaults to always-`head+admin`; say otherwise and Phase 1 inverts that branch.
+
+## 9. Build notes (session 029, 2026-10-03) — where the build differs from / pins down the plan
+- **Q1 (§8)**: built with the plan default — `risk=critical` dept tools are always `head+admin`, even in a `head-only` department.
+- **One suspension, row-level steps (§3.4 vs §3.5)**: the run suspends once; the head's step-1 approve moves the row `level: head → admin` (still `pending`) and nothing resumes. No second `interrupt()` — §3.5/§3.9 semantics, not the re-interrupt sketched in §3.4.
+- **Extra `approvals` columns**: besides `level`/`steps`, 0008 adds `route`, `dept`, `action`, `args_hash` (creation-time routing; `resource` stays `{type,id}` so the Mk12 dedup key is unchanged).
+- **TEXT, not JSONB**: `steps` / allowlist `args` are JSON-in-TEXT on Postgres too, per the rule at the top of `0002_core_tables.sql` (store code is shared with SQLite and calls `json.loads`). No `CHECK` on `approval_mode`; validated in the store + API.
+- **Non-critical tools (§3.1)**: the router handles them, but `risk=write` dept tools are gated only when `APPROVALS__GATE_WRITE_TOOLS=true` (default off — gating every write tool would change existing behaviour). Read tools are never gated.
+- **Head/admin as requester**: a head's or admin's own critical tool call is `admin-only` (a head does not approve their own step 1).
+- **No active head at creation** → the item is created `admin-only` at the admin step. A head later appointed does not get it back.
+- **`always_allow` on `head+admin`**: recorded on the head's step; the rule is created only when the admin step approves (dropped if the admin rejects).
+- **Step audit timing**: `head-hitl` / `admin-hitl` audit lines (actor = decider) are written when the requester's machine resumes, from the row's `steps`; the step itself is durable on the row at decide time.
+- **Volatile tool-arg strip-list (§3.3)**: `timestamp, ts, request_id, idempotency_key, nonce, trace_id`.
+- **Gateway (§3.6)**: head decide twin built on the existing `POST /approvals/{id}/decide` (role decides the level).
+- **Scoped head management beyond §3.5**: own-dept memory edit reuses `/api/memory/{scope}` (head allowed for `dept/<own>` only); own-dept skills via `GET/PUT /api/dept/skills[/{name}]` (edit only — create/delete and policy rows stay admin).
+- **`_append_policy_row`**: granular rows = `read`/`create` on the service label + registered resources, plus the base memory/recall/pii/skill rows, for `<role>` and `<role>_head`. `_ensure_toolkit_policy_rows` now covers head roles and registered departments.
+- **Thread safety**: `ApprovalStore` decide/claim now hold a process lock (the SQLite store shares one connection across request threads; found by the new race tests — it also hardens the Mk14 claim).

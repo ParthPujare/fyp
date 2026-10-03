@@ -81,8 +81,8 @@ test-db-down:
 
 test-pg:             ## run the whole suite INCLUDING the Postgres tests (starts/stops the throwaway DB)
 	$(MAKE) test-db-up
-	TEST_DATABASE_URL=postgresql://postgres:test@127.0.0.1:55432/postgres uv run pytest; status=$$?; $(MAKE) test-db-down; exit $$status
+	bash -c 'TEST_DATABASE_URL=postgresql://postgres:test@127.0.0.1:55432/postgres uv run pytest; status=$$?; "$(MAKE)" test-db-down; exit $$status'
 
 test-pg-full:        ## whole suite with the MEMBER STORE on Postgres (regression check that it is a drop-in)
 	$(MAKE) test-db-up
-	TEST_BACKEND=postgres TEST_DATABASE_URL=postgresql://postgres:test@127.0.0.1:55432/postgres uv run pytest; status=$$?; $(MAKE) test-db-down; exit $$status
+	bash -c 'TEST_BACKEND=postgres TEST_DATABASE_URL=postgresql://postgres:test@127.0.0.1:55432/postgres uv run pytest; status=$$?; "$(MAKE)" test-db-down; exit $$status'

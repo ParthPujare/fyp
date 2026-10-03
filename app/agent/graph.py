@@ -11,6 +11,11 @@ Graph: START → load_memory → agent ⇄ execute_tools → finalize → reflec
 - `reflect` (graph end, post-response): appends the episodic transcript, extracts
   durable facts, enforces each write via Casbin, applies dedup/budget, and suspends
   central writes through LangGraph `interrupt()` for HITL approval.
+
+Mk15: both gates (dept/central memory writes in `reflect`, gated tools in `execute_tools`)
+ask `app.agent.routing.route_for` who must approve — nobody (allowlist hit / own head), the
+department head, head then admin, or an admin. The run suspends once; the approval row
+carries the step it waits on, and the run resumes only when the last step is decided.
 """
 
 from __future__ import annotations
@@ -23,10 +28,23 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from app.agent.guardrails import GuardrailTracker
+from app.agent.routing import (
+    KIND_MEMORY,
+    KIND_TOOL,
+    RISK_CRITICAL,
+    RISK_WRITE,
+    ROUTE_NONE,
+    action_key_for,
+    allowlist_payload,
+    args_hash,
+    initial_level,
+    is_allowlist_eligible,
+    route_for,
+)
 from app.agent.tools import TOOL_REGISTRY, ToolExecutor, ToolResult
 from app.config import MemorySettings
 from app.harness.audit import AuditLog
-from app.harness.enforcer import PolicyEnforcer
+from app.harness.enforcer import PolicyEnforcer, dept_of_scope, head_role_for
 from app.harness.intercept import intercept_tool
 from app.harness.sanitize import MASK, sanitize_text, sanitize_tool_result
 from app.llm.base import LLMProvider
@@ -77,6 +95,83 @@ class AgentDeps:
     thread_id: str
     skills: SkillRegistry
     executed_calls: list[dict[str, Any]] = field(default_factory=list)
+    gate_write_tools: bool = False  # Mk15: also suspend risk=write dept tools for the head
+
+
+def _resolve_gate(
+    deps: AgentDeps,
+    claims: dict[str, Any],
+    *,
+    kind: str,
+    payload: dict[str, Any],
+    scope: str = "",
+    tool_name: str = "",
+    risk: str = "read",
+) -> dict[str, Any]:
+    """Look up the routing inputs for one gated item and ask the router (Mk15).
+
+    Memory writes belong to the scope's department; tool calls are attributed to the
+    caller's own department (RBAC already confined them to it), admins to none.
+    """
+    from app.auth.users import get_store
+
+    members = get_store()
+    sub = str(claims.get("sub", ""))
+    role = str(claims.get("role", ""))
+    actor_dept = str(claims.get("dept", ""))
+    if kind == KIND_MEMORY:
+        dept = dept_of_scope(scope) or ""
+        action = action_key_for(KIND_MEMORY, scope=scope, op=str(payload.get("op", "")))
+    else:
+        dept = "" if role == "admin" or actor_dept == "admin" else actor_dept
+        action = action_key_for(KIND_TOOL, tool=tool_name)
+    digest = args_hash(allowlist_payload(kind, payload))
+    eligible = bool(dept) and is_allowlist_eligible(kind, scope=scope, risk=risk)
+    hit = eligible and members.allowlist_match(sub, action, digest)
+    route = route_for(
+        kind=kind,
+        scope=scope,
+        risk=risk,
+        actor_role=role,
+        actor_dept=actor_dept,
+        dept_mode=members.department_mode(dept) if dept else "head-only",
+        head_count=members.active_head_count(dept) if dept else 0,
+        allowlist_hit=hit,
+        gate_write_tools=deps.gate_write_tools,
+    )
+    return {
+        "route": route,
+        "level": initial_level(route),
+        "dept": dept or None,
+        "action": action,
+        "args_hash": digest,
+        "allowlist_hit": hit and route == ROUTE_NONE,
+    }
+
+
+def _audit_steps(deps: AgentDeps, approval_id: str, resource: dict[str, Any]) -> list[dict[str, Any]]:
+    """Audit every decision step of a resumed approval, attributed to its decider (Mk15).
+
+    Runs on the requester's machine when the run resumes: `head-hitl` for a department
+    head's step, `admin-hitl` for an admin's. Returns the steps for the trace.
+    """
+    entry = deps.approvals.get(approval_id) or {}
+    steps = list(entry.get("steps") or [])
+    dept = entry.get("dept") or dept_of_scope(str(resource.get("id", ""))) or ""
+    for step in steps:
+        is_head = step.get("level") == "head"
+        deps.audit.log(
+            decision="APPROVED" if step.get("decision") == "approved" else "REJECTED",
+            resource=resource,
+            actor={
+                "sub": str(step.get("by", "")),
+                "role": head_role_for(dept) if is_head and dept else "admin",
+                "dept": dept if is_head and dept else "admin",
+            },
+            run_id=deps.run_id,
+            reason="head-hitl" if is_head else "admin-hitl",
+        )
+    return steps
 
 
 def _summary(state: AgentState, deps: AgentDeps) -> str:
@@ -247,25 +342,73 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
         messages: list[dict[str, Any]] = []
         executed: list[dict[str, Any]] = []
 
+        def _is_gated(tool: Any) -> bool:
+            return tool.risk_level == RISK_CRITICAL or (
+                tool.risk_level == RISK_WRITE and deps.gate_write_tools
+            )
+
         def _critical_gate(
             tool: Any, args: dict[str, Any]
         ) -> ToolResult | None:
-            """HITL gate for risk=critical tools (plan_mk1_core_harness.md §6, §8): suspend via
-            interrupt() and execute only after admin approval."""
+            """HITL gate for gated tools (plan_mk1_core_harness.md §6, §8; routed since Mk15):
+            suspend via interrupt() and execute only after the routed approval — the
+            department head, head then admin, or an admin. An "always allow" rule for this
+            exact call skips the suspension."""
             actor = deps.actor
             resource = {"type": "tool", "id": tool.name}
-            approval_id = deps.approvals.create(
-                deps.run_id,
-                deps.thread_id,
-                resource,
-                actor,
-                {"tool": tool.name, "args": args},
-            )
+            payload = {"tool": tool.name, "args": args}
+            gate: dict[str, Any] = {}
+            # A resumed run re-enters here: re-attach to its own approval before routing.
+            approval_id = deps.approvals.find(deps.run_id, resource, payload)
+            if approval_id is None:
+                gate = _resolve_gate(
+                    deps,
+                    state["claims"],
+                    kind=KIND_TOOL,
+                    payload=payload,
+                    tool_name=tool.name,
+                    risk=tool.risk_level,
+                )
+                if gate["route"] == ROUTE_NONE:
+                    if gate["allowlist_hit"]:
+                        deps.audit.log(
+                            decision="ALLOW", resource=resource, actor=actor, run_id=deps.run_id, reason="allowlist"
+                        )
+                        deps.trace.add_event(
+                            deps.run_id,
+                            TraceEventType.GUARDRAIL,
+                            actor,
+                            {
+                                "type": "allowlist",
+                                "tool": tool.name,
+                                "action": gate["action"],
+                                "args_hash": gate["args_hash"],
+                            },
+                        )
+                    return None
+                approval_id = deps.approvals.create(
+                    deps.run_id,
+                    deps.thread_id,
+                    resource,
+                    actor,
+                    payload,
+                    level=gate["level"],
+                    route=gate["route"],
+                    dept=gate["dept"],
+                    action=gate["action"],
+                    args_hash=gate["args_hash"],
+                )
             deps.trace.add_event(
                 deps.run_id,
                 TraceEventType.GUARDRAIL,
                 actor,
-                {"type": "hitl_suspend", "approval_id": approval_id, "tool": tool.name},
+                {
+                    "type": "hitl_suspend",
+                    "approval_id": approval_id,
+                    "tool": tool.name,
+                    "level": gate.get("level"),
+                    "route": gate.get("route"),
+                },
             )
             approved = interrupt(
                 {
@@ -275,17 +418,26 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                     "tool": tool.name,
                     "args": args,
                     "thread_id": deps.thread_id,
+                    "level": gate.get("level"),
+                    "route": gate.get("route"),
+                    "action": gate.get("action"),
+                    "args_hash": gate.get("args_hash"),
                 }
             )
+            steps = _audit_steps(deps, approval_id, resource)
             if approved:
                 deps.audit.log(decision="APPROVED", resource=resource, actor=actor, run_id=deps.run_id, reason="hitl")
                 return None
             deps.audit.log(decision="REJECTED", resource=resource, actor=actor, run_id=deps.run_id, reason="hitl")
+            by_head = bool(steps) and steps[-1].get("level") == "head"
             return ToolResult(
                 ok=False,
                 denied=True,
                 reason="hitl",
-                content=f"{tool.name} was rejected by an admin and will not run.",
+                content=(
+                    f"{tool.name} was rejected by "
+                    f"{'your department head' if by_head else 'an admin'} and will not run."
+                ),
             )
 
         def _outcome(result: ToolResult) -> str:
@@ -368,7 +520,7 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                     audit=deps.audit,
                     run_id=deps.run_id,
                 )
-                if result is None and tool.risk_level == "critical":
+                if result is None and _is_gated(tool):
                     result = _critical_gate(tool, args)
                 if result is None:
                     if tool.handler == "recall":
@@ -508,25 +660,50 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                 )
                 continue
 
-            needs_hitl = fact.scope == SCOPE_CENTRAL or (
+            # Mk15 routing: central -> admin; dept -> nobody (own head / allowlist hit),
+            # the head, or head then admin. A resumed run re-attaches to its own approval
+            # first, so a decided item is never re-routed or matched against the allowlist.
+            payload = {"op": fact.op, "text": fact.text, "match": fact.match}
+            gate: dict[str, Any] = {}
+            approval_id: str | None = None
+            if fact.scope == SCOPE_CENTRAL or (
                 fact.scope.startswith("dept/")
                 and not deps.enforcer.is_dept_head(claims, fact.scope)
-            )
-            if needs_hitl:
+            ):
+                approval_id = deps.approvals.find(deps.run_id, resource, payload)
+                if approval_id is None:
+                    gate = _resolve_gate(
+                        deps, claims, kind=KIND_MEMORY, payload=payload, scope=fact.scope
+                    )
+                    if gate["route"] != ROUTE_NONE:
+                        approval_id = deps.approvals.create(
+                            deps.run_id,
+                            deps.thread_id,
+                            resource,
+                            actor,
+                            payload,
+                            level=gate["level"],
+                            route=gate["route"],
+                            dept=gate["dept"],
+                            action=gate["action"],
+                            args_hash=gate["args_hash"],
+                        )
+            if approval_id is not None:
                 tier = "central" if fact.scope == SCOPE_CENTRAL else "dept"
                 reason = "hitl" if tier == "central" else "dept-hitl"
-                approval_id = deps.approvals.create(
-                    deps.run_id,
-                    deps.thread_id,
-                    resource,
-                    actor,
-                    {"op": fact.op, "text": fact.text, "match": fact.match},
-                )
                 deps.trace.add_event(
                     deps.run_id,
                     TraceEventType.MEMORY_WRITE,
                     actor,
-                    {"scope": fact.scope, "op": fact.op, "decision": "pending", "approval_id": approval_id, "tier": tier},
+                    {
+                        "scope": fact.scope,
+                        "op": fact.op,
+                        "decision": "pending",
+                        "approval_id": approval_id,
+                        "tier": tier,
+                        "level": gate.get("level"),
+                        "route": gate.get("route"),
+                    },
                 )
                 approved = interrupt(
                     {
@@ -536,8 +713,13 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                         "text": fact.text,
                         "thread_id": deps.thread_id,
                         "tier": tier,
+                        "level": gate.get("level"),
+                        "route": gate.get("route"),
+                        "action": gate.get("action"),
+                        "args_hash": gate.get("args_hash"),
                     }
                 )
+                steps = _audit_steps(deps, approval_id, resource)
                 if approved:
                     editor.apply(fact)
                     deps.audit.log(decision="APPROVED", resource=resource, actor=actor, run_id=deps.run_id, reason=reason)
@@ -545,7 +727,14 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                         deps.run_id,
                         TraceEventType.MEMORY_WRITE,
                         actor,
-                        {"scope": fact.scope, "op": fact.op, "decision": "approved", "approval_id": approval_id, "tier": tier},
+                        {
+                            "scope": fact.scope,
+                            "op": fact.op,
+                            "decision": "approved",
+                            "approval_id": approval_id,
+                            "tier": tier,
+                            "steps": steps,
+                        },
                     )
                 else:
                     deps.audit.log(decision="REJECTED", resource=resource, actor=actor, run_id=deps.run_id, reason=reason)
@@ -553,7 +742,14 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                         deps.run_id,
                         TraceEventType.MEMORY_WRITE,
                         actor,
-                        {"scope": fact.scope, "op": fact.op, "decision": "rejected", "approval_id": approval_id, "tier": tier},
+                        {
+                            "scope": fact.scope,
+                            "op": fact.op,
+                            "decision": "rejected",
+                            "approval_id": approval_id,
+                            "tier": tier,
+                            "steps": steps,
+                        },
                     )
             else:
                 try:
@@ -566,13 +762,20 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                         {"scope": fact.scope, "op": fact.op, "decision": "skipped", "reason": exc.code},
                     )
                     continue
-                deps.audit.log(decision="ALLOW", resource=resource, actor=actor, run_id=deps.run_id, reason="rbac")
-                deps.trace.add_event(
-                    deps.run_id,
-                    TraceEventType.MEMORY_WRITE,
-                    actor,
-                    {"scope": fact.scope, "op": outcome.op, "decision": "allowed"},
+                allowlisted = bool(gate.get("allowlist_hit"))
+                deps.audit.log(
+                    decision="ALLOW",
+                    resource=resource,
+                    actor=actor,
+                    run_id=deps.run_id,
+                    reason="allowlist" if allowlisted else "rbac",
                 )
+                allowed_event: dict[str, Any] = {"scope": fact.scope, "op": outcome.op, "decision": "allowed"}
+                if allowlisted:
+                    allowed_event.update(
+                        reason="allowlist", action=gate["action"], args_hash=gate["args_hash"]
+                    )
+                deps.trace.add_event(deps.run_id, TraceEventType.MEMORY_WRITE, actor, allowed_event)
                 for evicted in outcome.evicted:
                     deps.trace.add_event(
                         deps.run_id,

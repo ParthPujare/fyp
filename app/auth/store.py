@@ -56,6 +56,12 @@ class DepartmentError(MemberError):
     """Department not found / invalid."""
 
 
+# Mk15: who must approve a department's gated items (set per department by an admin).
+APPROVAL_MODE_HEAD_ONLY = "head-only"
+APPROVAL_MODE_HEAD_ADMIN = "head+admin"
+APPROVAL_MODES = (APPROVAL_MODE_HEAD_ONLY, APPROVAL_MODE_HEAD_ADMIN)
+
+
 # Seed demo accounts — migrated into the store on first open (plan_mk2 §5).
 # Passwords are the documented demo credentials; only their hashes are stored.
 SEED_MEMBERS: list[dict[str, Any]] = [
@@ -229,6 +235,7 @@ class DepartmentRecord:
     role: str = ""
     created_at: str = ""
     updated_at: str = ""
+    approval_mode: str = APPROVAL_MODE_HEAD_ONLY  # Mk15: head-only | head+admin
 
     def to_public(self) -> dict[str, Any]:
         return {
@@ -237,6 +244,7 @@ class DepartmentRecord:
             "service_url": self.service_url,
             "resources": list(self.resources),
             "role": self.role,
+            "approval_mode": self.approval_mode,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -327,6 +335,28 @@ class MemberStore:
                     role        TEXT NOT NULL,
                     created_at  TEXT NOT NULL,
                     updated_at  TEXT NOT NULL
+                )
+                """
+            )
+            # Mk15 migration (SQLite twin of 0008): per-department approval mode.
+            try:
+                conn.execute(
+                    "ALTER TABLE departments ADD COLUMN approval_mode TEXT NOT NULL"
+                    " DEFAULT 'head-only'"
+                )
+            except sqlite3.OperationalError:
+                pass
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS approval_allowlist (
+                    member     TEXT NOT NULL,
+                    action     TEXT NOT NULL,
+                    args_hash  TEXT NOT NULL,
+                    args       TEXT NOT NULL,
+                    dept       TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (member, action, args_hash)
                 )
                 """
             )
@@ -559,6 +589,10 @@ class MemberStore:
     def _dept_row_to_record(self, row: sqlite3.Row | None) -> DepartmentRecord | None:
         if row is None:
             return None
+        try:
+            mode = row["approval_mode"] or APPROVAL_MODE_HEAD_ONLY
+        except (KeyError, IndexError):  # schema older than Mk15
+            mode = APPROVAL_MODE_HEAD_ONLY
         return DepartmentRecord(
             name=row["name"],
             service=row["service"],
@@ -567,6 +601,7 @@ class MemberStore:
             role=row["role"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            approval_mode=mode,
         )
 
     def list_departments(self) -> list[DepartmentRecord]:
@@ -595,10 +630,12 @@ class MemberStore:
         resources: list[str] | None = None,
         role: str = "",
         actor: str = "admin",
+        approval_mode: str = APPROVAL_MODE_HEAD_ONLY,
     ) -> DepartmentRecord:
         """Register a new department record. Bumps `members_version` (same as any
         policy-affecting mutation) so the enforcer's next build reloads the
         policy file — picking up any p rows written for the new role."""
+        self._validate_mode(approval_mode)
         if self.get_department(name) is not None:
             raise DepartmentExistsError(f"department {name!r} already exists")
         now = _now()
@@ -606,8 +643,17 @@ class MemberStore:
         try:
             conn.execute(
                 "INSERT INTO departments (name, service, service_url, resources, role,"
-                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (name, service, service_url, json.dumps(resources or []), role or f"{name}_agent", now, now),
+                " created_at, updated_at, approval_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    name,
+                    service,
+                    service_url,
+                    json.dumps(resources or []),
+                    role or f"{name}_agent",
+                    now,
+                    now,
+                    approval_mode,
+                ),
             )
             self._bump_version(conn)
             conn.commit()
@@ -617,6 +663,135 @@ class MemberStore:
         dept = self.get_department(name)
         assert dept is not None
         return dept
+
+    @staticmethod
+    def _validate_mode(mode: str) -> None:
+        if mode not in APPROVAL_MODES:
+            raise DepartmentError(
+                f"approval mode must be one of {', '.join(APPROVAL_MODES)} (got {mode!r})"
+            )
+
+    def set_department_mode(self, name: str, mode: str, actor: str = "admin") -> DepartmentRecord:
+        """Switch a department between `head-only` and `head+admin` (Mk15).
+
+        Only items created afterwards follow the new mode: an approval keeps the route it
+        was created with. Bumps `members_version` so every laptop's cache refreshes."""
+        self._validate_mode(mode)
+        if self.get_department(name) is None:
+            raise DepartmentError(f"department {name!r} not found")
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE departments SET approval_mode = ?, updated_at = ? WHERE name = ?",
+                (mode, _now(), name),
+            )
+            self._bump_version(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        self._audit_department(actor, f"approval_mode:{mode}", name)
+        dept = self.get_department(name)
+        assert dept is not None
+        return dept
+
+    def department_mode(self, name: str) -> str:
+        """Approval mode of a department; unregistered departments are `head-only`."""
+        dept = self.get_department(name)
+        return dept.approval_mode if dept is not None else APPROVAL_MODE_HEAD_ONLY
+
+    def active_head_count(self, dept: str) -> int:
+        """Active `{dept}_head` members owning this department (Mk12 escalation check)."""
+        head_role = f"{dept}_head"
+        return sum(1 for m in self.list() if m.active and m.role == head_role and m.dept == dept)
+
+    # ---- approve-once allowlist (Mk15, todo #11) ----
+    # Key = (member, action, args_hash): one member, one action, one exact set of arguments.
+    # Never cached (also not in PgMemberStore): a revoke must apply to the very next request.
+
+    @staticmethod
+    def _allow_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "member": row["member"],
+            "action": row["action"],
+            "args_hash": row["args_hash"],
+            "args": json.loads(row["args"]),
+            "dept": row["dept"],
+            "created_by": row["created_by"],
+            "created_at": row["created_at"],
+        }
+
+    def allowlist_add(
+        self,
+        member: str,
+        action: str,
+        args_hash: str,
+        args: dict[str, Any],
+        dept: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        """Always allow this exact action for this member. Idempotent."""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO approval_allowlist (member, action, args_hash, args, dept,"
+                    " created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    " ON CONFLICT(member, action, args_hash) DO NOTHING",
+                    (member, action, args_hash, json.dumps(args, sort_keys=True), dept, actor, _now()),
+                )
+        finally:
+            conn.close()
+        self._audit_entry(actor, "allowlist:create", "allowlist", f"{member}|{action}|{args_hash}")
+        rule = self.allowlist_get(member, action, args_hash)
+        assert rule is not None
+        return rule
+
+    def allowlist_get(self, member: str, action: str, args_hash: str) -> dict[str, Any] | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM approval_allowlist WHERE member = ? AND action = ? AND args_hash = ?",
+                (member, action, args_hash),
+            ).fetchone()
+        finally:
+            conn.close()
+        return self._allow_row(row) if row is not None else None
+
+    def allowlist_match(self, member: str, action: str, args_hash: str) -> bool:
+        """Exact match only: same member, same action, same canonical arguments."""
+        return self.allowlist_get(member, action, args_hash) is not None
+
+    def allowlist_list(self, dept: str | None = None) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            if dept is None:
+                rows = conn.execute(
+                    "SELECT * FROM approval_allowlist ORDER BY dept, member, action, created_at"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM approval_allowlist WHERE dept = ?"
+                    " ORDER BY member, action, created_at",
+                    (dept,),
+                ).fetchall()
+        finally:
+            conn.close()
+        return [self._allow_row(r) for r in rows]
+
+    def allowlist_revoke(self, member: str, action: str, args_hash: str, actor: str) -> bool:
+        conn = self._connect()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "DELETE FROM approval_allowlist WHERE member = ? AND action = ? AND args_hash = ?",
+                    (member, action, args_hash),
+                )
+        finally:
+            conn.close()
+        if cur.rowcount == 0:
+            return False
+        self._audit_entry(actor, "allowlist:revoke", "allowlist", f"{member}|{action}|{args_hash}")
+        return True
 
     def verify(self, username: str, password: str) -> bool:
         member = self.get(username)
