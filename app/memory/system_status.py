@@ -38,11 +38,16 @@ def reset() -> None:
         _last_error, _last_error_at, _total_errors = None, None, 0
 
 
-def get_status(configured: bool) -> dict[str, Any]:
-    """Dashboard view-model. `configured` = platform key present (caller resolves)."""
+def get_status(
+    configured: bool, source: str = "none", model: str | None = None
+) -> dict[str, Any]:
+    """Dashboard view-model. `configured` = platform key resolvable (DB or env);
+    `source` in {"db", "env", "none"}; `model` names the active free id (never key material)."""
     with _lock:
         return {
             "configured": configured,
+            "source": source,
+            "model": model,
             "last_error": _last_error,
             "last_error_at": _last_error_at,
             "total_errors": _total_errors,

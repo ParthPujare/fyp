@@ -166,6 +166,13 @@ class PgMemberStore(MemberStore):
         # Caches the ENCRYPTED row only; decryption still happens per call in `_llm_key_row`.
         return self._memo(("llmrow", query, params), lambda: MemberStore._fetch_llm_key(self, query, params))
 
+    def get_platform_llm_meta(self) -> tuple[str, str, str] | None:
+        return self._memo(("platformmeta",), lambda: MemberStore.get_platform_llm_meta(self))
+
+    def _fetch_platform_llm(self) -> tuple[str, str, str, str] | None:
+        # Caches the ENCRYPTED row only; decryption still happens per call in `get_platform_llm`.
+        return self._memo(("platformrow",), lambda: MemberStore._fetch_platform_llm(self))
+
     def get_composio_key(self, username: str) -> str | None:
         return self._memo(("composio", username), lambda: MemberStore.get_composio_key(self, username))
 

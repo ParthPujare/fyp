@@ -1794,12 +1794,65 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
           $("memory").appendChild(elm(`<p class="muted">Platform memory: last run fell back (${esc(st.last_error)}${st.last_error_at ? " at " + esc(st.last_error_at) : ""}) — recent facts may be missing.</p>`));
         }
       } catch (e) { /* status is advisory only */ }
+      // Mk16 follow-up: admins manage the shared platform key/model (DB-backed,
+      // used by every instance on this database) right here; members see nothing.
+      if (isAdmin()) { await loadPlatformCard($("memory")); }
       if (!scopes.length) { $("memory").innerHTML += '<p class="muted">No readable memory scopes for this identity.</p>'; return; }
       // Mk15: a head manages their own department's scope; everything else stays read-only.
       const claims = identities[active].claims;
       const ownDept = isHeadRole(claims.role) ? "dept/" + claims.dept : null;
       scopes.forEach((s) => $("memory").appendChild(memoryScope(s, isAdmin() || s.scope === ownDept)));
     } catch (e) { $("memory").textContent = "error: " + e.message; }
+  }
+
+  // ---- Platform extractor config (Mk16 follow-up: admin-only shared key/model) ----
+  async function loadPlatformCard(host) {
+    let cfg;
+    try {
+      cfg = await api("/api/system-memory/config");
+    } catch (e) { host.appendChild(elm('<div class="card"><p class="muted">Platform extractor: unavailable (' + esc(e.message) + ').</p></div>')); return; }
+    const state = cfg.configured
+      ? `saved in shared DB${cfg.source === "env" ? " (using per-machine env key — nothing stored yet)" : ""}${cfg.model ? ", model <code>" + esc(cfg.model) + "</code>" : ""}${cfg.updated_by ? ", by " + esc(cfg.updated_by) : ""}`
+      : "not configured — extraction uses on-device heuristics";
+    const card = elm(`<div class="card">
+      <h3>Platform extractor <span class="pill">${cfg.configured ? esc(cfg.source) : "off"}</span></h3>
+      <p class="muted">${state}. One key in this database serves every instance on it; the key itself is never shown.</p>
+      <div class="row" style="margin:6px 0">
+        <input type="password" id="plat-key" placeholder="${cfg.configured && cfg.source === "db" ? "key saved •••• (leave blank to keep)" : "paste OpenRouter key..."}" style="flex:1">
+      </div>
+      <div class="row" style="margin:6px 0">
+        <input type="text" id="plat-model" value="${esc(cfg.model || "qwen/qwen3.8-27b:free")}" style="flex:1">
+        <button class="ok" id="plat-save">Save</button>
+        <button class="bad" id="plat-clear">Clear</button>
+      </div>
+      <p class="muted">Model must stay a <code>:free</code> id (free routing — anything else is rejected).</p>
+      <div class="status" id="plat-status"></div>
+    </div>`);
+    card.querySelector("#plat-save").addEventListener("click", async () => {
+      const st = card.querySelector("#plat-status");
+      st.textContent = "saving...";
+      try {
+        const body = {};
+        const k = card.querySelector("#plat-key").value.trim();
+        const m = card.querySelector("#plat-model").value.trim();
+        if (k) body.api_key = k;
+        if (m) body.model = m;
+        const out = await api("/api/system-memory/config", { method: "PUT",
+          headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+        st.textContent = "saved (" + out.source + ", " + out.model + ")";
+        card.querySelector("#plat-key").value = "";
+        loadMemory();
+      } catch (e) { st.textContent = "error: " + e.message; }
+    });
+    card.querySelector("#plat-clear").addEventListener("click", async () => {
+      const st = card.querySelector("#plat-status");
+      try {
+        const out = await api("/api/system-memory/config", { method: "DELETE" });
+        st.textContent = out.configured ? "cleared DB row (env key active)" : "cleared — no key anywhere now";
+        loadMemory();
+      } catch (e) { st.textContent = "error: " + e.message; }
+    });
+    host.appendChild(card);
   }
 
   function memoryScope(s, editable) {

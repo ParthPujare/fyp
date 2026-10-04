@@ -384,6 +384,19 @@ class MemberStore:
                 )
             except sqlite3.OperationalError:
                 pass
+            # Mk16 follow-up (SQLite twin of 0009): the single shared platform
+            # row (id = 'openrouter') — model plaintext, key Fernet-encrypted.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS platform_llm (
+                    id                TEXT PRIMARY KEY,
+                    model             TEXT NOT NULL,
+                    api_key_encrypted TEXT NOT NULL,
+                    updated_by        TEXT NOT NULL,
+                    updated_at        TEXT NOT NULL
+                )
+                """
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS member_composio_keys (
@@ -1033,6 +1046,115 @@ class MemberStore:
 
     def _audit_key(self, actor: str, action: str, username: str) -> None:
         self._audit_entry(actor, action, "llm_key", username)
+
+    # ---- platform llm (Mk16 follow-up: DB-backed shared key) ----
+
+    PLATFORM_LLM_ID = "openrouter"
+
+    def get_platform_llm_meta(self) -> tuple[str, str, str] | None:
+        """(model, updated_by, updated_at) for the shared row — no decryption.
+
+        Status surfaces must never decrypt: one stale token (rotated
+        `LLM__FERNET_KEY`) would otherwise fail the whole listing.
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT model, updated_by, updated_at FROM platform_llm WHERE id = ?",
+                (self.PLATFORM_LLM_ID,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return (row["model"], row["updated_by"], row["updated_at"]) if row else None
+
+    def _fetch_platform_llm(self) -> tuple[str, str, str, str] | None:
+        """(model, ENCRYPTED key, updated_by, updated_at) — never decrypts, safe to cache."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT model, api_key_encrypted, updated_by, updated_at FROM platform_llm"
+                " WHERE id = ?",
+                (self.PLATFORM_LLM_ID,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None
+        return row["model"], row["api_key_encrypted"], row["updated_by"], row["updated_at"]
+
+    def get_platform_llm(self) -> tuple[str, str, str, str] | None:
+        """(model, decrypted key, updated_by, updated_at) for the shared row.
+
+        Raises on stale Fernet (`decrypt_secret` HTTPException) — callers treat
+        that as decrypt-failed and fall back to the env key (see `app/llm/system.py`).
+        """
+        raw = self._fetch_platform_llm()
+        if raw is None:
+            return None
+        from app.auth.crypto import decrypt_secret
+
+        model, encrypted, by, at = raw
+        return model, decrypt_secret(encrypted), by, at
+
+    def set_platform_llm(
+        self, *, model: str, api_key_plaintext: str | None, actor: str = "admin"
+    ) -> tuple[str, str, str]:
+        """Upsert the shared row; returns (model, updated_by, updated_at).
+
+        `api_key_plaintext=None` keeps the existing key (model-only change).
+        Raises `ValueError` if the model is not a `:free` id (billing guard),
+        `MemberError` if there is no stored key and none is provided.
+        Bumps `members_version` so every laptop's cache refreshes.
+        """
+        model = (model or "").strip()
+        if not model or ":free" not in model:
+            raise ValueError(
+                f"platform model {model!r} must be a free-tier id (contain ':free')"
+            )
+        from app.auth.crypto import encrypt_secret
+
+        conn = self._connect()
+        try:
+            if api_key_plaintext and api_key_plaintext.strip():
+                encrypted = encrypt_secret(api_key_plaintext.strip())
+            else:
+                row = conn.execute(
+                    "SELECT api_key_encrypted FROM platform_llm WHERE id = ?",
+                    (self.PLATFORM_LLM_ID,),
+                ).fetchone()
+                if row is None:
+                    raise MemberError("no platform key stored and none provided")
+                encrypted = row["api_key_encrypted"]
+            now = _now()
+            conn.execute(
+                "INSERT INTO platform_llm (id, model, api_key_encrypted, updated_by, updated_at)"
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET model = excluded.model,"
+                " api_key_encrypted = excluded.api_key_encrypted,"
+                " updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+                (self.PLATFORM_LLM_ID, model, encrypted, actor, now),
+            )
+            self._bump_version(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        self._audit_entry(actor, "platform_llm_set", "platform_llm", self.PLATFORM_LLM_ID)
+        return model, actor, now
+
+    def clear_platform_llm(self, actor: str = "admin") -> bool:
+        """Delete the shared row (reverts to the env key). Returns True if a row existed."""
+        conn = self._connect()
+        try:
+            cur = conn.execute("DELETE FROM platform_llm WHERE id = ?", (self.PLATFORM_LLM_ID,))
+            removed = cur.rowcount > 0
+            if removed:
+                self._bump_version(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        if removed:
+            self._audit_entry(actor, "platform_llm_clear", "platform_llm", self.PLATFORM_LLM_ID)
+        return removed
 
     # ---- composio keys + connected accounts (Mk9 external tools) ----
 

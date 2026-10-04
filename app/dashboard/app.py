@@ -1392,15 +1392,106 @@ def system_memory_status(
 ) -> dict[str, Any]:
     """Platform extractor health (Mk16 fix) — any active member may read.
 
-    Tells the Memory tab *why* learning degraded: no key configured vs a
-    recent `rate-limited`/`error` failure (per-process, in-memory — a restart
-    resets it). Never exposes key material.
+    Tells the Memory tab *why* learning degraded: unconfigured vs a recent
+    `rate-limited`/`error`/`decrypt-failed` failure (per-process, in-memory —
+    a restart resets it). Never exposes key material.
     """
     _verified_member(authorization)
-    from app.llm.system import resolve_system_key
+    from app.llm.system import describe_platform_source
     from app.memory import system_status
 
-    return system_status.get_status(configured=resolve_system_key() is not None)
+    source, model = describe_platform_source()
+    return system_status.get_status(
+        configured=source != "none", source=source, model=model
+    )
+
+
+class PlatformLLMRequest(BaseModel):
+    api_key: str | None = None
+    model: str | None = None
+
+
+@app.get("/api/system-memory/config")
+def get_platform_config(
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Shared platform key metadata (Mk16 follow-up) — admin only, never the key.
+
+    Any instance on the same database uses this exact row; per-machine env is
+    only the pre-bootstrap fallback.
+    """
+    _verify_admin(authorization)
+    from app.auth.users import get_store
+    from app.llm.system import describe_platform_source
+
+    source, model = describe_platform_source()
+    meta = get_store().get_platform_llm_meta()
+    return {
+        "configured": source != "none",
+        "source": source,
+        "model": model,
+        "updated_by": meta[1] if meta else None,
+        "updated_at": meta[2] if meta else None,
+    }
+
+
+@app.put("/api/system-memory/config")
+def set_platform_config(
+    req: PlatformLLMRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Set/rotate the shared platform key and/or model (Mk16 follow-up) — admin only.
+
+    `api_key=None` keeps the stored key (model-only change). The model must
+    stay a `:free` id (422 otherwise) so a typo can never become a billing
+    event. The key is Fernet-encrypted before it touches the database and is
+    never returned. Bumps `members_version` so every laptop picks it up.
+    """
+    claims = _verify_admin(authorization)
+    from fastapi import HTTPException
+
+    from app.auth.store import MemberError
+    from app.auth.users import get_store
+
+    api_key = (req.api_key or "").strip() or None
+    model = (req.model or "").strip() or None
+    if api_key is None and model is None:
+        raise HTTPException(status_code=422, detail="provide api_key and/or model")
+    store = get_store()
+    if model is None:
+        meta = store.get_platform_llm_meta()
+        if meta is None:
+            raise HTTPException(status_code=422, detail="no platform row stored yet: provide model with the first key")
+        model = meta[0]
+    try:
+        saved_model, by, at = store.set_platform_llm(
+            model=model, api_key_plaintext=api_key, actor=str(claims.get("sub", "admin"))
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except MemberError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    from app.llm.system import clear_system_provider_cache
+
+    clear_system_provider_cache()
+    return {"configured": True, "source": "db", "model": saved_model,
+            "updated_by": by, "updated_at": at}
+
+
+@app.delete("/api/system-memory/config")
+def clear_platform_config(
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Delete the shared row (reverts to the env key) — admin only."""
+    claims = _verify_admin(authorization)
+    from app.auth.users import get_store
+    from app.llm.system import clear_system_provider_cache, describe_platform_source
+
+    removed = get_store().clear_platform_llm(actor=str(claims.get("sub", "admin")))
+    clear_system_provider_cache()
+    source, model = describe_platform_source()
+    return {"configured": source != "none", "source": source, "model": model,
+            "removed": removed}
 
 
 # ---- Memory browser/editor (ops face) ----

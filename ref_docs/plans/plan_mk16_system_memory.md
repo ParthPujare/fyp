@@ -20,22 +20,46 @@
 - Extraction runs in `reflect` (`app/agent/graph.py:620-786`) via `_relevant_facts` (`214-237`): real provider → `llm_extract.build_messages/parse_response`, else heuristic. `user/*` commits with no gate (`routing.py` `ROUTE_NONE`); `central`/non-head `dept/*` suspend via `interrupt()`.
 - `load_memory` (`graph.py:241-287`) + `GET /api/memory/me` (`app/dashboard/app.py:1357-1386`) inject `central + dept/<own> + user/<self>` — new user facts surface with no UI change.
 - Stores are shared already: `open_base_store` (`app/memory/factory.py:17-23`) → `PgBaseStore` on Neon (`app/memory/pg_stores.py:29-45`); namespaces `(user, uid_label)` isolate users (`app/memory/scopes.py:36-44`); budgets in `app/memory/edit.py:41-46` (`MEMORY__USER_BYTES=4096`).
-- Topology: each laptop runs its own container against one Neon DB. A platform key must therefore live in **each instance's own `.env`** (not synced via DB); writes converge in `memory_items`.
+- Topology: each laptop runs its own container against one Neon DB. ~~A platform
+  key must therefore live in each instance's own `.env` (not synced via DB)~~
+  SUPERSEDED by the session-031 follow-up below: the key lives as one encrypted
+  row in the shared DB; per-machine env is only the pre-bootstrap fallback.
+  Writes converge in `memory_items` either way.
 - Free tier (Oct 2026): `:free` suffix = free routing (without it = billed); ~20 req/min, ~50/day (1000/day with credits); roster churns — pin exact id, fail soft.
 
 ## Design
 - **Separate paths.** Chat provider resolution (`get_provider_for_user`, `app/llm/factory.py:54-90`) untouched. New singleton `get_system_provider()` (`app/llm/system.py`) builds one `OpenRouterProvider` from the platform key + pinned `qwen/qwen3.8-27b:free` (constructor rejects non-`:free`). Key server-side only; never in JWT/API/trace/audit.
 - **User-scope pin.** New `system_extract_facts()` (`app/memory/llm_extract.py`) wraps `build_messages/parse_response`, then keeps only facts with `scope == scope_user(claims["sub"])`. Everything else dropped. `memory_allowed(write)` + `MemoryEditor.apply` remain the final gate (dedup/budget/audit unchanged).
 - **Sync + fallback.** `_relevant_facts` tries system first (last-pair input, ~15 s timeout, 1 call/turn); any error/empty-key/parse-fail → heuristic. Offline/`pytest` (no key) behavior byte-identical to today.
-- **Key resolution order:** `SYSTEM__OPENROUTER_API_KEY` (canonical) → legacy top-level `OPENROUTER_API_KEY` (user already has this) → None (heuristic mode).
+- **Key resolution order (session 031):** shared-DB `platform_llm` row →
+  `SYSTEM__OPENROUTER_API_KEY` (canonical env) → legacy top-level
+  `OPENROUTER_API_KEY` → None (heuristic mode). Env is never auto-imported.
 - **Observability:** trace `MEMORY_WRITE` gains `extraction: system|heuristic` (+ model id when system); audit `ALLOW reason=system-extract|heuristic|rbac` preserved.
 
 ## Phases
 | Phase | Scope | Status |
 |-------|-------|--------|
-| 1 | Config + singleton + user-pinned extractor + `reflect` wiring + `.env.example` + tests | In progress |
-| 2 | Live verify on Neon (alice + admin turns, quota/fallback behavior) | Open |
-| 3 | Autonomous admin (auto-approver) | Separate plan, not this doc |
+| 1 | Config + singleton + user-pinned extractor + `reflect` wiring + `.env.example` + tests | DONE (session 030) |
+| 2 | Live verify on Neon (alice + admin turns, quota/fallback behavior) | DONE (session 030, user sign-off) |
+| 3 | DB-backed shared key + admin UI (key/model editable, no per-machine env) | DONE (session 031) |
+| 4 | Autonomous admin (auto-approver) | Separate plan, not this doc |
+
+## Follow-up: DB-backed shared key + admin UI (2026-10-04, session 031)
+
+Per-machine `.env` distribution is superseded: the platform key now lives as
+ONE Fernet-encrypted row (`platform_llm`, migration `0009`) in the shared
+database, so any instance on the same `DATABASE_URL` uses that exact key with
+no per-machine setup. Resolution: DB row → env (`SYSTEM__OPENROUTER_API_KEY` /
+`OPENROUTER_API_KEY`, pre-bootstrap fallback only, never auto-imported) →
+unconfigured. Any active admin pastes/rotates the key and changes the model
+(`:free` enforced server-side, 422 otherwise) from the Memory tab "Platform
+extractor" card; key never echoed, all changes audit-logged; decrypt failure
+(Fernet drift) falls back to env with a `decrypt-failed` status. Deliverables:
+`0009_platform_llm.sql` + SQLite twin, `MemberStore/PgMemberStore`
+`get/set/clear_platform_llm` (+meta, memo-cached on PG), `system.py`
+`resolve_platform_config/describe_platform_source`, dashboard
+`GET/PUT/DELETE /api/system-memory/config` + status `source/model`,
+`tests/test_platform_llm.py` (dual-backend contract + endpoints).
 
 ## Deliverables (Phase 1)
 - `app/config.py`: `SystemLLMSettings` + `Settings.system` + legacy-env backfill.

@@ -320,10 +320,9 @@ def test_system_status_records_and_resets():
     from app.memory import system_status
 
     system_status.reset()
-    assert system_status.get_status(configured=False) == {
-        "configured": False, "last_error": None,
-        "last_error_at": None, "total_errors": 0,
-    }
+    st = system_status.get_status(configured=False)
+    assert st["configured"] is False and st["source"] == "none" and st["model"] is None
+    assert st["last_error"] is None and st["total_errors"] == 0
     system_status.record_failure("rate-limited")
     st = system_status.get_status(configured=True)
     assert st["configured"] is True
@@ -372,5 +371,5 @@ def test_system_memory_status_gates():
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body) == {"configured", "last_error", "last_error_at", "total_errors"}
+    assert set(body) == {"configured", "source", "model", "last_error", "last_error_at", "total_errors"}
     assert body["configured"] is False  # conftest blanks the key: hermetic suite
