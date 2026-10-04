@@ -14,6 +14,12 @@ from typing import Any
 # over `.env` and means "no shared database". This must run before any `app` module reads
 # settings. Postgres-backed tests build their own pools from TEST_DATABASE_URL instead.
 os.environ["DATABASE_URL"] = ""
+# HERMETIC TESTS (Mk16). Same hazard for the platform extractor key: a real
+# `OPENROUTER_API_KEY` in `.env` would make every memory test hit the network
+# via `get_system_provider()`. Blank both names; tests that need a system
+# provider inject a stub via monkeypatch instead.
+os.environ["OPENROUTER_API_KEY"] = ""
+os.environ["SYSTEM__OPENROUTER_API_KEY"] = ""
 
 import httpx
 import pytest

@@ -92,6 +92,23 @@ class ComposioSettings(BaseModel):
     github_auth_config: str | None = None
 
 
+class SystemLLMSettings(BaseModel):
+    """Platform-owned background LLM (Mk16) — NOT part of BYOK.
+
+    One shared OpenRouter key serves every user server-side for memory
+    extraction only. Chat itself stays BYOK-only (`LLM__*` + per-member keys).
+    Canonical env is `SYSTEM__OPENROUTER_API_KEY`; a legacy top-level
+    `OPENROUTER_API_KEY` is also accepted (backfilled in `Settings`).
+    `model` is pinned to a `:free` id — the singleton refuses anything else.
+    """
+
+    openrouter_api_key: str | None = None
+    model: str = "qwen/qwen3.8-27b:free"
+    temperature: float = 0.0
+    max_tokens: int = 512
+    timeout_seconds: float = Field(default=15.0, gt=0)
+
+
 class Settings(BaseSettings):
     app_name: str = "fyp-agent-harness"
     env: str = "dev"
@@ -101,6 +118,15 @@ class Settings(BaseSettings):
     # Use Neon's *pooled* host (`…-pooler…`) here; see app/db/pool.py.
     database_url: str | None = None
 
+    # Legacy top-level platform key (Mk16). Canonical is
+    # `SYSTEM__OPENROUTER_API_KEY`; this alias exists because users already
+    # carry `OPENROUTER_API_KEY` in `.env` (pydantic reads `.env`/shell into
+    # declared fields only — `extra="ignore"` drops undeclared names, which is
+    # why the key must be declared to be seen at all). Copied onto
+    # `system.openrouter_api_key` by `_backfill_system_key` when the canonical
+    # name is unset; never read directly elsewhere.
+    openrouter_api_key: str | None = None
+
     jwt: JWTSettings = JWTSettings()
     llm: LLMSettings = LLMSettings()
     services: ServiceSettings = ServiceSettings()
@@ -109,6 +135,7 @@ class Settings(BaseSettings):
     skills: SkillSettings = SkillSettings()
     approvals: ApprovalSettings = ApprovalSettings()
     composio: ComposioSettings = ComposioSettings()
+    system: SystemLLMSettings = SystemLLMSettings()
 
     model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")
 
@@ -119,6 +146,27 @@ class Settings(BaseSettings):
         if value is None or not str(value).strip():
             return None
         return str(value).strip()
+
+    @model_validator(mode="after")
+    def _backfill_system_key(self) -> "Settings":
+        """Wire the platform key from either env name (blank = unset).
+
+        Canonical `SYSTEM__OPENROUTER_API_KEY` (nested onto
+        `system.openrouter_api_key`) wins; legacy top-level `OPENROUTER_API_KEY`
+        (declared field above, so pydantic loads it from shell or `.env`) is
+        the fallback. A stray shell export is also honored.
+        """
+        import os
+
+        candidates = [
+            (self.system.openrouter_api_key or "").strip(),
+            (self.openrouter_api_key or "").strip(),
+            (os.environ.get("OPENROUTER_API_KEY") or "").strip(),
+        ]
+        self.system.openrouter_api_key = next((c for c in candidates if c), None)
+        if isinstance(self.openrouter_api_key, str) and not self.openrouter_api_key.strip():
+            self.openrouter_api_key = None
+        return self
 
     @model_validator(mode="after")
     def _no_dev_secrets_outside_dev(self) -> "Settings":

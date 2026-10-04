@@ -1783,7 +1783,18 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     try {
       const scopes = await api(isAdmin() ? "/api/memory" : "/api/memory/me");
       $("memory").innerHTML = "";
-      if (!scopes.length) { $("memory").innerHTML = '<p class="muted">No readable memory scopes for this identity.</p>'; return; }
+      // Mk16 fix: surface platform-extractor health so a silently empty memory
+      // has a visible cause (no key vs recent quota/outage failure). Best
+      // effort — a status failure must never break the memory view itself.
+      try {
+        const st = await api("/api/system-memory/status");
+        if (!st.configured) {
+          $("memory").appendChild(elm('<p class="muted">Platform memory: no shared key configured — using on-device heuristics.</p>'));
+        } else if (st.last_error) {
+          $("memory").appendChild(elm(`<p class="muted">Platform memory: last run fell back (${esc(st.last_error)}${st.last_error_at ? " at " + esc(st.last_error_at) : ""}) — recent facts may be missing.</p>`));
+        }
+      } catch (e) { /* status is advisory only */ }
+      if (!scopes.length) { $("memory").innerHTML += '<p class="muted">No readable memory scopes for this identity.</p>'; return; }
       // Mk15: a head manages their own department's scope; everything else stays read-only.
       const claims = identities[active].claims;
       const ownDept = isHeadRole(claims.role) ? "dept/" + claims.dept : null;

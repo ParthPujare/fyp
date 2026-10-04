@@ -137,6 +137,7 @@ class OpenAIProvider(LLMProvider):
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        timeout: float | None = None,
         **kwargs: Any,
     ):
         self.api_key = api_key
@@ -144,9 +145,12 @@ class OpenAIProvider(LLMProvider):
         self.model = model or self.DEFAULT_MODEL
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.timeout = timeout
         client_kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
         self.client = OpenAI(**client_kwargs)
 
     def chat(

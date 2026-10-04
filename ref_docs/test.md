@@ -46,25 +46,25 @@ Per suite keep two boxes at the bottom of your working copy:
 
 | ID | +/- | Steps | Expected | Status | Notes |
 |---|---|---|---|---|---|
-| AUTH-01 | + | Any PC: login correct `alice/alice123`. Logout, login `admin/admin123`. | Login works, header `#who` shows `sub`, correct tabs per role |  |  |
-| AUTH-02 | - | Any PC: wrong password, unknown user, empty password. | `invalid credentials` (401 path), stays on login |  |  |
-| AUTH-03 | - | Any PC: raw `POST /auth/login` then tamper 1 char of token → `POST /hello`. | `401 invalid token` |  |  |
-| AUTH-04 | - | Any PC: craft expired token (`expiry_minutes=-1` local) or wait 60min → use it. | `401 token expired`, UI auto-logs-out (`invalidate`) |  |  |
-| AUTH-05 | - | Any PC: login as alice → admin (any PC) deactivates alice → alice-PC sends chat + opens My Memory with SAME old token. | Both → 403 `disabled/not a member`; gateway `/hello /chat /chat/threads` + dashboard `/api/chat /api/memory/me` all 403 |  |  |
-| AUTH-06 | - | Same alice: try fresh login while deactivated. | 401 `invalid credentials` |  |  |
-| AUTH-07 | + | Any PC (admin): reactivate alice. Alice-PC logs in fresh. | Works again immediately (no stale cache on login) |  |  |
-| AUTH-08 | - | Any PC (admin): try deactivate yourself; try deactivate last active admin. | Both 409 (self / last-admin lockout) |  |  |
-| AUTH-09 | + | Any PC (admin): create second admin → deactivate first admin. | 200 (allowed once 2 admins exist) |  |  |
-| AUTH-10 | - | Any PC (admin): create user short pw `<6`, duplicate username, empty username. | 422 / 409 / 422 |  |  |
-| AUTH-11 | - | Any PC (admin): `PUT role=marketing_head dept=hr` (mismatch). | 422 head role must match dept |  |  |
-| AUTH-12 | - | Any head-PC: `POST /api/dept/members role=admin` or other-dept head. | 403 |  |  |
-| AUTH-13 | - | Any head-PC: patch head/admin/self/cross-dept member. | 403 each |  |  |
-| AUTH-14 | + | Any PC (admin): change bob role/dept/scopes → bob-PC hits `/auth/me` WITHOUT re-login. | New role/dept reflected |  |  |
-| AUTH-15 | + | Any PC: login admin AND member via switcher pills, click to swap, send 1 chat each. | Both sessions persist; transcript clears on switch (`resetChatState`), never sends into foreign thread |  |  |
-| AUTH-16 | - | Any PC: use valid member token on admin endpoints (`/api/users`, `/api/skills`, `/api/ops/runs`, `POST /api/memory/x`). | 403 (member), 401 (no/bad token) |  |  |
-| AUTH-17 | - | Any PC: use valid HEAD token on admin-only (`/api/users`, `/api/departments POST`, `/api/skills POST`, `/api/ops/runs`). | 403 |  |  |
-| AUTH-18 | + | Any PC (admin): reset bob pw → bob-PC old pw fails, new pw works at once (also cross-PC on shared DB). | Immediate, incl. PG (login never cached) |  |  |
-| AUTH-19 | - | Any PC (admin): reset pw to `<6`. | 422 |  |  |
+| AUTH-01 | + | Any PC: login correct `alice/alice123`. Logout, login `admin/admin123`. | Login works, header `#who` shows `sub`, correct tabs per role | Working |  Working as intended|
+| AUTH-02 | - | Any PC: wrong password, unknown user, empty password. | `invalid credentials` (401 path), stays on login |Working  |  working as intended|
+| AUTH-03 | - | Any PC: raw `POST /auth/login` then tamper 1 char of token → `POST /hello`. | `401 invalid token` | Working | working as intended |
+| AUTH-04 | - | Any PC: craft expired token (`expiry_minutes=-1` local) or wait 60min → use it. | `401 token expired`, UI auto-logs-out (`invalidate`) | Working | working as intended |
+| AUTH-05 | - | Any PC: login as alice → admin (any PC) deactivates alice → alice-PC sends chat + opens My Memory with SAME old token. | Both → 403 `disabled/not a member`; gateway `/hello /chat /chat/threads` + dashboard `/api/chat /api/memory/me` all 403 | Working  | alice pc got signed out  |
+| AUTH-06 | - | Same alice: try fresh login while deactivated. | 401 `invalid credentials` | working | working as intended |
+| AUTH-07 | + | Any PC (admin): reactivate alice. Alice-PC logs in fresh. | Works again immediately (no stale cache on login) | Working | working as intended |
+| AUTH-08 | - | Any PC (admin): try deactivate yourself; try deactivate last active admin. | Both 409 (self / last-admin lockout) | Working  |  Working as intended|
+| AUTH-09 | + | Any PC (admin): create second admin → deactivate first admin. | 200 (allowed once 2 admins exist) | not working as intended | admin cannot deactivate themselves can deactivate the new ly created admin|
+| AUTH-10 | - | Any PC (admin): create user short pw `<6`, duplicate username, empty username. | 422 / 409 / 422 | working | password pop up mssg statiung atleat 6 chars nothing in api/working as intended for duplicate username/ popup stating username is empty nothing in the terminal  (checks for username not there eg: saved without .com or saves with ,com as well)|
+| AUTH-11 | - | Any PC (admin): `PUT role=marketing_head dept=hr` (mismatch). | 422 head role must match dept | Not working as intended  | new member was added marketing_agent and finance dept |
+| AUTH-12 | - | Any head-PC: `POST /api/dept/members role=admin` or other-dept head. | 403 | working | working as intended |
+| AUTH-13 | - | Any head-PC: patch head/admin/self/cross-dept member. | 403 each | working | working as intended |
+| AUTH-14 | + | Any PC (admin): change bob role/dept/scopes → bob-PC hits `/auth/me` WITHOUT re-login. | New role/dept reflected | working | working as intended |
+| AUTH-15 | + | Any PC: login admin AND member via switcher pills, click to swap, send 1 chat each. | Both sessions persist; transcript clears on switch (`resetChatState`), never sends into foreign thread | working | working as intended but the pill function will be removed later on |
+| AUTH-16 | - | Any PC: use valid member token on admin endpoints (`/api/users`, `/api/skills`, `/api/ops/runs`, `POST /api/memory/x`). | 403 (member), 401 (no/bad token) | working  | working as intended |
+| AUTH-17 | - | Any PC: use valid HEAD token on admin-only (`/api/users`, `/api/departments POST`, `/api/skills POST`, `/api/ops/runs`). | 403 | working | working as intended |
+| AUTH-18 | + | Any PC (admin): reset bob pw → bob-PC old pw fails, new pw works at once (also cross-PC on shared DB). | Immediate, incl. PG (login never cached) | working | working as intended / additional notes (when. editing the user, the role defaults to admin so the role gets changed it has to be refilled again does not take the previous one by default. )|
+| AUTH-19 | - | Any PC (admin): reset pw to `<6`. | 422 | woring | working as intended |
 | AUTH-20 | + | Any PC: login hint shows demo accounts; logout button clears active session only. | Hint visible, other pill session survives |  |  |
 
 **Bug notes (AUTH):**
@@ -81,20 +81,20 @@ Unrestricted-login key rule: **same `sub` on 2 PCs = same chats (shared). Differ
 |---|---|---|---|---|---|
 | CHAT-01 | + | Any PC: fresh user (e.g. molly) → `GET threads` / open Chat. | `["user:molly@acme.com"]` default row |  |  |
 | CHAT-02 | + | Any PC as molly: `+ New Chat` → send `[PCx-test] hello`. | Optimistic `user:molly:xxxxxx` row, send persists, title = first user msg ~40 chars |  |  |
-| CHAT-03 | + | Any PC as molly: click older thread, send follow-up. | History (≤50 user/assistant) loads, context continues |  |  |
-| CHAT-04 | + | Any PC as molly: `Enter` sends; `Shift+Enter` newline in `#chat-msg`. | Correct key behaviour |  |  |
+| CHAT-03 | + | Any PC as molly: click older thread, send follow-up. | History (≤50 user/assistant) loads, context continues | working | working as intended |
+| CHAT-04 | + | Any PC as molly: `Enter` sends; `Shift+Enter` newline in `#chat-msg`. | Correct key behaviour | working | working as intended |
 | CHAT-05 | + | Any PC as molly: check tool badges / guardrail badges / suspended `⏸ approval <id>` + route hint + `Resume now` + `connect_required → Connect` buttons render. | Envelope fields rendered, no raw JSON dump |  |  |
-| CHAT-06 | + | Any PC as molly: reload page, reopen thread. | Transcript persists (checkpointer) |  |  |
-| CHAT-07 | - | Any PC as molly: `DELETE` thread with `confirm` → refresh → open Ops. | Row gone, never reappears; Ops still has old run trace (history kept) |  |  |
-| CHAT-08 | - | Any PC: delete chat that HAS pending approval → decider tries decide, owner tries resume. | Approval auto-rejected on delete; decide/resume → 404/409 `deleted` |  |  |
-| CHAT-09 | + | Any PC: same user twice — login alice on PC-B AND PC-C (announce!), list threads both sides. | IDENTICAL list on both (shared DB proof) |  |  |
-| CHAT-10 | + | PC-B as alice sends msg; PC-C as alice refreshes + opens same thread. | New turn visible on PC-C with same reply/history |  |  |
+| CHAT-06 | + | Any PC as molly: reload page, reopen thread. | Transcript persists (checkpointer) | working | working as intended current chat is saved in hostory but not opened on reload|
+| CHAT-07 | - | Any PC as molly: `DELETE` thread with `confirm` → refresh → open Ops. | Row gone, never reappears; Ops still has old run trace (history kept) | working | working as intended |
+| CHAT-08 | - | Any PC: delete chat that HAS pending approval → decider tries decide, owner tries resume. | Approval auto-rejected on delete; decide/resume → 404/409 `deleted` | partially working | i send req from 1 acc delete caht before approval , approvla getes removed from admin panel terminl i see 304 |
+| CHAT-09 | + | Any PC: same user twice — login alice on PC-B AND PC-C (announce!), list threads both sides. | IDENTICAL list on both (shared DB proof) | partially working | chat histry is synced but no intimation to user of simultaneous login |
+| CHAT-10 | + | PC-B as alice sends msg; PC-C as alice refreshes + opens same thread. | New turn visible on PC-C with same reply/history | working |  working as intended|
 | CHAT-11 | - | Any PC as bob: paste alice thread id into history call / URL. | 403 `not your thread` |  |  |
-| CHAT-12 | - | Any PC: login alice → logout → login bob (SAME browser). List threads + try send into remembered alice id. | Only bob threads; client resets to bob default, never sends into alice thread |  |  |
+| CHAT-12 | - | Any PC: login alice → logout → login bob (SAME browser). List threads + try send into remembered alice id. | Only bob threads; client resets to bob default, never sends into alice thread | working  | working as intended |
 | CHAT-13 | - | Any PC: LIKE-trap — users `a_b@x` vs `aXb@x` (create both if needed), list each. | No cross-contamination (prefix match exact, not wildcard) |  |  |
-| CHAT-14 | + | Any PC: start chat on PC-B, continue SAME thread on PC-C (same sub). | Continuation works, snapshot + history carry over |  |  |
-| CHAT-15 | - | Any PC: send into thread while approval pending on it; rapid double-send. | Second send either queues cleanly or clean error; no duplicate runs, no crash |  |  |
-| CHAT-16 | + | Any PC: kill-mid-turn (send then `docker restart app` before reply) → resend same msg. | Progress lost is EXPECTED (durability=exit); resend works |  |  |
+| CHAT-14 | + | Any PC: start chat on PC-B, continue SAME thread on PC-C (same sub). | Continuation works, snapshot + history carry over | working | working as intended |
+| CHAT-15 | - | Any PC: send into thread while approval pending on it; rapid double-send. | Second send either queues cleanly or clean error; no duplicate runs, no crash | working  | working as intended (approval panel need a button for approve all and reject all) |
+| CHAT-16 | + | Any PC: kill-mid-turn (send then `docker restart app` before reply) → resend same msg. | Progress lost is EXPECTED (durability=exit); resend works | working | progess was lost |
 | CHAT-17 | + | Any PC: suspend (HITL) → restart container → owner resumes. | Suspended state survived (persisted at pause); resume still works |  |  |
 | CHAT-18 | + | Any PC: every turn → Ops finds `run_id` with PROMPT/REASONING/CONTEXT_INJECTION/tool I/O. | Full trajectory, sanitized |  |  |
 

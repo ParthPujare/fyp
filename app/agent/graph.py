@@ -20,6 +20,7 @@ carries the step it waits on, and the run resumes only when the last step is dec
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from operator import add
 from typing import Annotated, Any, TypedDict
@@ -60,6 +61,14 @@ from app.ops.schema import TraceEventType
 from app.ops.store import TraceStore
 from app.skills.executor import SkillExecutor
 from app.skills.registry import SkillRegistry
+
+log = logging.getLogger(__name__)
+
+
+def _is_rate_limited(exc: BaseException) -> bool:
+    """Free-tier quota signal from an extraction failure (message-sniffed, key-safe)."""
+    msg = str(exc).lower()
+    return any(k in msg for k in ("rate limit", "429", "quota", "too many requests"))
 
 
 class AgentState(TypedDict, total=False):
@@ -214,27 +223,97 @@ def _sanitize_messages(
 def _relevant_facts(
     messages: list[dict[str, Any]], claims: dict[str, Any], deps: AgentDeps
 ) -> list[Any]:
-    """Mk8 #6: prefer LLM relevance extraction; heuristic fallback offline."""
+    """Mk8 #6 + Mk16: platform extractor first, chat-model/heuristics fallback.
+
+    Order: (1) shared Qwen system provider (last turn-pair, user-scope pinned,
+    sync with short timeout — never sinks the turn); (2) the caller's own chat
+    provider (non-mock, non-local); (3) deterministic heuristics. Trace events
+    distinguish the three outcomes so a silently empty memory has a visible
+    cause: `system` (model decided nothing durable), `system-error` (the call
+    failed — then a fallback event follows), `heuristic` (fallback or no key).
+    No prompt/key material is ever traced.
+    """
     from app.llm.mock import MockLLM
+
+    user_texts = [str(m.get("content", "")) for m in messages if m.get("role") == "user"]
+    asst_texts = [str(m.get("content", "")) for m in messages if m.get("role") == "assistant"]
+    user_msg = user_texts[-1] if user_texts else ""
+    assistant_reply = asst_texts[-1] if asst_texts else ""
+
+    def _note(extraction: str, count: int, model: str = "", extra: dict[str, Any] | None = None) -> None:
+        try:
+            payload: dict[str, Any] = {"decision": "extracted", "extraction": extraction,
+                                       "facts": count, "model": model}
+            if extra:
+                payload.update(extra)
+            deps.trace.add_event(
+                deps.run_id,
+                TraceEventType.MEMORY_WRITE,
+                deps.actor,
+                payload,
+            )
+        except Exception:  # noqa: BLE001, S110 - tracing must never sink the turn
+            pass
+
+    # (1) Platform-owned shared model — user-scope only, every role alike.
+    # Genuine [] means "nothing durable" (model decides — no heuristic retry);
+    # only provider/parse ERRORS fall through to the chat-model/heuristic paths.
+    if len(user_msg.strip()) >= 8:
+        try:
+            from app.llm.system import get_system_provider
+            from app.memory import llm_extract as _lx
+            from app.memory.scopes import scope_user as _scope_user
+
+            system_provider = get_system_provider()
+            if system_provider is not None:
+                resp = system_provider.generate(
+                    _lx.build_messages(
+                        user_msg, assistant_reply,
+                        speaker=str(claims.get("sub", "")),
+                    ),
+                    tools=[],
+                )
+                parsed = _lx.parse_response(getattr(resp, "text", "") or "", claims)
+                own = _scope_user(str(claims.get("sub", "")))
+                facts = [f for f in parsed if f.scope == own]
+                _note("system", len(facts),
+                      getattr(system_provider, "model", ""))
+                return facts
+            _note("system-skipped", 0, extra={"system": "unconfigured"})
+        except Exception as exc:  # noqa: BLE001 - fall through to chat-model/heuristic
+            from app.memory import system_status as _status
+
+            limited = _is_rate_limited(exc)
+            _status.record_failure("rate-limited" if limited else "error")
+            if limited:
+                log.warning("platform memory extractor rate-limited; using fallback extraction")
+            else:
+                log.info("platform memory extractor failed (%s); using fallback extraction",
+                         type(exc).__name__)
+            _note("system-error", 0, extra={"error": type(exc).__name__, "rate_limited": limited})
 
     # Local models (LM Studio/Ollama/llama.cpp, e.g. Gemma reasoning) spend
     # hundreds of tokens on this background task — heuristics are fine there
     # and keep chat latency to one model call per turn instead of two.
     if getattr(deps.provider, "PROVIDER_NAME", "") in ("lmstudio", "ollama", "llamacpp"):
-        return extract_facts(messages, claims)
-    user_texts = [str(m.get("content", "")) for m in messages if m.get("role") == "user"]
-    asst_texts = [str(m.get("content", "")) for m in messages if m.get("role") == "assistant"]
-    user_msg = user_texts[-1] if user_texts else ""
-    assistant_reply = asst_texts[-1] if asst_texts else ""
+        facts = extract_facts(messages, claims)
+        _note("heuristic", len(facts))
+        return facts
     if not isinstance(deps.provider, MockLLM) and len(user_msg.strip()) >= 8:
         try:
             from app.memory.llm_extract import build_messages, parse_response
 
             resp = deps.provider.generate(build_messages(user_msg, assistant_reply), tools=[])
-            return parse_response(getattr(resp, "text", "") or "", claims)
+            facts = parse_response(getattr(resp, "text", "") or "", claims)
+            _note("chat-model", len(facts))
+            return facts
         except Exception:  # noqa: BLE001 - LLM extract failure falls back to heuristics
-            return extract_facts(messages, claims)
-    return extract_facts(messages, claims)
+            facts = extract_facts(messages, claims)
+            _note("heuristic", len(facts))
+            return facts
+    facts = extract_facts(messages, claims)
+    _note("heuristic", len(facts))
+    return facts
 
 
 def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):

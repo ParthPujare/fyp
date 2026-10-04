@@ -1386,6 +1386,23 @@ def member_memory(
     return rows
 
 
+@app.get("/api/system-memory/status")
+def system_memory_status(
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Platform extractor health (Mk16 fix) — any active member may read.
+
+    Tells the Memory tab *why* learning degraded: no key configured vs a
+    recent `rate-limited`/`error` failure (per-process, in-memory — a restart
+    resets it). Never exposes key material.
+    """
+    _verified_member(authorization)
+    from app.llm.system import resolve_system_key
+    from app.memory import system_status
+
+    return system_status.get_status(configured=resolve_system_key() is not None)
+
+
 # ---- Memory browser/editor (ops face) ----
 
 

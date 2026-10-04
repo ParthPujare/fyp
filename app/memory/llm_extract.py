@@ -13,23 +13,47 @@ import re
 from typing import Any
 
 from app.memory.extract import Fact, classify
+from app.memory.scopes import scope_user
 
 SYSTEM_PROMPT = (
     "You extract durable facts ABOUT THE USER for long-term memory. "
     "Return a JSON array of strings; each string is one durable fact "
     "(preference, attribute, constraint, timezone, stack, communication style). "
-    "Ignore transient task content (e.g. 'summarize this doc', 'find customers'). "
+    "Only extract facts where the SPEAKER is the subject — first-person "
+    "statements ('I prefer...', 'my team...', 'I work...'). "
+    "NEVER extract facts about other people the speaker mentions: if the user "
+    "talks about Alice ('Alice prefers Slack', 'I heard Alice...'), that "
+    "describes Alice, not the speaker — return [] for it. "
+    "Meta-requests ('add this to memory', 'remember this') state no fact "
+    "themselves — return [] unless the same message also states one. "
+    "Comparative opinions about tools or languages ARE durable stack/preference "
+    "signals (e.g. 'finds Python easier to read than JavaScript' -> "
+    "'User finds Python easier to read than JavaScript.'). "
+    "Ignore transient task content (e.g. 'summarize this doc', 'find customers') "
+    "and one-off reactions to today's work with no general signal. "
     "Return [] when nothing durable is stated. JSON array only, no prose."
 )
 
 
-def build_messages(user_msg: str, assistant_reply: str) -> list[dict[str, Any]]:
+def build_messages(
+    user_msg: str, assistant_reply: str, speaker: str | None = None
+) -> list[dict[str, Any]]:
+    """Extraction prompt. `speaker` (Mk16 fix) names who the facts must describe.
+
+    Without it the model files third-party mentions ('Alice prefers Slack')
+    as the speaker's own facts. The chat-model path (Mk8) leaves it unset and
+    keeps the old shape; the platform path always sets it to `claims['sub']`.
+    """
+    content = f"User said: {user_msg}\nAssistant replied: {assistant_reply}\nFacts:"
+    if speaker:
+        content = (
+            f"Speaker: {speaker} — extract durable facts about THIS person only. "
+            f"Facts about anyone else they mention belong to that person, not "
+            f"the speaker: ignore them.\n{content}"
+        )
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": f"User said: {user_msg}\nAssistant replied: {assistant_reply}\nFacts:",
-        },
+        {"role": "user", "content": content},
     ]
 
 
@@ -64,3 +88,28 @@ def llm_extract_facts(provider: Any, user_msg: str, assistant_reply: str, claims
         return parse_response(getattr(resp, "text", "") or "", claims)
     except Exception:  # noqa: BLE001 - extraction must never sink the turn
         return []
+
+
+def system_extract_facts(
+    provider: Any, user_msg: str, assistant_reply: str, claims: dict[str, Any]
+) -> list[Fact]:
+    """Mk16 platform extraction — user-scope only, never raises.
+
+    The shared Qwen model sees only this turn's pair and may propose any scope
+    via `classify`, but the auto-path keeps strictly `user/<self>` (admin and
+    heads included): central/dept/other-user proposals are dropped, never
+    re-scoped. The caller still gates each kept fact through
+    `enforcer.memory_allowed(write)` before `MemoryEditor.apply`.
+    """
+    if provider is None or not (user_msg or "").strip():
+        return []
+    try:
+        resp = provider.generate(
+            build_messages(user_msg, assistant_reply, speaker=str(claims.get("sub", ""))),
+            tools=[],
+        )
+        facts = parse_response(getattr(resp, "text", "") or "", claims)
+    except Exception:  # noqa: BLE001 - extraction must never sink the turn
+        return []
+    own = scope_user(str(claims.get("sub", "")))
+    return [f for f in facts if f.scope == own]
