@@ -1951,15 +1951,16 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
 
   function appendRunRow(r) {
     const actor = r.actor || {};
-    const tr = elm(`
-      <tr>
+    // Built with createElement: a "<tr>" string parsed inside a <div> (elm) loses its
+    // table tags, so the row and its View button never existed.
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
         <td><code>${esc(r.run_id)}</code></td>
         <td class="muted">${esc((r.started_ts || "").slice(0, 19).replace("T", " "))}</td>
         <td>${esc(actor.sub || "")} <span class="muted">(${esc(actor.role || "")})</span></td>
         <td>${r.event_count}</td>
         <td><span class="badge ${r.outcome === "completed" ? "approved" : "pending"}">${esc(r.outcome)}</span></td>
-        <td><button data-open="${esc(r.run_id)}">View</button></td>
-      </tr>`);
+        <td><button data-open="${esc(r.run_id)}">View</button></td>`;
     tr.querySelector("[data-open]").addEventListener("click", () => openOpsRun(r.run_id));
     $("ops-runs").appendChild(tr);
   }
