@@ -78,10 +78,17 @@ class Skill:
         return f"{self.trigger} — steps: {steps}"
 
 
+_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def _ensure(name: str, data: dict[str, Any]) -> None:
     for field_name in REQUIRED_FIELDS:
         if not data.get(field_name):
             raise SkillValidationError(name, "missing_field", field_name)
+    # Mk17: skill names are path segments — reject traversal at parse (422),
+    # not late in registry.save (500).
+    if not _SEGMENT_RE.match(str(name)):
+        raise SkillValidationError(name, "invalid_name", str(name))
     calls = data.get("tool_calls")
     if not isinstance(calls, list) or not all(
         isinstance(c, dict) and isinstance(c.get("tool"), str) for c in calls
@@ -90,6 +97,12 @@ def _ensure(name: str, data: dict[str, Any]) -> None:
     scope = str(data.get("scope", ""))
     if scope != "central" and not scope.startswith("dept/"):
         raise SkillValidationError(name, "invalid_scope", scope)
+    if ".." in scope or "//" in scope:
+        raise SkillValidationError(name, "invalid_scope", scope)
+    if scope != "central":
+        for seg in scope.split("/")[1:]:
+            if not seg or not _SEGMENT_RE.match(seg):
+                raise SkillValidationError(name, "invalid_scope", scope)
 
 
 def parse_skill(path: str | Path) -> Skill:

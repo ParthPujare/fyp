@@ -47,8 +47,13 @@ def health() -> dict:
 @app.post("/auth/login")
 def login(req: LoginRequest) -> dict:
     store = users.get_store()
-    member = store.get(req.username)
-    if member is None or not store.verify(req.username, req.password):
+    # Mk17: verify first (direct DB read, never cached), then direct member
+    # read for claims — a member created <1s ago must not 401 via the 1s memo.
+    if not store.verify(req.username, req.password):
+        raise HTTPException(status_code=401, detail="invalid credentials")
+    get_direct = getattr(store, "get_direct", store.get)
+    member = get_direct(req.username)
+    if member is None or not member.active:
         raise HTTPException(status_code=401, detail="invalid credentials")
     claims = member.claims()
     token = create_token(

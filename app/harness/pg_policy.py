@@ -87,12 +87,19 @@ class PgPolicyStore:
         self,
         pool: ConnectionPool | None = None,
         *,
-        seed_from: str | Path | None = POLICY_PATH,
+        seed_from: str | Path | None = None,
         version_ttl: float = 1.0,
     ) -> None:
         self._pool = pool or get_pool()
         ensure_migrated(self._pool)
         self._version = SharedVersion(self._pool, version_ttl)
+        if seed_from is None:
+            try:
+                from app.config import get_settings
+
+                seed_from = get_settings().services.policy_path
+            except Exception:
+                seed_from = POLICY_PATH
         if seed_from is not None:
             seed_policy(self._pool, seed_from)
 
@@ -163,14 +170,28 @@ class PgPolicyStore:
         return int(removed)
 
     # ---- file <-> database drift (sync-config) ------------------------------------------
-    def drift(self, path: str | Path = POLICY_PATH) -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
+    def drift(self, path: str | Path | None = None) -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
+        if path is None:
+            try:
+                from app.config import get_settings
+
+                path = get_settings().services.policy_path
+            except Exception:
+                path = POLICY_PATH
         return policy_drift(self._pool, path)
 
 
 def policy_drift(
-    pool: ConnectionPool, path: str | Path = POLICY_PATH
+    pool: ConnectionPool, path: str | Path | None = None
 ) -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
     """(rows in the file but not the database, file-seeded rows no longer in the file)."""
+    if path is None:
+        try:
+            from app.config import get_settings
+
+            path = get_settings().services.policy_path
+        except Exception:
+            path = POLICY_PATH
     in_file = file_rows(path)
     with pool.connection() as conn:
         got = conn.execute("SELECT ptype, v0, v1, v2, v3, source FROM policy_rules ORDER BY seq").fetchall()
@@ -196,12 +217,19 @@ def _warn_drift(pool: ConnectionPool, path: str | Path) -> None:
         )
 
 
-def seed_policy(pool: ConnectionPool, path: str | Path = POLICY_PATH) -> int:
+def seed_policy(pool: ConnectionPool, path: str | Path | None = None) -> int:
     """Copy `policy.csv` into an empty shared database, once per database (race-safe).
 
     Returns the number of rows inserted (0 if this or another laptop already seeded it).
     Checked once per process per pool, so it costs one read at start-up and nothing after.
     """
+    if path is None:
+        try:
+            from app.config import get_settings
+
+            path = get_settings().services.policy_path
+        except Exception:
+            path = POLICY_PATH
     if pool in _seeded:
         return 0
     with _seed_lock:

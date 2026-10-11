@@ -223,10 +223,11 @@ def _sanitize_messages(
 def _relevant_facts(
     messages: list[dict[str, Any]], claims: dict[str, Any], deps: AgentDeps
 ) -> list[Any]:
-    """Mk8 #6 + Mk16: platform extractor first, chat-model/heuristics fallback.
+    """Mk8 #6 + Mk16/Mk17: platform extractor first, chat-model/heuristics fallback.
 
-    Order: (1) shared Qwen system provider (last turn-pair, user-scope pinned,
-    sync with short timeout — never sinks the turn); (2) the caller's own chat
+    Order: (1) shared Qwen system provider (last turn-pair, role-aware proposals:
+    user auto, dept → head approval, central → second-admin; sync with short
+    timeout — never sinks the turn); (2) the caller's own chat
     provider (non-mock, non-local); (3) deterministic heuristics. Trace events
     distinguish the three outcomes so a silently empty memory has a visible
     cause: `system` (model decided nothing durable), `system-error` (the call
@@ -255,14 +256,14 @@ def _relevant_facts(
         except Exception:  # noqa: BLE001, S110 - tracing must never sink the turn
             pass
 
-    # (1) Platform-owned shared model — user-scope only, every role alike.
-    # Genuine [] means "nothing durable" (model decides — no heuristic retry);
-    # only provider/parse ERRORS fall through to the chat-model/heuristic paths.
+    # (1) Platform-owned shared model — Mk17 role-aware proposals (user auto,
+    # dept → head approval, central → second-admin). Genuine [] means "nothing
+    # durable" (model decides — no heuristic retry); only provider/parse ERRORS
+    # fall through to the chat-model/heuristic paths.
     if len(user_msg.strip()) >= 8:
         try:
             from app.llm.system import get_system_provider
             from app.memory import llm_extract as _lx
-            from app.memory.scopes import scope_user as _scope_user
 
             system_provider = get_system_provider()
             if system_provider is not None:
@@ -270,12 +271,12 @@ def _relevant_facts(
                     _lx.build_messages(
                         user_msg, assistant_reply,
                         speaker=str(claims.get("sub", "")),
+                        role=str(claims.get("role", "")),
+                        dept=str(claims.get("dept", "")),
                     ),
                     tools=[],
                 )
-                parsed = _lx.parse_response(getattr(resp, "text", "") or "", claims)
-                own = _scope_user(str(claims.get("sub", "")))
-                facts = [f for f in parsed if f.scope == own]
+                facts = _lx.parse_response(getattr(resp, "text", "") or "", claims)
                 _note("system", len(facts),
                       getattr(system_provider, "model", ""))
                 return facts
@@ -600,7 +601,26 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                     run_id=deps.run_id,
                 )
                 if result is None and _is_gated(tool):
-                    result = _critical_gate(tool, args)
+                    # Mk17: connection check precedes the approval gate. An
+                    # unconnected external tool is denied immediately with a
+                    # Connect prompt — never suspends head/admin first.
+                    if getattr(tool, "handler", "") == "external":
+                        try:
+                            from app.integrations.adapter import app_for as _app_for
+                            from app.integrations.service import _is_connected as _ext_connected
+                        except Exception:  # noqa: BLE001 - integrations optional
+                            _app_for = lambda _n: None  # type: ignore[assignment]
+                            _ext_connected = lambda _u, _a: True  # type: ignore[assignment]
+                        _app = _app_for(name) or ""
+                        if _app and not _ext_connected(str(state["claims"].get("sub", "")), _app):
+                            result = ToolResult(
+                                ok=False,
+                                denied=True,
+                                reason="auth",
+                                content=f"{_app} is not connected. Tap Connect for {_app}, then Refresh.",
+                            )
+                    if result is None:
+                        result = _critical_gate(tool, args)
                 if result is None:
                     if tool.handler == "recall":
                         result = deps.recall.recall(str(args.get("query", "")), state["claims"])
@@ -839,6 +859,14 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                         TraceEventType.MEMORY_WRITE,
                         actor,
                         {"scope": fact.scope, "op": fact.op, "decision": "skipped", "reason": exc.code},
+                    )
+                    continue
+                except Exception as exc:  # noqa: BLE001 - Mk17 validation (empty/too_long) skips, never sinks
+                    deps.trace.add_event(
+                        deps.run_id,
+                        TraceEventType.MEMORY_WRITE,
+                        actor,
+                        {"scope": fact.scope, "op": fact.op, "decision": "skipped", "reason": getattr(exc, "code", "invalid")},
                     )
                     continue
                 allowlisted = bool(gate.get("allowlist_hit"))

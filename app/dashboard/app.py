@@ -735,12 +735,15 @@ class MemberCreateRequest(BaseModel):
     role: str
     dept: str
     scopes: list[str] = []
+    display_name: str | None = None
+    email: str | None = None
 
 
 class MemberUpdateRequest(BaseModel):
     role: str
     dept: str
     scopes: list[str] = []
+    display_name: str | None = None
 
 
 class ResetPasswordRequest(BaseModel):
@@ -755,9 +758,9 @@ def create_member(
     """Admin add-member (plan_mk2 Phase 4). Username immutable afterwards
     (store PK); role/dept/scopes editable; password set to the returned member's."""
     claims = _verify_admin(authorization)
-    username = (req.username or "").strip()
+    username = (req.email or req.username or "").strip()
     if not username:
-        raise HTTPException(status_code=422, detail="username is required")
+        raise HTTPException(status_code=422, detail="email is required")
     if len(req.password or "") < 6:
         raise HTTPException(status_code=422, detail="password must be at least 6 characters")
     try:
@@ -768,6 +771,7 @@ def create_member(
             dept=req.dept,
             scopes=list(req.scopes or []),
             actor=claims["sub"],
+            display_name=req.display_name,
         ).to_public()
     except MemberExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -789,6 +793,7 @@ def update_member(
             dept=req.dept,
             scopes=list(req.scopes or []),
             actor=claims["sub"],
+            display_name=req.display_name,
         ).to_public()
     except LockoutGuardError:
         raise
@@ -796,7 +801,7 @@ def update_member(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except MemberError as exc:
         msg = str(exc)
-        if "head role" in msg:
+        if "head role" in msg or "must match" in msg or "must belong" in msg or "valid email" in msg or "unknown role" in msg:
             raise HTTPException(status_code=422, detail=msg) from exc
         raise HTTPException(status_code=404, detail=msg) from exc
 
@@ -852,6 +857,8 @@ class DeptMemberCreateRequest(BaseModel):
     username: str
     password: str
     role: str = ""  # blank = the department's member role; head/admin roles are refused
+    display_name: str | None = None
+    email: str | None = None
 
 
 class DeptMemberUpdateRequest(BaseModel):
@@ -887,9 +894,9 @@ def create_dept_member(
     dept comes from the head's verified claims, never from the body."""
     claims = _verify_dept_head(authorization)
     dept = str(claims.get("dept", ""))
-    username = (req.username or "").strip()
+    username = (req.email or req.username or "").strip()
     if not username:
-        raise HTTPException(status_code=422, detail="username is required")
+        raise HTTPException(status_code=422, detail="email is required")
     if len(req.password or "") < 6:
         raise HTTPException(status_code=422, detail="password must be at least 6 characters")
     member_role = _dept_member_role(dept)
@@ -910,6 +917,7 @@ def create_dept_member(
             dept=dept,
             scopes=list(peer.scopes) if peer is not None else [],
             actor=claims["sub"],
+            display_name=req.display_name,
         )
     except MemberExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1235,7 +1243,11 @@ def create_skill(
     registry = _get_components()["skills"]
     if registry.get(skill.name) is not None:
         raise HTTPException(status_code=409, detail=f"skill {skill.name!r} already exists")
-    path = registry.save(skill, actor=claims["sub"])
+    try:
+        path = registry.save(skill, actor=claims["sub"])
+    except ValueError as exc:
+        # Mk17: traversal guard is defense-in-depth; invalid scope/name is 422, never 500.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     _get_components()["audit"].log(
         decision="ALLOW",
         resource={"type": "skill", "id": skill.name},
@@ -1263,7 +1275,10 @@ def update_skill(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if skill.name != name:
         raise HTTPException(status_code=409, detail="skill name in frontmatter must match the url")
-    path = registry.save(skill, actor=claims["sub"])
+    try:
+        path = registry.save(skill, actor=claims["sub"])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     _get_components()["audit"].log(
         decision="ALLOW",
         resource={"type": "skill", "id": skill.name},
@@ -1562,7 +1577,17 @@ def add_memory_fact(
 ) -> dict:
     claims = _verify_memory_editor(authorization, scope)
     _validate_scope(scope)
-    outcome = _get_components()["memory_editor"].add(scope, req.text)
+    try:
+        outcome = _get_components()["memory_editor"].add(scope, req.text)
+    except Exception as exc:
+        # Mk17: MemoryValidationError empty → 422, too_long → 413.
+        from app.memory.edit import MemoryValidationError as _MVE
+
+        if isinstance(exc, _MVE):
+            raise HTTPException(
+                status_code=413 if exc.code == "too_long" else 422, detail=str(exc)
+            ) from exc
+        raise
     _audit_memory(claims, scope, outcome.op)
     return {"scope": scope, "op": outcome.op, "text": req.text, "evicted": outcome.evicted}
 
@@ -1580,7 +1605,25 @@ def update_memory_fact(
     item = store.get(scope_to_namespace(scope), key)
     if item is None:
         raise HTTPException(status_code=404, detail=f"memory {key!r} not found in {scope}")
+    # Mk17: validate empty/size then direct put + budget (was raw put, no checks).
+    try:
+        from app.memory.edit import MemoryValidationError as _MVE
+
+        editor = _get_components()["memory_editor"]
+        editor._check_text(req.text)
+    except Exception as exc:
+        from app.memory.edit import MemoryValidationError as _MVE2
+
+        if isinstance(exc, _MVE2):
+            raise HTTPException(
+                status_code=413 if exc.code == "too_long" else 422, detail=str(exc)
+            ) from exc
+        raise
     store.put(scope_to_namespace(scope), key, {"text": req.text, "op": "replace"})
+    try:
+        editor._enforce_budget(scope_to_namespace(scope), scope)
+    except Exception:
+        pass
     _audit_memory(claims, scope, "replace")
     return {"scope": scope, "key": key, "text": req.text, "op": "replace"}
 

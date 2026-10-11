@@ -26,6 +26,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
@@ -34,6 +35,30 @@ from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
+
+
+# Mk17: identity is email. `members.username` physically stores the email
+# (kept column name to avoid FK rewrites); `display_name` is UI-only.
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+def is_valid_email(value: str) -> bool:
+    return bool(_EMAIL_RE.match((value or "").strip())) and len(value.strip()) <= 254
+
+
+def default_display_name(email: str) -> str:
+    return (email or "").split("@")[0].strip() or email.strip()
+
+
+def validate_display_name(value: str | None) -> str:
+    if value is None:
+        return ""
+    v = str(value).strip()
+    if len(v) > 100:
+        raise MemberError("display name must be at most 100 characters")
+    if "\n" in v or "\r" in v:
+        raise MemberError("display name must not contain newlines")
+    return v
 
 
 class MemberError(Exception):
@@ -203,6 +228,12 @@ class MemberRecord:
     active: bool = True
     created_at: str = ""
     updated_at: str = ""
+    display_name: str = ""
+
+    @property
+    def email(self) -> str:
+        """Mk17: identity is email; `username` physically stores it."""
+        return self.username
 
     def claims(self) -> dict[str, Any]:
         """JWT-style claims (sub/role/dept/scopes) for this member."""
@@ -217,6 +248,8 @@ class MemberRecord:
         """Dashboard-safe view (no password hash)."""
         return {
             "username": self.username,
+            "email": self.username,
+            "display_name": self.display_name or default_display_name(self.username),
             "role": self.role,
             "dept": self.dept,
             "scopes": list(self.scopes),
@@ -338,6 +371,14 @@ class MemberStore:
                 )
                 """
             )
+            # Mk17 migration (SQLite twin of 0010): UI-only display name.
+            # Physical `username` column stays the email identity (FK-safe).
+            try:
+                conn.execute(
+                    "ALTER TABLE members ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass
             # Mk15 migration (SQLite twin of 0008): per-department approval mode.
             try:
                 conn.execute(
@@ -458,7 +499,7 @@ class MemberStore:
                 for m in SEED_MEMBERS:
                     conn.execute(
                         "INSERT INTO members (username, password_hash, role, dept, scopes,"
-                        " active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)"
+                        " active, created_at, updated_at, display_name) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)"
                         " ON CONFLICT(username) DO NOTHING",
                         (
                             m["username"],
@@ -468,6 +509,7 @@ class MemberStore:
                             json.dumps(m["scopes"]),
                             now,
                             now,
+                            default_display_name(m["username"]),
                         ),
                     )
             dept_count = conn.execute("SELECT COUNT(*) FROM departments").fetchone()[0]
@@ -495,6 +537,10 @@ class MemberStore:
     def _row_to_record(self, row: sqlite3.Row | None) -> MemberRecord | None:
         if row is None:
             return None
+        try:
+            display = row["display_name"]
+        except Exception:
+            display = ""
         return MemberRecord(
             username=row["username"],
             password_hash=row["password_hash"],
@@ -504,6 +550,7 @@ class MemberStore:
             active=bool(row["active"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            display_name=str(display or ""),
         )
 
     def _audit(self, actor: str, action: str, username: str) -> None:
@@ -548,6 +595,10 @@ class MemberStore:
             admins = [a for a in admins if a != exclude]
         return len(admins)
 
+    def count_active_admins(self) -> int:
+        """Mk17 public: active admin count for the central second-admin rule."""
+        return self._active_admin_count()
+
     def _bump_version(self, conn: sqlite3.Connection) -> None:
         """Increment `members_version` inside the caller's transaction so the
         PolicyEnforcer's lazy g rebuild detects the change (plan_mk2 §8)."""
@@ -580,6 +631,10 @@ class MemberStore:
         finally:
             conn.close()
         return self._row_to_record(row)
+
+    def get_direct(self, username: str) -> MemberRecord | None:
+        """Mk17: uncached read for the login path (PG overrides memoised get)."""
+        return self.get(username)
 
     def get_user(self, username: str) -> MemberRecord | None:
         """Alias kept for demos/tests migrating off the static `USERS` dict."""
@@ -1405,6 +1460,55 @@ class MemberStore:
         if role.endswith("_head") and role != f"{dept}_head":
             raise MemberError(f"head role {role!r} must match its department {dept!r}")
 
+    @staticmethod
+    def _validate_email(value: str) -> str:
+        """Mk17: identity is strictly email (Composio + org requirement)."""
+        v = (value or "").strip()
+        if not is_valid_email(v):
+            raise MemberError(f"email {value!r} is not a valid email address")
+        return v
+
+    @staticmethod
+    def _validate_role_dept(role: str, dept: str) -> None:
+        """Mk17 strict: role must belong to dept; admin must be dept admin.
+
+        - `admin` ⟺ `admin` only.
+        - `{dept}_head` / `{dept}_agent` ⟺ that dept only.
+        Existing mismatched rows are grandfathered (flagged, not failed);
+        all new creates/updates are rejected.
+        """
+        role = (role or "").strip()
+        dept = (dept or "").strip()
+        if not role or not dept:
+            raise MemberError("role and dept are required")
+        if role == "admin":
+            if dept != "admin":
+                raise MemberError(f"admin role must belong to department 'admin', got {dept!r}")
+            return
+        if role.endswith("_head") or role.endswith("_agent"):
+            expected = role[: -len("_head")] if role.endswith("_head") else role[: -len("_agent")]
+            if expected != dept:
+                if role.endswith("_head"):
+                    raise MemberError(
+                        f"head role {role!r} must match its department {dept!r}"
+                    )
+                raise MemberError(f"role {role!r} must match its department {dept!r}")
+            return
+        raise MemberError(f"unknown role {role!r}")
+
+    def list_role_dept_mismatches(self) -> list[dict[str, str]]:
+        """Mk17 grandfather flag: existing rows violating the strict map.
+
+        Returns [{username, role, dept}] for admin review; does not mutate.
+        """
+        out: list[dict[str, str]] = []
+        for m in self.list():
+            try:
+                self._validate_role_dept(m.role, m.dept)
+            except MemberError:
+                out.append({"username": m.username, "role": m.role, "dept": m.dept})
+        return out
+
     def create(
         self,
         username: str,
@@ -1413,35 +1517,41 @@ class MemberStore:
         dept: str,
         scopes: list[str] | None = None,
         actor: str = "admin",
+        display_name: str | None = None,
+        email: str | None = None,
     ) -> MemberRecord:
-        self._validate_head_role(role, dept)
-        if self.get(username) is not None:
-            raise MemberExistsError(f"member {username!r} already exists")
+        # Mk17: `username` param is the email identity; `email=` alias accepted.
+        identity = self._validate_email(email if email is not None else username)
+        self._validate_role_dept(role, dept)
+        disp = validate_display_name(display_name) or default_display_name(identity)
+        if self.get(identity) is not None:
+            raise MemberExistsError(f"member {identity!r} already exists")
         now = _now()
         conn = self._connect()
         try:
             try:
                 conn.execute(
                     "INSERT INTO members (username, password_hash, role, dept, scopes, active,"
-                    " created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                    " created_at, updated_at, display_name) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
                     (
-                        username,
+                        identity,
                         hash_password(password),
                         role,
                         dept,
                         json.dumps(scopes or []),
                         now,
                         now,
+                        disp,
                     ),
                 )
             except self.INTEGRITY_ERRORS as exc:  # lost a race with another creator
-                raise MemberExistsError(f"member {username!r} already exists") from exc
+                raise MemberExistsError(f"member {identity!r} already exists") from exc
             self._bump_version(conn)
             conn.commit()
         finally:
             conn.close()
-        self._audit(actor, "create", username)
-        member = self.get(username)
+        self._audit(actor, "create", identity)
+        member = self.get(identity)
         assert member is not None
         return member
 
@@ -1453,16 +1563,25 @@ class MemberStore:
         dept: str,
         scopes: list[str] | None = None,
         actor: str,
+        display_name: str | None = None,
     ) -> MemberRecord:
         if self.get(username) is None:
             raise MemberError(f"member {username!r} not found")
-        self._validate_head_role(role, dept)
+        self._validate_email(username)
+        self._validate_role_dept(role, dept)
         conn = self._connect()
         try:
-            conn.execute(
-                "UPDATE members SET role = ?, dept = ?, scopes = ?, updated_at = ? WHERE username = ?",
-                (role, dept, json.dumps(scopes or []), _now(), username),
-            )
+            if display_name is None:
+                conn.execute(
+                    "UPDATE members SET role = ?, dept = ?, scopes = ?, updated_at = ? WHERE username = ?",
+                    (role, dept, json.dumps(scopes or []), _now(), username),
+                )
+            else:
+                disp = validate_display_name(display_name)
+                conn.execute(
+                    "UPDATE members SET role = ?, dept = ?, scopes = ?, display_name = ?, updated_at = ? WHERE username = ?",
+                    (role, dept, json.dumps(scopes or []), disp, _now(), username),
+                )
             self._bump_version(conn)
             conn.commit()
         finally:

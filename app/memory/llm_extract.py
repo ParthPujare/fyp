@@ -36,18 +36,39 @@ SYSTEM_PROMPT = (
 
 
 def build_messages(
-    user_msg: str, assistant_reply: str, speaker: str | None = None
+    user_msg: str,
+    assistant_reply: str,
+    speaker: str | None = None,
+    role: str | None = None,
+    dept: str | None = None,
 ) -> list[dict[str, Any]]:
     """Extraction prompt. `speaker` (Mk16 fix) names who the facts must describe.
 
     Without it the model files third-party mentions ('Alice prefers Slack')
     as the speaker's own facts. The chat-model path (Mk8) leaves it unset and
     keeps the old shape; the platform path always sets it to `claims['sub']`.
+
+    Mk17 role-aware: `role`/`dept` tell the model which team/company statements
+    are in-scope for the speaker (head → `our team...` dept facts; admin →
+    `company policy...` central facts). Scope assignment still happens in
+    `classify()`; the prompt only avoids dropping them.
     """
     content = f"User said: {user_msg}\nAssistant replied: {assistant_reply}\nFacts:"
     if speaker:
+        extra = ""
+        if role == "admin":
+            extra = (
+                " You are an admin: personal 'I prefer...' facts are yours; "
+                "'company policy / company-wide...' facts are central-memory candidates."
+            )
+        elif role is not None and role.endswith("_head") and dept:
+            extra = (
+                f" You are the {dept} head: personal 'I prefer...' facts are yours; "
+                f"'our team / our department...' facts are dept/{dept} candidates."
+            )
         content = (
-            f"Speaker: {speaker} — extract durable facts about THIS person only. "
+            f"Speaker: {speaker} (role {role or 'member'}, dept {dept or '-'}) — "
+            f"extract durable facts about THIS person only.{extra} "
             f"Facts about anyone else they mention belong to that person, not "
             f"the speaker: ignore them.\n{content}"
         )
@@ -93,23 +114,27 @@ def llm_extract_facts(provider: Any, user_msg: str, assistant_reply: str, claims
 def system_extract_facts(
     provider: Any, user_msg: str, assistant_reply: str, claims: dict[str, Any]
 ) -> list[Fact]:
-    """Mk16 platform extraction — user-scope only, never raises.
+    """Mk17 platform extraction — role-aware proposals, never raises.
 
-    The shared Qwen model sees only this turn's pair and may propose any scope
-    via `classify`, but the auto-path keeps strictly `user/<self>` (admin and
-    heads included): central/dept/other-user proposals are dropped, never
-    re-scoped. The caller still gates each kept fact through
-    `enforcer.memory_allowed(write)` before `MemoryEditor.apply`.
+    Mk16 kept strictly `user/<self>`; Mk17 keeps user + dept + central proposals
+    so dept/central approvals can trigger on live. Each kept fact is still gated
+    downstream through `enforcer.memory_allowed(write)` + HITL (`user` auto,
+    `dept` → head approval, `central` → second-admin approval).
     """
     if provider is None or not (user_msg or "").strip():
         return []
     try:
         resp = provider.generate(
-            build_messages(user_msg, assistant_reply, speaker=str(claims.get("sub", ""))),
+            build_messages(
+                user_msg,
+                assistant_reply,
+                speaker=str(claims.get("sub", "")),
+                role=str(claims.get("role", "")),
+                dept=str(claims.get("dept", "")),
+            ),
             tools=[],
         )
         facts = parse_response(getattr(resp, "text", "") or "", claims)
     except Exception:  # noqa: BLE001 - extraction must never sink the turn
         return []
-    own = scope_user(str(claims.get("sub", "")))
-    return [f for f in facts if f.scope == own]
+    return facts

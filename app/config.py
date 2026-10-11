@@ -57,6 +57,9 @@ class MemorySettings(BaseModel):
     snapshot_max_chars: int = Field(default=6000, ge=1)
     recall_top_k: int = Field(default=5, ge=1)
     episodic_scope: str = "dept"  # "dept" (team recall) — locked decision (session_005)
+    # Mk17: per-fact cap (MEMORY__MAX_FACT_CHARS). Tier caps stay; a single
+    # huge fact must not wipe the tier. Code-config now, UI later.
+    max_fact_chars: int = Field(default=2000, ge=1)
 
 
 class GuardrailSettings(BaseModel):

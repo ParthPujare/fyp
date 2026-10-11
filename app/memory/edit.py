@@ -33,6 +33,12 @@ class EditOutcome:
     evicted: list[str] = field(default_factory=list)
 
 
+class MemoryValidationError(ValueError):
+    def __init__(self, code: str, detail: str = ""):
+        self.code = code  # "empty" | "too_long"
+        super().__init__(detail or code)
+
+
 class MemoryEditor:
     def __init__(self, store: SqliteBaseStore, settings: MemorySettings):
         self._store = store
@@ -45,6 +51,18 @@ class MemoryEditor:
             return self._settings.dept_bytes
         return self._settings.user_bytes
 
+    def _check_text(self, text: str) -> str:
+        """Mk17: empty rejected, per-fact cap enforced before any put."""
+        v = (text or "").strip()
+        if not v:
+            raise MemoryValidationError("empty", "memory fact must not be empty")
+        cap = int(getattr(self._settings, "max_fact_chars", 2000) or 2000)
+        if len(text) > cap:
+            raise MemoryValidationError(
+                "too_long", f"memory fact exceeds {cap} characters ({len(text)})"
+            )
+        return text
+
     def apply(self, fact: Fact) -> EditOutcome:
         if fact.op == "replace":
             return self.replace(fact.scope, fact.text, fact.match or fact.text)
@@ -53,6 +71,7 @@ class MemoryEditor:
         return self.add(fact.scope, fact.text)
 
     def add(self, scope: str, text: str) -> EditOutcome:
+        text = self._check_text(text)
         ns = scope_to_namespace(scope)
         norm = normalize(text)
         for item in self._store.items_in(ns):
@@ -65,6 +84,7 @@ class MemoryEditor:
         return EditOutcome(op="add", scope=scope, text=text, evicted=evicted)
 
     def replace(self, scope: str, text: str, match: str) -> EditOutcome:
+        text = self._check_text(text)
         matches = self._substring_match(scope, match)
         if not matches:
             raise MemoryMatchError("not_found")
@@ -72,6 +92,7 @@ class MemoryEditor:
             raise MemoryMatchError("ambiguous")
         ns = scope_to_namespace(scope)
         self._store.put(ns, matches[0].key, {"text": text, "op": "replace"})
+        self._enforce_budget(ns, scope)
         return EditOutcome(op="replace", scope=scope, text=text)
 
     def remove(self, scope: str, match: str) -> EditOutcome:

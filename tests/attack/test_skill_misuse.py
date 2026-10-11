@@ -161,13 +161,20 @@ def test_malicious_skill_forbidden_nested_tool_denied(tmp_path, dept_apps, execu
 
 
 def test_skill_save_rejects_root_escape(tmp_path):
-    """A skill.md whose scope walks out of the registry root → save() refuses."""
+    """A skill.md whose scope walks out of the registry root → refused.
+
+    Mk17: rejected at parse (422) instead of late in save() (500); either
+    layer raising ValueError satisfies the traversal guard.
+    """
     root = tmp_path / "skills"
     registry = SkillRegistry(root)
-    evil = parse_skill_document(SKILL_FRONT.format(
-        name="evil", trigger="t", scope="dept/../../../../tmp-escape",
-        role="marketing_agent", step="s", tool="crm_search_customer",
-    ))
+    try:
+        evil = parse_skill_document(SKILL_FRONT.format(
+            name="evil", trigger="t", scope="dept/../../../../tmp-escape",
+            role="marketing_agent", step="s", tool="crm_search_customer",
+        ))
+    except ValueError:
+        return  # parse-time rejection is the Mk17-correct path (422)
     with pytest.raises(ValueError):
         registry.save(evil)
 

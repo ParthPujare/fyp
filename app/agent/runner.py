@@ -367,6 +367,15 @@ def resume_agent(
     thread_id = entry["thread_id"]
     if checkpointer is None:
         checkpointer = make_checkpointer(settings)
+    # Mk17: deleted-chat resume is 409 (conflict), not 404 and not a replay
+    # from missing state. SQLite has no cross-PC gate, so check here directly.
+    try:
+        if not run_state_is_local(checkpointer, thread_id):
+            raise ValueError(f"approval {approval_id!r} chat was deleted")
+    except ValueError:
+        raise
+    except Exception:
+        pass
     if key_id is None:
         key_id = _saved_key_id(checkpointer, thread_id)
     deps = None

@@ -55,6 +55,9 @@ class PgMemberStore(MemberStore):
     VERSION_TTL_S = 1.0
     MEMBER_TTL_S = 300.0  # members/departments: the version counter invalidates them on change
     READ_TTL_S = 30.0  # keys / connections / catalog: no change counter, so bounded staleness
+    # Mk17: auth material (keys, connections) must not stay stale 30s after a
+    # revoke/re-save on another laptop — 5s bound; static catalog keeps 30s.
+    KEY_TTL_S = 5.0
 
     def __init__(
         self,
@@ -64,10 +67,12 @@ class PgMemberStore(MemberStore):
         version_ttl: float | None = None,
         read_ttl: float | None = None,
         member_ttl: float | None = None,
+        key_ttl: float | None = None,
     ) -> None:
         self._pool = pool or get_pool()
         self._version_ttl = self.VERSION_TTL_S if version_ttl is None else version_ttl
         self._read_ttl = self.READ_TTL_S if read_ttl is None else read_ttl
+        self._key_ttl = self.KEY_TTL_S if key_ttl is None else key_ttl
         # An explicit read_ttl (tests use 0 = "cache off") also governs members unless overridden.
         self._member_ttl = (
             member_ttl if member_ttl is not None else (self.MEMBER_TTL_S if read_ttl is None else read_ttl)
@@ -147,6 +152,10 @@ class PgMemberStore(MemberStore):
                 return copy.deepcopy(member)
         return None
 
+    def get_direct(self, username: str) -> MemberRecord | None:
+        """Mk17: login-path read straight from the database (new members <1s visible)."""
+        return MemberStore.get(self, username)
+
     def list(self) -> list[MemberRecord]:
         return self._memo(("list",), lambda: MemberStore.list(self), self._member_ttl)
 
@@ -157,30 +166,30 @@ class PgMemberStore(MemberStore):
         return self._memo(("dept", name), lambda: MemberStore.get_department(self, name), self._member_ttl)
 
     def list_llm_keys(self, username: str) -> list[LLMKeyRecord]:
-        return self._memo(("llmkeys", username), lambda: MemberStore.list_llm_keys(self, username))
+        return self._memo(("llmkeys", username), lambda: MemberStore.list_llm_keys(self, username), self._key_ttl)
 
     def get_active_llm_key_meta(self, username: str) -> tuple[str, str] | None:
-        return self._memo(("llmmeta", username), lambda: MemberStore.get_active_llm_key_meta(self, username))
+        return self._memo(("llmmeta", username), lambda: MemberStore.get_active_llm_key_meta(self, username), self._key_ttl)
 
     def _fetch_llm_key(self, query: str, params: tuple[Any, ...]) -> tuple[str, str, str, str] | None:
         # Caches the ENCRYPTED row only; decryption still happens per call in `_llm_key_row`.
-        return self._memo(("llmrow", query, params), lambda: MemberStore._fetch_llm_key(self, query, params))
+        return self._memo(("llmrow", query, params), lambda: MemberStore._fetch_llm_key(self, query, params), self._key_ttl)
 
     def get_platform_llm_meta(self) -> tuple[str, str, str] | None:
-        return self._memo(("platformmeta",), lambda: MemberStore.get_platform_llm_meta(self))
+        return self._memo(("platformmeta",), lambda: MemberStore.get_platform_llm_meta(self), self._key_ttl)
 
     def _fetch_platform_llm(self) -> tuple[str, str, str, str] | None:
         # Caches the ENCRYPTED row only; decryption still happens per call in `get_platform_llm`.
-        return self._memo(("platformrow",), lambda: MemberStore._fetch_platform_llm(self))
+        return self._memo(("platformrow",), lambda: MemberStore._fetch_platform_llm(self), self._key_ttl)
 
     def get_composio_key(self, username: str) -> str | None:
-        return self._memo(("composio", username), lambda: MemberStore.get_composio_key(self, username))
+        return self._memo(("composio", username), lambda: MemberStore.get_composio_key(self, username), self._key_ttl)
 
     def list_connected_accounts(self, username: str) -> list[dict[str, Any]]:
-        return self._memo(("accounts", username), lambda: MemberStore.list_connected_accounts(self, username))
+        return self._memo(("accounts", username), lambda: MemberStore.list_connected_accounts(self, username), self._key_ttl)
 
     def is_app_connected(self, username: str, app: str) -> bool:
-        return self._memo(("connected", username, app), lambda: MemberStore.is_app_connected(self, username, app))
+        return self._memo(("connected", username, app), lambda: MemberStore.is_app_connected(self, username, app), self._key_ttl)
 
     def list_toolkits(self, enabled_only: bool = False) -> list[dict[str, Any]]:
         return self._memo(("toolkits", enabled_only), lambda: MemberStore.list_toolkits(self, enabled_only))

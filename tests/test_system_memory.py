@@ -98,7 +98,9 @@ def test_system_extract_keeps_only_own_user_scope():
 
 
 def test_system_extract_drops_central_and_dept_even_for_admin():
-    # classify() maps these to central / dept/marketing, but the auto-path pins user-only.
+    # Mk17 (supersedes Mk16 user-only pin): the extractor proposes all scopes;
+    # gating happens downstream (user auto, dept → head approval, central →
+    # second-admin). classify() maps these to central / dept/marketing / user.
     stub = StubProvider(
         '["Company policy requires quarterly audits", '
         '"Our team policy requires weekly standups", '
@@ -108,15 +110,16 @@ def test_system_extract_drops_central_and_dept_even_for_admin():
         stub, "Company policy requires quarterly audits", "noted", ADMIN
     )
     scopes = {f.scope for f in facts}
-    assert scopes <= {"user/admin@acme.com"}
-    assert "central" not in scopes
-    assert not any(s.startswith("dept/") for s in scopes)
+    assert "central" in scopes
+    assert "dept/admin" in scopes  # classify() pins dept scope to the speaker's own dept
+    assert "user/admin@acme.com" in scopes
 
 
 def test_system_extract_drops_dept_for_head():
+    # Mk17: head's team statement is proposed as dept scope (head approval downstream).
     stub = StubProvider('["Our team policy requires weekly standups"]')
     facts = system_extract_facts(stub, "Our team policy requires weekly standups", "ok", MHEAD)
-    assert facts == []
+    assert [f.scope for f in facts] == ["dept/marketing"]
 
 
 def test_system_extract_never_raises_and_none_safe():

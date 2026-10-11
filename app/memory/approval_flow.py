@@ -94,6 +94,36 @@ def apply_decision(
     check_decision(
         approvals, approval_id, claims, approve=approve, as_level=as_level, always_allow=always_allow
     )
+    # Mk17: central memory needs a second admin. Self-approval is allowed only
+    # as a single-admin fallback (audited); with ≥2 active admins the decider
+    # must differ from the requester.
+    if approve and as_level == LEVEL_ADMIN:
+        entry = approvals.get(approval_id)
+        if entry is not None:
+            resource = entry.get("resource") or {}
+            is_central = resource.get("type") == "memory" and str(resource.get("id", "")) == "central"
+            if is_central:
+                requester = str((entry.get("actor") or {}).get("sub", ""))
+                decider = str(claims.get("sub", ""))
+                if requester and decider and requester == decider:
+                    count = None
+                    for attr in ("count_active_admins", "_active_admin_count"):
+                        try:
+                            fn = getattr(members, attr, None)
+                            if callable(fn):
+                                try:
+                                    count = fn()
+                                except TypeError:
+                                    count = fn(exclude=None) if attr.startswith("_") else fn()
+                                break
+                        except Exception:
+                            count = None
+                    if isinstance(count, int) and count >= 2:
+                        raise DecisionError(
+                            409,
+                            "central memory needs a second admin to approve "
+                            f"(requested by {requester!r})",
+                        )
     try:
         decided = approvals.decide_step(
             approval_id,

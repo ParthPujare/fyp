@@ -117,11 +117,20 @@ class FilePolicyStore:
 
 
 def open_policy_store():
-    """Shared database when `DATABASE_URL` is set, else the repo's `policy.csv`."""
+    """Shared database when `DATABASE_URL` is set, else `settings.services.policy_path`.
+
+    Mk17: honors `SERVICES__POLICY_PATH` so dashboard writes and enforcer reads
+    never diverge (previously hardcoded to the repo `policy.csv`).
+    """
     from app.db import is_enabled
 
     if is_enabled():
         from app.harness.pg_policy import PgPolicyStore
 
         return PgPolicyStore()
-    return FilePolicyStore(POLICY_PATH)
+    try:
+        from app.config import get_settings
+
+        return FilePolicyStore(get_settings().services.policy_path)
+    except Exception:
+        return FilePolicyStore(POLICY_PATH)
