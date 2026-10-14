@@ -75,7 +75,9 @@ def env(tmp_path, enforcer, executor, audit_log):
 
 
 def _transfers(dept_apps):
-    return TestClient(dept_apps[8005]).get("/transfers").json()
+    from tests.attack.helpers import service_headers as _sh
+
+    return TestClient(dept_apps[8005]).get("/transfers", headers=_sh()).json()
 
 
 # ---------------------------------------------------------------- G1

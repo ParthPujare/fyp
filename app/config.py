@@ -15,6 +15,14 @@ class JWTSettings(BaseModel):
     secret: str = DEFAULT_JWT_SECRET
     algorithm: str = "HS256"
     expiry_minutes: int = Field(default=60, ge=1)
+    # Mk18 Phase D: browser session cookies (httpOnly). Bearer headers keep
+    # working for API clients/tests; browsers migrate to cookies. Dual slots
+    # (`<base>_admin` / `<base>_member`) preserve the identity switcher; the
+    # readable `<base>_active` cookie tracks the active slot. Derived names —
+    # see app/harness/cookies.py.
+    cookie_name: str = "harness_token"
+    cookie_secure: bool = True
+    cookie_samesite: str = "lax"
 
 
 class LLMSettings(BaseModel):
@@ -27,6 +35,12 @@ class LLMSettings(BaseModel):
     fernet_key: str = DEFAULT_FERNET_KEY
     temperature: float = 0.2
     max_tokens: int = 1024
+    # Mk18 Phase H: per-user/day spend caps (LLM__DAILY_*). Over either cap the
+    # turn falls back to Mock (gateway answers 429 pre-run). Cost is estimated
+    # flat per generate call — no per-model pricing tables to drift.
+    daily_call_cap: int = Field(default=500, ge=1)
+    daily_cost_cents_cap: int = Field(default=500, ge=1)
+    est_cost_cents_per_call: int = Field(default=1, ge=0)
 
 
 class ServiceSettings(BaseModel):
@@ -46,6 +60,14 @@ class ServiceSettings(BaseModel):
     # Optional: HMAC key for the audit hash chain. Set it BEFORE the first audit line is
     # written (an existing plain-SHA chain will fail verification once a key is added).
     audit_hmac_key: str | None = None
+    # Mk18 Phase H: retired audit key(s) for rotation. Comma-separated; lines signed
+    # under a retired key still verify (rotation = new current + old appended here).
+    # See ref_docs/runbook_backup.md "HMAC rotation".
+    audit_hmac_key_prev: str | None = None
+    # Mk18 Phase H: optional HMAC for the trace chain (same rotation semantics).
+    # Blank = plain SHA-256 (default, byte-identical behavior).
+    trace_hmac_key: str | None = None
+    trace_hmac_key_prev: str | None = None
 
 
 class MemorySettings(BaseModel):

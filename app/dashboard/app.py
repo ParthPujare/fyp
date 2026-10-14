@@ -13,6 +13,7 @@ directly, so an approval decided here resumes the exact suspended thread. Every
 
 from __future__ import annotations
 
+import inspect
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -20,8 +21,8 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -85,6 +86,48 @@ app = FastAPI(title="harness dashboard", version="0.1.0", lifespan=_lifespan)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.middleware("http")
+async def _cookie_session(request: Request, call_next):
+    """Mk18 Phase D: cookie sessions + CSRF gate.
+
+    - No `Authorization` header but a valid session cookie → inject it as
+      Bearer so every verifier works unchanged; mark `request.state.auth_via`.
+    - Cookie-authenticated mutating requests need `X-CSRF-Token` (derived per
+      sub, see `app/harness/csrf.py`). Bearer API clients are exempt.
+    """
+    from app.harness.cookies import active_cookie, slot_cookie
+    from app.harness.csrf import MUTATING_METHODS, csrf_exempt_path, csrf_valid
+
+    headers = {k.lower(): v for k, v in request.headers.items()}
+    via = "bearer" if headers.get("authorization", "").lower().startswith("bearer ") else None
+    if via is None:
+        # Mk18 Phase D: active dual-slot cookie (XSS-proof session).
+        active = request.cookies.get(active_cookie(settings.jwt.cookie_name), "")
+        if active in ("admin", "member"):
+            cookie = request.cookies.get(slot_cookie(settings.jwt.cookie_name, active), "")
+            if cookie:
+                try:
+                    claims = verify_token(cookie, settings.jwt.secret, settings.jwt.algorithm)
+                    via = "cookie"
+                    request.scope["headers"] = [
+                        (k, v) for k, v in request.scope.get("headers", [])
+                        if k.lower() != b"authorization"
+                    ] + [(b"authorization", f"Bearer {cookie}".encode("latin-1"))]
+                    request.state.csrf_sub = str(claims.get("sub", ""))
+                except Exception:  # noqa: BLE001
+                    via = None
+    request.state.auth_via = via or "none"
+    if (
+        via == "cookie"
+        and request.method.upper() in MUTATING_METHODS
+        and not csrf_exempt_path(request.url.path)
+    ):
+        sub = getattr(request.state, "csrf_sub", "")
+        if not csrf_valid(headers.get("x-csrf-token"), sub, settings.jwt.secret):
+            return JSONResponse({"detail": "missing or invalid CSRF token"}, status_code=403)
+    return await call_next(request)
 
 
 _components: dict[str, Any] | None = None
@@ -185,6 +228,33 @@ def _resumable_here(entry: dict[str, Any]) -> bool:
     return run_state_is_local(_get_components()["checkpointer"], entry["thread_id"])
 
 
+def _approval_impact(item: dict[str, Any]) -> str:
+    """Mk18 Phase B: non-secret impact summary for approval cards.
+
+    Cards keep `***` masking; this line gives deciders signal (amounts,
+    domains, lengths) without exposing raw secrets. Full args live behind
+    `GET /api/approvals/{id}/args` (privileged, audit-logged).
+    """
+    resource = item.get("resource") or {}
+    payload = item.get("payload") or {}
+    if resource.get("type") == "memory":
+        text = str(payload.get("text", "") or "")
+        return f"{resource.get('id', '?')}: {payload.get('op', 'add')} {len(text)} chars"
+    args = payload.get("args") or {}
+    name = str(payload.get("tool", resource.get("id", "?")))
+    if name == "finance_transfer":
+        masked = sum(1 for k in ("memo", "from_account", "to_account") if k in args)
+        return f"transfer amount={args.get('amount', '?')} ({masked} masked fields)"
+    if name.startswith("gmail_"):
+        to = str(args.get("to", ""))
+        domain = to.split("@")[-1] if "@" in to else "?"
+        return (
+            f"to domain {domain}, subject {len(str(args.get('subject', '')))} chars, "
+            f"body {len(str(args.get('body', '')))} chars"
+        )
+    return f"{name}: {len(args)} args"
+
+
 def _approval_view(item: dict[str, Any]) -> dict[str, Any]:
     dept = ApprovalStore.dept_of(item)
     status = item["status"]
@@ -219,7 +289,37 @@ def _approval_view(item: dict[str, Any]) -> dict[str, Any]:
         "action": item.get("action"),
         "needs_admin": status == "pending" and level == LEVEL_ADMIN,
         "allowlist_eligible": entry_allowlist_eligible(item),
+        "impact": _approval_impact(item),
     }
+
+
+@app.get("/api/approvals/{approval_id}/args")
+def approval_args(
+    approval_id: str,
+    approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Mk18 Phase B: privileged full-args view for deciders (audit-logged).
+
+    Admins may view any item; heads only their own department's. Every view is
+    audit-logged as `approval:args_view` so blind-signing pressure leaves a trail.
+    """
+    claims, is_admin = _verify_admin_or_head(authorization)
+    entry = approvals.get(approval_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"approval {approval_id!r} not found")
+    if not is_admin:
+        dept = ApprovalStore.dept_of(entry)
+        if dept is None or dept != str(claims.get("dept", "")):
+            raise HTTPException(status_code=403, detail="not your department's approval")
+    _get_components()["audit"].log(
+        decision="ALLOW",
+        resource={"type": "approval-args", "id": approval_id},
+        actor={"sub": claims["sub"], "role": claims["role"], "dept": claims["dept"]},
+        run_id=entry.get("run_id", "dashboard"),
+        reason="approval:args_view",
+    )
+    return {"approval_id": approval_id, "payload": entry.get("payload")}
 
 
 def _decide_or_http_error(approvals: ApprovalStore, approval_id: str, approve: bool, decider: str) -> None:
@@ -241,6 +341,7 @@ def _decide(
     defer: bool,
     resumer: Any,
     approvals: ApprovalStore,
+    auth_token: str | None = None,
 ) -> dict[str, Any]:
     """Shared body of the admin and dept decide routes (Mk14 defer + Mk15 steps).
 
@@ -276,7 +377,7 @@ def _decide(
         raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
     if defer or decided["status"] == "pending":
         return decision_response(decided)
-    result = resumer(approval_id)
+    result = _call_dashboard_resumer(resumer, approval_id, auth_token)
     decided = approvals.get(approval_id)
     return {
         "approval_id": approval_id,
@@ -289,7 +390,7 @@ def _decide(
 
 
 def get_resumer():
-    def _resume(approval_id: str):
+    def _resume(approval_id: str, auth_token: str | None = None):
         c = _get_components()
         return resume_agent(
             approval_id,
@@ -301,6 +402,7 @@ def get_resumer():
             approvals=c["approvals"],
             recall=c["recall"],
             checkpointer=c["checkpointer"],
+            auth_token=auth_token,
         )
 
     return _resume
@@ -414,8 +516,12 @@ def health() -> dict:
 
 
 @app.post("/api/login")
-def login(req: LoginRequest) -> dict:
-    """Proxy the mock auth service login so the browser never holds credentials."""
+def login(req: LoginRequest, response: Response) -> dict:
+    """Proxy the mock auth service login so the browser never holds credentials.
+
+    Mk18 Phase D: forwards the auth service's session cookie to the browser
+    (httpOnly) while keeping the JSON body for API clients.
+    """
     try:
         resp = httpx.post(
             f"{settings.services.auth_url}/auth/login",
@@ -426,7 +532,39 @@ def login(req: LoginRequest) -> dict:
         raise HTTPException(status_code=502, detail=f"auth service unreachable: {exc}") from exc
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail="invalid credentials")
-    return resp.json()
+    body = resp.json()
+    # Mk18 Phase D: forward the auth service's session cookies (dual slots +
+    # active marker) so the browser session is httpOnly.
+    for raw in resp.headers.get_list("set-cookie", []):
+        response.headers.append("set-cookie", raw)
+    return body
+
+
+@app.post("/api/logout")
+def logout(response: Response) -> dict:
+    """Mk18 Phase D: clear the browser session cookies (tokens are stateless)."""
+    from app.harness.cookies import active_cookie, slot_cookie
+
+    for name in (
+        slot_cookie(settings.jwt.cookie_name, "admin"),
+        slot_cookie(settings.jwt.cookie_name, "member"),
+        active_cookie(settings.jwt.cookie_name),
+    ):
+        response.delete_cookie(key=name, path="/")
+    return {"logged_out": True}
+
+
+@app.get("/api/csrf")
+def csrf_token(authorization: str | None = Header(default=None)) -> dict:
+    """Mk18 Phase D: derived per-session CSRF token for cookie browsers.
+
+    Works for Bearer callers too (harmless); cookie sessions are injected as
+    Bearer by middleware before reaching here.
+    """
+    from app.harness.csrf import csrf_token_for
+
+    claims, _token = _verified_member(authorization)
+    return {"csrf_token": csrf_token_for(str(claims.get("sub", "")), settings.jwt.secret)}
 
 
 @app.post("/api/chat")
@@ -533,6 +671,33 @@ def list_own_threads(authorization: str | None = Header(default=None)) -> list[s
     return resp.json()
 
 
+def _bearer_token(authorization: str | None) -> str | None:
+    """Raw Bearer token from a verified header (Mk18: forwarded for dept-service
+    passthrough). Returns None when absent — verifiers already rejected those."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    return authorization.split(" ", 1)[1].strip() or None
+
+
+def _call_dashboard_resumer(resumer: Any, approval_id: str, auth_token: str | None = None):
+    """Invoke a resumer, passing `auth_token` only if it accepts it; map a
+    spend-cap stop to HTTP 429 (Mk18 Phase H). Test doubles stay single-arg."""
+    from app.llm.metered import SpendCapExceeded as _SpendCapExceeded
+
+    try:
+        try:
+            params = inspect.signature(resumer).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "auth_token" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        ):
+            return resumer(approval_id, auth_token=auth_token)
+        return resumer(approval_id)
+    except _SpendCapExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+
 @app.get("/api/approvals/pending")
 def pending_approvals(
     approvals: Annotated[ApprovalStore, Depends(get_approval_store)],
@@ -588,7 +753,8 @@ def decide_approval(
     """
     claims = _verify_admin(authorization)
     return _decide(
-        approval_id, req, claims, as_level=LEVEL_ADMIN, defer=defer, resumer=resumer, approvals=approvals
+        approval_id, req, claims, as_level=LEVEL_ADMIN, defer=defer, resumer=resumer, approvals=approvals,
+        auth_token=_bearer_token(authorization),
     )
 
 
@@ -610,7 +776,8 @@ def decide_dept_approval(
     """
     claims = _verify_dept_head(authorization)
     return _decide(
-        approval_id, req, claims, as_level=LEVEL_HEAD, defer=defer, resumer=resumer, approvals=approvals
+        approval_id, req, claims, as_level=LEVEL_HEAD, defer=defer, resumer=resumer, approvals=approvals,
+        auth_token=_bearer_token(authorization),
     )
 
 
@@ -619,6 +786,7 @@ def _resume_owned(
     claims: dict[str, Any],
     resumer: Any,
     approvals: ApprovalStore,
+    auth_token: str | None = None,
 ) -> dict[str, Any]:
     """Owner-only resume shared by the admin and dept resume routes (Mk14)."""
     entry = approvals.get(approval_id)
@@ -632,7 +800,7 @@ def _resume_owned(
     if not _resumable_here(entry):
         raise HTTPException(status_code=409, detail=RESUME_ELSEWHERE)
     try:
-        result = resumer(approval_id)
+        result = _call_dashboard_resumer(resumer, approval_id, auth_token)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
     except ValueError as exc:
@@ -662,7 +830,7 @@ def resume_approval(
     decision came from another PC. Wait-for-owner: no admin fallback.
     """
     claims, _token = _verified_member(authorization)
-    return _resume_owned(approval_id, claims, resumer, approvals)
+    return _resume_owned(approval_id, claims, resumer, approvals, auth_token=_bearer_token(authorization))
 
 
 @app.post("/api/dept/approvals/{approval_id}/resume")
@@ -680,7 +848,7 @@ def resume_dept_approval(
     dept = ApprovalStore.dept_of(entry)
     if dept is not None and dept != str(claims.get("dept", "")):
         raise HTTPException(status_code=403, detail="not your department's approval")
-    return _resume_owned(approval_id, claims, resumer, approvals)
+    return _resume_owned(approval_id, claims, resumer, approvals, auth_token=_bearer_token(authorization))
 
 
 @app.get("/api/approvals/by-thread/{thread_id:path}")
@@ -998,6 +1166,150 @@ def revoke_allowlist(
     return {"member": member, "action": action, "args_hash": args_hash, "revoked": True}
 
 
+# ---- Second eyes (Mk18 Phase E) ----
+
+
+def _second_eyes_required(claims: dict[str, Any]) -> bool:
+    """True when the caller is an admin and a second admin exists to confirm.
+
+    Single-admin deployments (and non-admin callers, who never reach the gated
+    writes) proceed directly with an audited fallback note.
+    """
+    return str(claims.get("role", "")) == "admin" and get_store().count_active_admins() >= 2
+
+
+def _apply_second_eyes(kind: str, payload: dict[str, Any], actor: str) -> dict[str, Any]:
+    """Apply a confirmed proposal (or a single-admin direct write). Raises
+    MemberError/ValueError/SkillValidationError on stale targets — the confirm
+    endpoint maps those to 404/422/409."""
+    from app.auth.store import MemberError as _ME
+
+    store = get_store()
+    if kind == "policy_rows":
+        rows = [tuple(r) for r in payload.get("rows", [])]
+        if not rows:
+            raise _ME("proposal has no policy rows")
+        _policy_store().add_rows(rows, actor)  # type: ignore[arg-type]
+        return {"rows_added": len(rows)}
+    if kind == "skill_save":
+        skill = parse_skill_document(payload.get("content", ""))
+        path = _get_components()["skills"].save(skill, actor=actor)
+        _policy_store().add_rows([("p", "admin", "admin", skill.policy_obj, "use")], actor)
+        return {"name": skill.name, "path": str(path), "saved": True}
+    if kind == "skill_delete":
+        name = str(payload.get("name", ""))
+        if not _get_components()["skills"].delete(name):
+            raise _ME(f"skill {name!r} not found")
+        return {"name": name, "deleted": True}
+    if kind == "llm_key_write":
+        from app.auth.crypto import decrypt_secret
+
+        record = store.set_llm_key(
+            str(payload["username"]),
+            str(payload["provider"]),
+            str(payload["model"]),
+            decrypt_secret(str(payload["api_key_enc"])),
+            active=bool(payload.get("active", True)),
+            actor=actor,
+            base_url=str(payload.get("base_url", "")),
+        )
+        return record.to_public()
+    if kind == "llm_key_delete":
+        store.delete_llm_key(str(payload["username"]), str(payload["key_id"]), actor=actor)
+        return {"username": payload["username"], "key_id": payload["key_id"], "deleted": True}
+    if kind == "platform_key":
+        if payload.get("clear"):
+            removed = store.clear_platform_llm(actor=actor)
+        else:
+            from app.auth.crypto import decrypt_secret
+
+            enc = str(payload.get("api_key_enc") or "")
+            store.set_platform_llm(
+                model=str(payload.get("model", "")),
+                api_key_plaintext=decrypt_secret(enc) if enc else None,
+                actor=actor,
+            )
+            removed = False
+        from app.llm.system import clear_system_provider_cache
+
+        clear_system_provider_cache()
+        return {"configured": True, "cleared": bool(payload.get("clear", False)), "removed": removed}
+    raise _ME(f"unknown second-eyes kind {kind!r}")
+
+
+@app.get("/api/second-eyes/pending")
+def second_eyes_pending(
+    authorization: str | None = Header(default=None),
+) -> list[dict[str, Any]]:
+    """Admin queue of staged high-impact writes awaiting a second admin."""
+    _verify_admin(authorization)
+    proposals = get_store().second_eyes_pending()
+    # Never leak encrypted secrets to the queue view.
+    redacted = []
+    for p in proposals:
+        payload = dict(p.get("payload") or {})
+        for key in ("api_key_enc",):
+            if key in payload:
+                payload[key] = "***"
+        redacted.append({**p, "payload": payload})
+    return redacted
+
+
+@app.post("/api/second-eyes/{proposal_id}/confirm")
+def second_eyes_confirm(
+    proposal_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """A *different* admin confirms a staged write; it is applied now."""
+    claims = _verify_admin(authorization)
+    store = get_store()
+    proposal = store.second_eyes_get(proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail=f"proposal {proposal_id!r} not found")
+    if proposal["status"] != "pending":
+        raise HTTPException(status_code=409, detail=f"proposal {proposal_id!r} already {proposal['status']}")
+    if proposal["proposed_by"] == str(claims.get("sub", "")):
+        raise HTTPException(status_code=409, detail="a second admin must confirm (proposer cannot self-confirm)")
+    try:
+        result = _apply_second_eyes(proposal["kind"], proposal["payload"], str(claims.get("sub", "")))
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        from app.auth.store import MemberError as _ME
+
+        if isinstance(exc, _ME):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise
+    try:
+        store.second_eyes_decide(proposal_id, str(claims.get("sub", "")), True)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"proposal_id": proposal_id, "status": "approved", "applied": result}
+
+
+@app.post("/api/second-eyes/{proposal_id}/reject")
+def second_eyes_reject(
+    proposal_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """A *different* admin rejects a staged write; nothing is applied."""
+    claims = _verify_admin(authorization)
+    try:
+        decided = get_store().second_eyes_decide(proposal_id, str(claims.get("sub", "")), False)
+    except Exception as exc:
+        from app.auth.store import MemberError as _ME
+
+        if isinstance(exc, _ME):
+            msg = str(exc)
+            if "not found" in msg:
+                raise HTTPException(status_code=404, detail=msg) from exc
+            raise HTTPException(status_code=409, detail=msg) from exc
+        raise
+    return {"proposal_id": proposal_id, "status": decided["status"]}
+
+
 @app.get("/api/departments")
 def departments(
     authorization: str | None = Header(default=None),
@@ -1084,10 +1396,30 @@ def register_department(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DepartmentError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    _append_policy_row(role, name, actor=claims["sub"], objects=[service, *resources])
-    rec = store.get_department(name)
-    assert rec is not None
-    return rec.to_public()
+    # Mk18 Phase E: the policy rows are the grant — gate them behind second
+    # eyes when a second admin exists (the record alone grants nothing).
+    rows = _policy_rows_for_dept(role, name, [service, *resources])
+
+    def _apply() -> dict[str, Any]:
+        _append_policy_row(role, name, actor=claims["sub"], objects=[service, *resources])
+        rec = store.get_department(name)
+        assert rec is not None
+        return rec.to_public()
+
+    if _second_eyes_required(claims):
+        proposal = get_store().second_eyes_propose(
+            "policy_rows", {"rows": rows, "dept": name}, str(claims.get("sub", ""))
+        )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "dept": store.get_department(name).to_public(),
+                "proposal_id": proposal["id"],
+                "needs_second_admin": True,
+                "kind": "policy_rows",
+            },
+        )
+    return _apply()
 
 
 @app.patch("/api/departments/{name}")
@@ -1123,6 +1455,21 @@ _BASE_ROLE_GRANTS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _policy_rows_for_dept(role: str, dept: str, objects: list[str] | None = None) -> list[list[str]]:
+    """Row lists `_append_policy_row` would write (Mk18: also the proposal payload)."""
+    from app.harness.enforcer import head_role_for
+
+    tool_objs: list[str] = []
+    for obj in objects or []:
+        obj = (obj or "").strip().lower()
+        if re.fullmatch(r"[a-z0-9_]+", obj) and obj not in tool_objs:
+            tool_objs.append(obj)
+    grants = [(obj, act) for obj in tool_objs for act in ("read", "create")] + list(_BASE_ROLE_GRANTS)
+    rows = [["p", r, dept, obj, act] for r in (role, head_role_for(dept)) for obj, act in grants]
+    rows += [["p", "admin", "admin", obj, act] for obj in tool_objs for act in ("read", "create")]
+    return rows
+
+
 def _append_policy_row(role: str, dept: str, actor: str = "", objects: list[str] | None = None) -> None:
     """Add the granular `p` rows for a newly registered department's member role and its
     Mk12 `{dept}_head` role — the same shape the seeded departments have: `read`/`create`
@@ -1139,16 +1486,9 @@ def _append_policy_row(role: str, dept: str, actor: str = "", objects: list[str]
     ignores duplicate rows, but an unconditional append grows the file without
     bound every time a department is re-registered.
     """
-    from app.harness.enforcer import head_role_for
-
-    tool_objs: list[str] = []
-    for obj in objects or []:
-        obj = (obj or "").strip().lower()
-        if re.fullmatch(r"[a-z0-9_]+", obj) and obj not in tool_objs:
-            tool_objs.append(obj)
-    grants = [(obj, act) for obj in tool_objs for act in ("read", "create")] + list(_BASE_ROLE_GRANTS)
-    rows = [("p", r, dept, obj, act) for r in (role, head_role_for(dept)) for obj, act in grants]
-    _policy_store().add_rows(rows, actor)
+    _policy_store().add_rows(
+        [tuple(r) for r in _policy_rows_for_dept(role, dept, objects)], actor  # type: ignore[arg-type]
+    )
 
 
 def _policy_has_row(row: tuple[str, ...]) -> bool:
@@ -1243,11 +1583,23 @@ def create_skill(
     registry = _get_components()["skills"]
     if registry.get(skill.name) is not None:
         raise HTTPException(status_code=409, detail=f"skill {skill.name!r} already exists")
+    # Mk18 Phase E: new executable procedure — second admin confirms when one exists.
+    if _second_eyes_required(claims):
+        proposal = get_store().second_eyes_propose(
+            "skill_save", {"content": req.content}, str(claims.get("sub", ""))
+        )
+        return JSONResponse(
+            status_code=202,
+            content={"proposal_id": proposal["id"], "needs_second_admin": True, "kind": "skill_save", "name": skill.name},
+        )
     try:
         path = registry.save(skill, actor=claims["sub"])
     except ValueError as exc:
         # Mk17: traversal guard is defense-in-depth; invalid scope/name is 422, never 500.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Mk18: the admin wildcard is gone — every new skill needs its own admin
+    # visibility row (idempotent; dept roles are granted by admins explicitly).
+    _policy_store().add_rows([("p", "admin", "admin", skill.policy_obj, "use")], claims["sub"])
     _get_components()["audit"].log(
         decision="ALLOW",
         resource={"type": "skill", "id": skill.name},
@@ -1275,10 +1627,21 @@ def update_skill(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if skill.name != name:
         raise HTTPException(status_code=409, detail="skill name in frontmatter must match the url")
+    # Mk18 Phase E: edited procedure — second admin confirms when one exists.
+    if _second_eyes_required(claims):
+        proposal = get_store().second_eyes_propose(
+            "skill_save", {"content": req.content}, str(claims.get("sub", ""))
+        )
+        return JSONResponse(
+            status_code=202,
+            content={"proposal_id": proposal["id"], "needs_second_admin": True, "kind": "skill_save", "name": name},
+        )
     try:
         path = registry.save(skill, actor=claims["sub"])
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Mk18: keep the admin visibility row present (wildcard is gone).
+    _policy_store().add_rows([("p", "admin", "admin", skill.policy_obj, "use")], claims["sub"])
     _get_components()["audit"].log(
         decision="ALLOW",
         resource={"type": "skill", "id": skill.name},
@@ -1296,6 +1659,17 @@ def delete_skill(
 ) -> dict:
     claims = _verify_admin(authorization)
     registry = _get_components()["skills"]
+    if registry.get(name) is None:
+        raise HTTPException(status_code=404, detail=f"skill {name!r} not found")
+    # Mk18 Phase E: deleting shared procedure — second admin confirms when one exists.
+    if _second_eyes_required(claims):
+        proposal = get_store().second_eyes_propose(
+            "skill_delete", {"name": name}, str(claims.get("sub", ""))
+        )
+        return JSONResponse(
+            status_code=202,
+            content={"proposal_id": proposal["id"], "needs_second_admin": True, "kind": "skill_delete", "name": name},
+        )
     if not registry.delete(name):
         raise HTTPException(status_code=404, detail=f"skill {name!r} not found")
     _get_components()["audit"].log(
@@ -1478,6 +1852,20 @@ def set_platform_config(
         if meta is None:
             raise HTTPException(status_code=422, detail="no platform row stored yet: provide model with the first key")
         model = meta[0]
+    # Mk18 Phase E: the shared extractor key serves everyone — second admin
+    # confirms when one exists. Secrets are Fernet-encrypted in the proposal.
+    if _second_eyes_required(claims):
+        from app.auth.crypto import encrypt_secret
+
+        proposal = store.second_eyes_propose(
+            "platform_key",
+            {"model": model, "api_key_enc": encrypt_secret(api_key) if api_key else None},
+            str(claims.get("sub", "admin")),
+        )
+        return JSONResponse(
+            status_code=202,
+            content={"proposal_id": proposal["id"], "needs_second_admin": True, "kind": "platform_key"},
+        )
     try:
         saved_model, by, at = store.set_platform_llm(
             model=model, api_key_plaintext=api_key, actor=str(claims.get("sub", "admin"))
@@ -1502,6 +1890,15 @@ def clear_platform_config(
     from app.auth.users import get_store
     from app.llm.system import clear_system_provider_cache, describe_platform_source
 
+    # Mk18 Phase E: removing everyone's extractor key needs second eyes too.
+    if _second_eyes_required(claims):
+        proposal = get_store().second_eyes_propose(
+            "platform_key", {"clear": True}, str(claims.get("sub", "admin"))
+        )
+        return JSONResponse(
+            status_code=202,
+            content={"proposal_id": proposal["id"], "needs_second_admin": True, "kind": "platform_key"},
+        )
     removed = get_store().clear_platform_llm(actor=str(claims.get("sub", "admin")))
     clear_system_provider_cache()
     source, model = describe_platform_source()
@@ -1607,7 +2004,6 @@ def update_memory_fact(
         raise HTTPException(status_code=404, detail=f"memory {key!r} not found in {scope}")
     # Mk17: validate empty/size then direct put + budget (was raw put, no checks).
     try:
-        from app.memory.edit import MemoryValidationError as _MVE
 
         editor = _get_components()["memory_editor"]
         editor._check_text(req.text)
@@ -1622,7 +2018,7 @@ def update_memory_fact(
     store.put(scope_to_namespace(scope), key, {"text": req.text, "op": "replace"})
     try:
         editor._enforce_budget(scope_to_namespace(scope), scope)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     _audit_memory(claims, scope, "replace")
     return {"scope": scope, "key": key, "text": req.text, "op": "replace"}
@@ -1917,6 +2313,20 @@ def set_member_llm_key(
     if store.get(username) is None:
         raise HTTPException(status_code=404, detail=f"member {username!r} not found")
     provider, model, api_key, base_url = _validated_key_fields(req)
+    # Mk18 Phase E: an admin writing ANOTHER member's key needs second eyes.
+    if _second_eyes_required(claims):
+        from app.auth.crypto import encrypt_secret
+
+        proposal = store.second_eyes_propose(
+            "llm_key_write",
+            {"username": username, "provider": provider, "model": model,
+             "api_key_enc": encrypt_secret(api_key), "base_url": base_url, "active": True},
+            str(claims.get("sub", "")),
+        )
+        return JSONResponse(
+            status_code=202,
+            content={"proposal_id": proposal["id"], "needs_second_admin": True, "kind": "llm_key_write"},
+        )
     record = store.set_llm_key(
         username, provider, model, api_key, active=True, actor=claims["sub"], base_url=base_url
     )
@@ -1983,6 +2393,19 @@ def delete_member_llm_key(
 ) -> dict[str, Any]:
     claims = _verify_admin(authorization)
     store = get_store()
+    # Mk18 Phase E: deleting another member's key needs second eyes.
+    if _second_eyes_required(claims):
+        if store.get(username) is None:
+            raise HTTPException(status_code=404, detail=f"member {username!r} not found")
+        if not [k for k in store.list_llm_keys(username) if k.id == key_id]:
+            raise HTTPException(status_code=404, detail="LLM key not found")
+        proposal = store.second_eyes_propose(
+            "llm_key_delete", {"username": username, "key_id": key_id}, str(claims.get("sub", ""))
+        )
+        return JSONResponse(
+            status_code=202,
+            content={"proposal_id": proposal["id"], "needs_second_admin": True, "kind": "llm_key_delete"},
+        )
     try:
         store.delete_llm_key(username, key_id, actor=claims["sub"])
     except MemberError as exc:
@@ -2132,51 +2555,28 @@ def integration_connect(
             detail="save your Composio API key in Account → Integrations first",
         )
     auth_config = _auth_config_for(app_name)
-    provision_note = ""
     if not auth_config:
-        # Auto-provision managed auth config so nobody edits .env.
-        probe = build_client(api_key, settings.composio.base_url, settings.composio.timeout_seconds)
-        if hasattr(probe, "ensure_auth_config"):
-            new_id, provision_note = probe.ensure_auth_config(app_name)  # type: ignore[union-attr]
-            print(f"[integrations] auto-provision {app_name}: id={new_id} note={provision_note}")
-            if new_id:
-                get_store().upsert_toolkit(app_name, enabled=True, auth_config_id=new_id, actor=claims["sub"])
-                auth_config = new_id
-    if not auth_config:
-        detail = f"{app_name!r} is not ready yet — ask an admin to enable it under Integrations → Catalog"
-        if provision_note:
-            detail += f" (auto-setup said: {provision_note})"
-        raise HTTPException(status_code=422, detail=detail)
+        # Mk18 Phase F: members can no longer auto-provision shared auth
+        # configs (that minted project-global credentials from a member call).
+        # An admin curates the toolkit via Integrations → Catalog first.
+        raise HTTPException(
+            status_code=422,
+            detail=f"{app_name!r} is not ready yet — ask an admin to enable it under Integrations → Catalog",
+        )
     client = build_client(api_key, settings.composio.base_url, settings.composio.timeout_seconds)
     try:
         url = client.get_connect_url(app_name, claims["sub"], auth_config)  # type: ignore[union-attr]
     except RuntimeError as exc:
-        msg = str(exc).lower()
-        if "auth_config_notfound" in msg or "auth config not found" in msg or "code': 302" in msg:
-            # Stale ID (pasted from another project, deleted, or wrong value) — self-heal.
-            if hasattr(client, "ensure_auth_config"):
-                new_id, _note = client.ensure_auth_config(app_name)  # type: ignore[union-attr]
-                if new_id and new_id != auth_config:
-                    get_store().upsert_toolkit(
-                        app_name, enabled=True, auth_config_id=new_id, actor=claims["sub"]
-                    )
-                    try:
-                        url = client.get_connect_url(app_name, claims["sub"], new_id)  # type: ignore[union-attr]
-                    except RuntimeError as exc2:
-                        raise HTTPException(status_code=502, detail=str(exc2)) from exc2
-                    get_store().set_connected_account(
-                        claims["sub"], app_name, account_id="", status="pending"
-                    )
-                    return {"app": app_name, "redirectUrl": url, "status": "pending"}
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    f"the saved login setup for {app_name!r} does not exist in this Composio project. "
-                    "It was likely copied from a different project, deleted, or is not the Auth Config ID. "
-                    "Ask an admin to re-add it under Integrations → Catalog (auto-creates a fresh one)."
-                ),
-            ) from exc
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # Mk18 Phase F: no member-driven catalog self-heal (shared rows must
+        # not be rewritable from a member call) — surface the admin path.
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"the saved login setup for {app_name!r} does not exist in this Composio project. "
+                "It was likely copied from a different project, deleted, or is not the Auth Config ID. "
+                "Ask an admin to re-add it under Integrations → Catalog (auto-creates a fresh one)."
+            ),
+        ) from exc
     # Remember the working ID in the catalog so the next Connect skips the fallback.
     if auth_config:
         try:
@@ -2203,15 +2603,31 @@ def integration_refresh(
         raise HTTPException(status_code=422, detail="save your Composio API key first")
     client = build_client(api_key, settings.composio.base_url, settings.composio.timeout_seconds)
     if hasattr(client, "list_for_user"):
-        for item in client.list_for_user(claims["sub"]):  # type: ignore[union-attr]
-            toolkit = str(item.get("toolkit", "")).lower()
-            status = str(item.get("status", "")).upper()
-            if app_name in toolkit and status == "ACTIVE":
-                get_store().set_connected_account(
-                    claims["sub"], app_name,
-                    account_id=str(item.get("id", "")), status="active",
+        try:
+            remote = client.list_for_user(claims["sub"])  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            remote = None
+        if remote is not None:
+            for item in remote:
+                toolkit = str(item.get("toolkit", "")).lower()
+                status = str(item.get("status", "")).upper()
+                if app_name in toolkit and status == "ACTIVE":
+                    get_store().set_connected_account(
+                        claims["sub"], app_name,
+                        account_id=str(item.get("id", "")), status="active",
+                    )
+                    return {"app": app_name, "status": "active"}
+            # Mk18 Phase F: Composio affirmatively reports no ACTIVE connection
+            # (and no error) → the local row is stale: revoke it (audited).
+            # Errors leave local state untouched (fail closed the other way).
+            local = [c for c in get_store().list_connected_accounts(claims["sub"]) if c["app"] == app_name]
+            if local and local[0]["status"] in ("active", "pending"):
+                get_store().set_connected_account(claims["sub"], app_name, account_id="", status="revoked")
+                get_store()._audit_entry(
+                    claims["sub"], "integrations:revoked-remote", "connected-account",
+                    f"{claims['sub']}|{app_name}",
                 )
-                return {"app": app_name, "status": "active"}
+                return {"app": app_name, "status": "revoked"}
     entry = [c for c in get_store().list_connected_accounts(claims["sub"]) if c["app"] == app_name]
     return {"app": app_name, "status": entry[0]["status"] if entry else "disconnected"}
 
@@ -2221,9 +2637,25 @@ def integration_disconnect(
     req: IntegrationConnectRequest,
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    """Mk18 Phase F: remote revoke first — only a remote success (or an
+    explicitly unsupported SDK) flips the local row. An explicit remote
+    failure is 502 with local state unchanged (fail closed)."""
     claims, _token = _verified_member(authorization)
     app_name = _validate_integration_app(req.app)
-    get_store().set_connected_account(claims["sub"], app_name, account_id="", status="revoked")
+    from app.integrations.client import build_client
+    from app.integrations.vault import get_composio_key
+
+    store = get_store()
+    local = [c for c in store.list_connected_accounts(claims["sub"]) if c["app"] == app_name]
+    account_id = str(local[0].get("account_id", "") if local else "")
+    api_key = get_composio_key(claims["sub"], settings.composio.api_key)
+    if api_key:
+        client = build_client(api_key, settings.composio.base_url, settings.composio.timeout_seconds)
+        if hasattr(client, "delete_connection"):
+            ok, note = client.delete_connection(claims["sub"], account_id)  # type: ignore[union-attr]
+            if not ok:
+                raise HTTPException(status_code=502, detail=f"remote revoke failed: {note}")
+    store.set_connected_account(claims["sub"], app_name, account_id="", status="revoked")
     return {"app": app_name, "status": "revoked"}
 
 
@@ -2233,13 +2665,18 @@ def integration_disconnect(
 def _ensure_toolkit_policy_rows(toolkit: str, actor: str = "") -> None:
     """Grant every department's member role AND its head role read+write on a newly enabled
     toolkit (writes still HITL-gated by risk). Departments come from the store, so ones
-    registered through the dashboard are covered too (Mk15: heads mirror their members)."""
+    registered through the dashboard are covered too (Mk15: heads mirror their members).
+
+    Mk18: the admin wildcard is gone — admin gets explicit rows here too."""
     from app.harness.enforcer import head_role_for
 
-    rows = []
+    rows = [
+        ("p", "admin", "admin", toolkit, "read"),
+        ("p", "admin", "admin", toolkit, "write"),
+    ]
     for dept in get_store().list_departments():
         if dept.name == "admin":
-            continue  # the admin wildcard row already covers it
+            continue
         for role in (dept.role or f"{dept.name}_agent", head_role_for(dept.name)):
             rows.append(("p", role, dept.name, toolkit, "read"))
             rows.append(("p", role, dept.name, toolkit, "write"))
@@ -2276,9 +2713,8 @@ def integration_catalog_add(
 
         try:
             admin_key = decrypt_secret(admin_key_enc)
-        except Exception:  # noqa: BLE001 - fall back to global
+        except Exception:  # noqa: BLE001 - corrupt key is unusable (Mk18: no global fallback)
             admin_key = None
-    admin_key = admin_key or settings.composio.api_key
     if not admin_key:
         raise HTTPException(
             status_code=422,

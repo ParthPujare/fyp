@@ -227,7 +227,9 @@ def test_skill_nested_deny_a4(runner_factory, trace_store, audit_log, dept_apps)
 
     # the devops service was never mutated
     client = TestClient(dept_apps[8004])
-    assert client.get("/deployments").status_code == 200
+    from tests.attack.helpers import service_headers as _sh
+
+    assert client.get("/deployments", headers=_sh()).status_code == 200
 
 
 def test_skill_nested_critical_suspends_for_hitl(tmp_path, dept_apps, executor, enforcer, audit_log):

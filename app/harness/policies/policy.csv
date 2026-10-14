@@ -10,7 +10,6 @@
 # has no `g` row and is denied by default.
 
 # ---- Admin: owns everything in its "admin" domain ----
-p, admin, admin, *, *
 
 # ---- Marketing (CRM) ----
 p, marketing_agent, marketing, crm, read
@@ -30,7 +29,9 @@ p, devops_agent, devops, devops, read
 p, devops_agent, devops, devops, create
 
 # ---- Memory (weeks 7-8): 3-tier read/write + recall tool gate ----
-# Central: readable by all roles; writable only by admin (admin has p, admin, admin, *, *).
+# Central: readable by all roles; writable only by admin (explicit
+# `p, admin, admin, memory_central, write` row at the file's end — Mk18 removed
+# the old `p, admin, admin, *, *` wildcard; see scripts/scope_admin_policy.py).
 # Dept/user scopes are self-scoped by the enforcer (own dept / own uid).
 # NOTE: obj names use underscores — Casbin's keyMatch2 treats ":" as a route-param
 # delimiter, so "memory:central" would match "memory:dept".
@@ -65,7 +66,7 @@ p, devops_agent, devops, memory_recall, use
 
 # ---- PII (weeks 9-10): field-level masking on tool responses + recalled transcripts ----
 # email is visible to every role; salary/ssn are admin-only (no role row -> deny-by-default;
-# admin wildcard `p, admin, admin, *, *` grants pii:* for admin).
+# explicit `p, admin, admin, pii_salary|pii_ssn, read` rows at the file's end).
 # NOTE: obj names use underscores — Casbin's keyMatch2 treats ":" as a route-param
 # delimiter, so "pii:salary" would match "pii:email".
 p, marketing_agent, marketing, pii_email, read
@@ -149,8 +150,8 @@ p, devops_head, devops, gmail, read
 p, devops_head, devops, gmail, write
 
 # ---- Registered departments ----
-# The dashboard `POST /api/departments` (`_append_policy_row`) appends one
-# `p, <role>, <dept>, *, *` row per registered department below. The append is
+# The dashboard `POST /api/departments` (`_append_policy_row`) appends granular
+# `p` rows per registered department below (member + head + admin rows). The append is
 # idempotent — re-registering never duplicates a row. Empty until a department is
 # registered: the legal/compliance rows that used to live here were written by the
 # test suite leaking onto this file (see `_policy_csv`), not by a real registration.
@@ -169,3 +170,36 @@ p, finance_agent, finance, gmail, read
 p, finance_agent, finance, gmail, write
 p, devops_agent, devops, gmail, read
 p, devops_agent, devops, gmail, write
+
+# ---- Admin explicit grants (Mk18: scoped replacement for p,admin,admin,*,*) ----
+p, admin, admin, crm, create
+p, admin, admin, crm, read
+p, admin, admin, devops, create
+p, admin, admin, devops, read
+p, admin, admin, finance, read
+p, admin, admin, finance, transfer
+p, admin, admin, github, create
+p, admin, admin, github, read
+p, admin, admin, gmail, read
+p, admin, admin, gmail, send
+p, admin, admin, gmail, write
+p, admin, admin, hr, create
+p, admin, admin, hr, read
+p, admin, admin, memory_central, read
+p, admin, admin, memory_central, write
+p, admin, admin, memory_dept, read
+p, admin, admin, memory_dept, write
+p, admin, admin, memory_recall, use
+p, admin, admin, memory_user, read
+p, admin, admin, memory_user, write
+p, admin, admin, pii_email, read
+p, admin, admin, pii_salary, read
+p, admin, admin, pii_ssn, read
+p, admin, admin, skill_launch_campaign, use
+p, admin, admin, skill_new_leave_request, use
+p, admin, admin, skill_send_campaign_email, use
+p, admin, admin, skill_triage_github_issue, use
+p, admin, admin, skill_triage_incident, use
+
+# ---- Admin explicit grants (Mk18: scoped replacement for p,admin,admin,*,*) ----
+p, admin, admin, hr, delete

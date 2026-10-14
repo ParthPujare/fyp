@@ -111,12 +111,18 @@ class SkillRegistry:
 
     @staticmethod
     def schema_for(skill: Skill) -> dict[str, Any]:
-        """OpenAI-style function tool declaration (same shape as agent.tools.tool_schema)."""
+        """OpenAI-style function tool declaration (same shape as agent.tools.tool_schema).
+
+        Mk18: skill text is dashboard-editable untrusted input — wrap the
+        description so the model treats it as data, not instructions.
+        """
+        from app.harness.untrusted import sanitize_untrusted
+
         return {
             "type": "function",
             "function": {
                 "name": skill.name,
-                "description": skill.description(),
+                "description": sanitize_untrusted(f"skill:{skill.name}", skill.description()),
                 "parameters": {
                     "type": "object",
                     "properties": skill.args_schema,

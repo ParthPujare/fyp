@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from app.config import get_settings
 
@@ -57,6 +58,40 @@ def make_app(
         db_path = get_settings().services.data_dir / f"{slug}.sqlite"
 
     app = FastAPI(title=service_name, version="0.1.0")
+
+    @app.middleware("http")
+    async def _require_service_auth(request: Request, call_next):
+        """Mk18 Phase C: dept services accept only the operator's own JWT.
+
+        `/health` stays open (container healthchecks); every table route needs
+        a valid, active-member Bearer token — the same JWT the gateway verified,
+        forwarded by `ToolExecutor`. Anyone reaching the port directly without
+        a token gets 401, never data.
+        """
+        if request.url.path == "/health":
+            return await call_next(request)
+        auth = request.headers.get("authorization", "")
+        if not auth.lower().startswith("bearer ") or not auth.split(" ", 1)[1].strip():
+            return JSONResponse({"detail": "missing bearer token"}, status_code=401)
+        token = auth.split(" ", 1)[1].strip()
+        try:
+            from app.auth.jwt import verify_token
+
+            claims = verify_token(
+                token, get_settings().jwt.secret, get_settings().jwt.algorithm
+            )
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"detail": "invalid token"}, status_code=401)
+        try:
+            from app.auth.users import get_store
+
+            member = get_store().get(str(claims.get("sub", "")))
+        except Exception:  # noqa: BLE001
+            member = None
+        if member is None or not member.active:
+            return JSONResponse({"detail": "account disabled or not a member"}, status_code=403)
+        request.state.claims = claims
+        return await call_next(request)
 
     @app.get("/health")
     def health() -> dict:

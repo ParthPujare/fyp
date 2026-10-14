@@ -59,7 +59,8 @@ def test_deny_storm_is_bounded_and_short_circuited(tmp_path, dept_apps, executor
     assert any(h["type"] == "deny_retry" for h in result.guardrail_hits), "repeats must short-circuit"
     deny_audits = [e for e in decisions_for(audit, result.run_id) if e["decision"] == "DENY"]
     assert any(e["resource"]["id"] == "hr_delete_employee" for e in deny_audits)
-    assert TestClient(dept_apps[8003]).get("/employees/1").json()["id"] == 1
+    from tests.attack.helpers import service_headers as _sh
+    assert TestClient(dept_apps[8003]).get("/employees/1", headers=_sh()).json()["id"] == 1
 
 
 def test_tool_budget_bounds_the_loop(tmp_path, dept_apps, executor):

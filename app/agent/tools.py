@@ -43,6 +43,68 @@ def _t(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
     return {"type": "object", "properties": props, "required": required}
 
 
+def _is_number(value: Any) -> bool:
+    # Skills stringify template args ({{budget}} -> "1000"); accept numeric
+    # strings as well as real numbers (services coerce on write).
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        try:
+            float(value.strip())
+            return True
+        except (ValueError, AttributeError):
+            return False
+    return False
+
+
+def _is_integer(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, str):
+        try:
+            return float(value.strip()).is_integer()
+        except (ValueError, AttributeError):
+            return False
+    if isinstance(value, float):
+        return value.is_integer()
+    return False
+
+
+def _validate_args(tool: ToolSpec, args: dict[str, Any]) -> str | None:
+    """Return an error string if args violate the tool schema, else None.
+
+    Only the types of *present, known* fields are checked: `required` is
+    intentionally not enforced (services own defaults and historical callers
+    send subsets); unknown fields are ignored (services ignore them).
+    """
+    schema = tool.args_schema or {}
+    if not isinstance(args, dict):
+        return f"invalid args for {tool.name}: object required"
+    props = schema.get("properties", {}) or {}
+    for name, spec in props.items():
+        if name not in args or not isinstance(spec, dict):
+            continue
+        want = spec.get("type")
+        value = args[name]
+        if want == "string" and not isinstance(value, str):
+            return f"invalid arg {name!r} for {tool.name}: string required"
+        if want == "integer" and not _is_integer(value):
+            return f"invalid arg {name!r} for {tool.name}: integer required"
+        if want == "number" and not _is_number(value):
+            return f"invalid arg {name!r} for {tool.name}: number required"
+        if want == "boolean" and not isinstance(value, bool):
+            return f"invalid arg {name!r} for {tool.name}: boolean required"
+        if want == "object" and not isinstance(value, dict):
+            return f"invalid arg {name!r} for {tool.name}: object required"
+        if want == "array" and not isinstance(value, list):
+            return f"invalid arg {name!r} for {tool.name}: array required"
+    return None
+
+
 TOOL_REGISTRY: dict[str, ToolSpec] = {t.name: t for t in [
     # ---- CRM (Marketing) ----
     ToolSpec(
@@ -308,10 +370,18 @@ class ToolExecutor:
     via httpx.MockTransport instead of opening sockets.
     """
 
-    def __init__(self, client: httpx.Client | None = None, settings: Settings | None = None):
+    def __init__(self, client: httpx.Client | None = None, settings: Settings | None = None, auth_token: str | None = None):
         self._settings = settings or get_settings()
         self._timeout = self._settings.guardrails.call_timeout_seconds
         self._client = client or httpx.Client(timeout=self._timeout)
+        # Mk18 Phase C: the operator's own JWT, forwarded per run so dept
+        # services can verify the caller (passthrough, never a shared secret).
+        self._auth_token = auth_token
+
+    def set_auth_token(self, token: str | None) -> None:
+        """Bind (or clear, with None) the per-run caller token. Executors are
+        reused across runs — callers must set this on every run."""
+        self._auth_token = token
 
     def _base_url(self, dept: str) -> str:
         return getattr(self._settings.services, f"{dept}_url")
@@ -325,6 +395,12 @@ class ToolExecutor:
         return self._base_url(tool.dept) + path
 
     def execute(self, tool: ToolSpec, args: dict[str, Any]) -> ToolResult:
+        # Mk18 Phase B: validate args against the tool's schema before any I/O.
+        # Unknown fields are ignored (services ignore them); missing required
+        # fields and mistyped known fields fail closed with reason="args".
+        problem = _validate_args(tool, args or {})
+        if problem is not None:
+            return ToolResult(ok=False, reason="args", content=problem)
         try:
             url = self._build_url(tool, args)
         except ValueError as exc:
@@ -335,9 +411,11 @@ class ToolExecutor:
         body = {k: args[k] for k in tool.body_fields if k in args}
 
         started = time.monotonic()
+        headers = {"Authorization": f"Bearer {self._auth_token}"} if self._auth_token else None
         try:
             resp = self._client.request(
-                tool.http_method, url, params=params or None, json=body or None, timeout=self._timeout
+                tool.http_method, url, params=params or None, json=body or None,
+                timeout=self._timeout, headers=headers,
             )
         except httpx.TimeoutException:
             return ToolResult(ok=False, timeout=True, reason="timeout", content="tool call timed out")

@@ -13,7 +13,6 @@ import re
 from typing import Any
 
 from app.memory.extract import Fact, classify
-from app.memory.scopes import scope_user
 
 SYSTEM_PROMPT = (
     "You extract durable facts ABOUT THE USER for long-term memory. "
@@ -96,6 +95,14 @@ def parse_response(raw: str, claims: dict[str, Any]) -> list[Fact]:
         s = str(item).strip() if not isinstance(item, dict) else str(item.get("text", "")).strip()
         if len(s) < 8:
             continue
+        # Mk18: instruction-shaped candidates are never durable facts.
+        try:
+            from app.harness.untrusted import contains_instruction as _has_instr
+
+            if _has_instr(s):
+                continue
+        except Exception:  # noqa: BLE001, S110
+            pass
         facts.append(Fact(text=s, scope=classify(s, claims), op="add"))
     return facts
 

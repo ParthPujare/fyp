@@ -54,9 +54,24 @@ def serve_request(app: FastAPI, request: httpx.Request) -> httpx.Response:
 
 
 def make_service_client(apps_by_port: dict[int, FastAPI]) -> httpx.Client:
-    """httpx client routing :8002-8005 to in-process FastAPI apps (offline)."""
+    """httpx client routing :8002-8005 to in-process FastAPI apps (offline).
+
+    Mk18 Phase C: dept services require the operator's JWT, so the client
+    attaches a freshly minted admin token when the caller didn't set one
+    (real runs always carry the per-run user token via ToolExecutor).
+    """
+
+    def _fallback_token() -> str:
+        from app.auth.jwt import create_token
+        from app.auth.users import USERS
+        from app.config import get_settings as _gs
+
+        _s = _gs()
+        return create_token(USERS["admin@acme.com"], _s.jwt.secret, _s.jwt.algorithm, _s.jwt.expiry_minutes)
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if "authorization" not in {k.lower() for k in request.headers}:
+            request.headers["Authorization"] = f"Bearer {_fallback_token()}"
         return serve_request(apps_by_port[request.url.port], request)
 
     return httpx.Client(transport=httpx.MockTransport(handler))

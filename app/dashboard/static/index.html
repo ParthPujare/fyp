@@ -342,10 +342,11 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   function labelFor(claims) { return claims && claims.role === "admin" ? "admin" : "member"; }
 
   function restoreSessions() {
+    // Mk18 Phase D: tokens live in httpOnly cookies (XSS-proof); localStorage
+    // keeps claims (UI data) only. Fresh loads rely on cookies until next login.
     ["admin", "member"].forEach((label) => {
-      const t = localStorage.getItem(TOKENS[label]);
       const raw = localStorage.getItem(CLAIMS[label]);
-      if (t && raw) { try { identities[label] = { token: t, claims: JSON.parse(raw) }; } catch { identities[label] = null; } }
+      if (raw) { try { identities[label] = { token: null, claims: JSON.parse(raw) }; } catch { identities[label] = null; } }
     });
     const saved = localStorage.getItem("harness_active");
     if (saved && identities[saved]) active = saved;
@@ -356,15 +357,37 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   }
 
   function setIdentity(label, claims, token) {
-    identities[label] = { token, claims };
-    localStorage.setItem(TOKENS[label], token);
+    // Mk18 Phase D: token stays in memory for this page lifetime; the server
+    // also set the httpOnly cookie, which is what survives reloads.
+    identities[label] = { token: token || null, claims };
     localStorage.setItem(CLAIMS[label], JSON.stringify(claims));
+    localStorage.removeItem(TOKENS[label]);
+  }
+
+  // Mk18 Phase D: CSRF token for cookie-session mutating requests.
+  let csrfToken = null;
+  async function ensureCsrf() {
+    if (csrfToken) return csrfToken;
+    try {
+      const r = await fetch("/api/csrf", { credentials: "same-origin" });
+      if (!r.ok) return null;
+      const j = await r.json();
+      csrfToken = j.csrf_token || null;
+      return csrfToken;
+    } catch { return null; }
   }
 
   function invalidate(label) {
     identities[label] = null;
     localStorage.removeItem(TOKENS[label]);
     localStorage.removeItem(CLAIMS[label]);
+    const staleCsrf = csrfToken;
+    csrfToken = null;
+    try {
+      const h = {};
+      if (staleCsrf) h["X-CSRF-Token"] = staleCsrf;
+      fetch("/api/logout", { method: "POST", credentials: "same-origin", headers: h });
+    } catch { /* best-effort */ }
     if (active === label) {
       active = identities.member ? "member" : identities.admin ? "admin" : null;
       localStorage.setItem("harness_active", active || "");
@@ -405,7 +428,12 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     const headers = Object.assign({}, opts.headers || {});
     const id = identities[active];
     if (id && id.token) headers["Authorization"] = "Bearer " + id.token;
-    const resp = await fetch(path, Object.assign({}, opts, { headers }));
+    const method = (opts.method || "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+      const csrf = await ensureCsrf();
+      if (csrf) headers["X-CSRF-Token"] = csrf;
+    }
+    const resp = await fetch(path, Object.assign({}, opts, { headers, credentials: "same-origin" }));
     if (resp.status === 401 || resp.status === 403) { invalidate(active); throw new Error("unauthorized"); }
     if (!resp.ok) { throw new Error(await errorMessage(resp)); }
     return resp.json();
@@ -896,7 +924,8 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     try {
       const resp = await fetch("/api/login", { method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ username: $("user").value, password: $("pass").value }) });
+        body: JSON.stringify({ username: $("user").value, password: $("pass").value }),
+        credentials: "same-origin" });
       if (!resp.ok) throw new Error("invalid credentials");
       const body = await resp.json();
       const label = labelFor(body.claims);

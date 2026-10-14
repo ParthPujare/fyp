@@ -116,7 +116,7 @@ def apply_decision(
                                 except TypeError:
                                     count = fn(exclude=None) if attr.startswith("_") else fn()
                                 break
-                        except Exception:
+                        except Exception:  # noqa: BLE001
                             count = None
                     if isinstance(count, int) and count >= 2:
                         raise DecisionError(
@@ -145,6 +145,30 @@ def apply_decision(
 def _create_allow_rules(members: Any, entry: dict[str, Any]) -> None:
     wanted = [s for s in entry.get("steps") or [] if s.get("always_allow")]
     if not wanted or not entry_allowlist_eligible(entry):
+        return
+    # Mk18 Phase E: an always-allow rule granted by ONE admin acting alone never
+    # takes effect while a second admin exists — the action stays approved, but
+    # the standing rule waits for a second pair of eyes (audited). Head+admin
+    # chains already have two deciders, so they pass through.
+    try:
+        deciders = {str(s.get("by", "")) for s in entry.get("steps") or [] if s.get("by")}
+        count = members.count_active_admins() if hasattr(members, "count_active_admins") else 1
+    except Exception:  # noqa: BLE001
+        deciders, count = set(), 1
+    if count >= 2 and len(deciders) <= 1:
+        try:
+            from app.config import get_settings as _gs
+            from app.harness.audit import open_audit_log
+
+            open_audit_log(_gs().services.audit_path).log(
+                decision="DENY",
+                resource={"type": "allowlist", "id": entry.get("action", "?")},
+                actor={"sub": next(iter(deciders), "?"), "role": "admin", "dept": "admin"},
+                run_id=str(entry.get("run_id", "dashboard")),
+                reason="allowlist:deferred-second-eyes",
+            )
+        except Exception:  # noqa: BLE001, S110
+            pass
         return
     resource = entry.get("resource") or {}
     kind = KIND_MEMORY if resource.get("type") == KIND_MEMORY else KIND_TOOL

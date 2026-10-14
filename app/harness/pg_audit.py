@@ -56,7 +56,15 @@ from psycopg_pool import ConnectionPool
 from app.db import get_pool
 from app.db.compat import PgSession, translate
 from app.db.schema import ensure_migrated
-from app.harness.audit import DECISIONS, GENESIS, AuditLog, _hash_entry, resolve_key
+from app.harness.audit import (
+    DECISIONS,
+    GENESIS,
+    AuditLog,
+    _hash_entry,
+    _hash_matches,
+    resolve_key,
+    resolve_key_chain,
+)
 
 _EVENT_ID_CONSTRAINT = "audit_log_event_id_key"
 _FAST_TRIES = 3  # optimistic single-statement attempts before taking the locked path
@@ -253,6 +261,8 @@ class PgAuditLog(AuditLog):
         head = rows[0]["head_hash"] if rows else None
         head_seq = rows[0]["head_seq"] if rows else None
         chain_rows = [r for r in rows if r["seq"] is not None]
+        # Mk18 Phase H rotation: each row verifies under any era key.
+        keys = resolve_key_chain(self._key)
         ok, issues = True, []
         expected_seq, expected = 1, GENESIS
 
@@ -262,7 +272,7 @@ class PgAuditLog(AuditLog):
                 first is None
                 or first["seq"] != anchor[0]
                 or first["hash"] != anchor[1]
-                or _hash_entry(first["prev_hash"], json.loads(first["entry"]), self._key) != anchor[1]
+                or not _hash_matches(first["prev_hash"], json.loads(first["entry"]), anchor[1], keys)
             ):
                 ok = False
                 issues.append(f"row {anchor[0]}: changed or deleted since the last verification")
@@ -284,9 +294,9 @@ class PgAuditLog(AuditLog):
             if r["prev_hash"] != expected:
                 ok = False
                 issues.append(f"row {n}: prev_hash mismatch (edited/reordered/deleted)")
-            elif _hash_entry(expected, entry, self._key) != r["hash"]:
+            elif not _hash_matches(expected, entry, r["hash"], keys):
                 ok = False
-                issues.append(f"row {n}: hash mismatch (entry edited)")
+                issues.append(f"row {n}: hash mismatch under every known key (entry edited)")
             # the indexed columns are copies of hashed fields: a copy that disagrees was edited
             copies = {"event_id": r["event_id"], "ts": r["ts"], "run_id": r["run_id"], "decision": r["decision"]}
             if any(entry.get(k) != v for k, v in copies.items()):

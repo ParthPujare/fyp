@@ -30,7 +30,7 @@ from app.memory.episodic import EpisodicStore
 from app.memory.recall import RecallService
 from app.memory.store import SqliteBaseStore
 from app.ops.store import TraceStore
-from tests.attack.helpers import CAROL, decisions_for
+from tests.attack.helpers import CAROL, decisions_for, service_headers
 
 TRANSFER = {
     "from_account": "1000", "to_account": "2000", "amount": 5000.00,
@@ -56,7 +56,7 @@ def _mem(db, enforcer):
 
 
 def _transfers(finance_app) -> list[dict]:
-    return TestClient(finance_app).get("/transfers").json()
+    return TestClient(finance_app).get("/transfers", headers=service_headers()).json()
 
 
 def test_pre_approval_nothing_executes(tmp_path, dept_apps, executor, enforcer, audit_log):

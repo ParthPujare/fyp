@@ -364,7 +364,8 @@ def test_critical_dept_tool_is_head_first_even_in_a_head_only_dept(env, org, das
     assert bad.status_code == 422 and env.approvals.get(aid)["status"] == "pending"
 
     assert _decide(dash, "/api/dept/approvals", aid, "fhead@acme.com").json()["next_level"] == "admin"
-    transfers = lambda: TestClient(dept_apps[8005]).get("/transfers").json()
+    from tests.attack.helpers import service_headers as _sh
+    transfers = lambda: TestClient(dept_apps[8005]).get("/transfers", headers=_sh()).json()
     before = len(transfers())
     assert _decide(dash, "/api/approvals", aid, "admin@acme.com").json()["status"] == "approved"
     assert len(transfers()) == before  # decided, not yet executed: the owner resumes
@@ -389,7 +390,8 @@ def test_heads_own_critical_tool_skips_the_head_step(env, org, dash):
 
 
 def test_write_tools_are_gated_only_when_configured(env, org, dash, dept_apps):
-    campaigns = lambda: TestClient(dept_apps[8002]).get("/campaigns").json()
+    from tests.attack.helpers import service_headers as _sh
+    campaigns = lambda: TestClient(dept_apps[8002]).get("/campaigns", headers=_sh()).json()
     before = len(campaigns())
     free = env.call(ALICE, "crm_create_campaign", CAMPAIGN, "user:alice@acme.com:a")
     assert not free.interrupted and len(campaigns()) == before + 1  # default: unchanged behaviour

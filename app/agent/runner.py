@@ -115,6 +115,24 @@ def _saved_key_id(checkpointer: Any, thread_id: str) -> str | None:
         return None
 
 
+def _spend_precheck(settings: Settings, claims: dict[str, Any]) -> None:
+    """Mk18 Phase H: raise SpendCapExceeded before spending (→ HTTP 429).
+
+    Fail-open on store errors (spend_capped never raises); enforced when the
+    store answers.
+    """
+    try:
+        from app.auth.users import get_store as _get_members
+        from app.llm.metered import SpendCapExceeded, spend_capped
+
+        if spend_capped(_get_members(), str(claims.get("sub", "")), settings):
+            raise SpendCapExceeded(f"daily LLM spend cap reached for {claims.get('sub', '?')}")
+    except SpendCapExceeded:
+        raise
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
 def _build_deps(
     claims: dict[str, Any],
     *,
@@ -132,6 +150,7 @@ def _build_deps(
     thread_id: str,
     checkpointer: Any,
     key_id: str | None = None,
+    auth_token: str | None = None,
 ) -> tuple[AgentDeps, Any]:
     if store is None:
         store = open_base_store(settings.services.memory_path)
@@ -143,6 +162,44 @@ def _build_deps(
         audit = open_audit_log(settings.services.audit_path)
     provider = provider or get_provider_for_user(settings, claims.get("sub"), store, key_id=key_id)
     executor = executor or ToolExecutor(settings=settings)
+    # Mk18 Phase C: bind the caller's own JWT for dept-service passthrough.
+    # Always set (even None) — executors are reused across runs and must not
+    # leak a previous caller's token. Duck-typed for test doubles.
+    if hasattr(executor, "set_auth_token"):
+        executor.set_auth_token(auth_token)
+    # Mk18 Phase H: meter real providers per user/day (MockLLM spends nothing).
+    # Over either cap the turn degrades to Mock with a spend_cap trace event
+    # instead of spending (gateway ALSO pre-checks and answers 429).
+    try:
+        from app.llm.metered import MeteredProvider as _Metered
+        from app.llm.mock import MockLLM as _Mock
+    except Exception:  # noqa: BLE001 - metering optional, never sinks startup
+        _Mock, _Metered = None, None  # type: ignore[assignment]
+    if _Metered is not None and provider is not None and not isinstance(provider, _Mock):  # type: ignore[arg-type]
+        try:
+            from app.auth.users import get_store as _get_members
+
+            _members = _get_members()
+            _sub = str(claims.get("sub", ""))
+            _trace, _rid, _actor = trace, run_id, {"sub": _sub, "role": claims.get("role", ""), "dept": claims.get("dept", "")}
+
+            def _on_cap(_t=_trace, _r=_rid, _a=_actor) -> None:
+                try:
+                    from app.ops.schema import TraceEventType as _TET
+
+                    _t.add_event(_r, _TET.GUARDRAIL, _a, {"type": "spend_cap"})
+                except Exception:  # noqa: BLE001, S110
+                    pass
+
+            provider = _Metered(
+                provider,
+                members=_members,
+                username=_sub,
+                cost_cents_per_call=int(getattr(settings.llm, "est_cost_cents_per_call", 1) or 0),
+                on_cap=_on_cap,
+            )
+        except Exception:  # noqa: BLE001, S110
+            pass
     if episodic is None:
         episodic = open_episodic_store(settings.services.memory_path)
     if approvals is None:
@@ -241,10 +298,12 @@ def run_agent(
     evals_enabled: bool = True,
     judge_provider: LLMProvider | None = None,
     key_id: str | None = None,
+    auth_token: str | None = None,
 ) -> AgentResult:
     settings = settings or get_settings()
     if thread_id is None:
         thread_id = f"run-{uuid.uuid4()}"
+    _spend_precheck(settings, claims)
 
     if trace is None:
         trace = open_trace_store(settings.services.data_dir / "trace.sqlite")
@@ -270,6 +329,7 @@ def run_agent(
             thread_id=thread_id,
             checkpointer=checkpointer,
             key_id=key_id,
+            auth_token=auth_token,
         )
         trace = deps.trace
         actor = deps.actor
@@ -338,6 +398,7 @@ def resume_agent(
     evals_enabled: bool = True,
     judge_provider: LLMProvider | None = None,
     key_id: str | None = None,
+    auth_token: str | None = None,
 ) -> AgentResult:
     """Apply an admin/head decision and resume a suspended central/dept-write run.
 
@@ -362,6 +423,7 @@ def resume_agent(
     if callable(claim) and owner:
         claim(approval_id, owner)
         entry = approvals.get(approval_id) or entry
+    _spend_precheck(settings, entry.get("actor") or {})
 
     run_id = entry["run_id"]
     thread_id = entry["thread_id"]
@@ -374,7 +436,7 @@ def resume_agent(
             raise ValueError(f"approval {approval_id!r} chat was deleted")
     except ValueError:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     if key_id is None:
         key_id = _saved_key_id(checkpointer, thread_id)
@@ -396,6 +458,7 @@ def resume_agent(
             thread_id=thread_id,
             checkpointer=checkpointer,
             key_id=key_id,
+            auth_token=auth_token,
         )
         graph = build_agent_graph(deps, checkpointer=checkpointer)
         from langgraph.types import Command

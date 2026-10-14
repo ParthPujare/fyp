@@ -120,7 +120,8 @@ def test_central_skill_nested_forbidden_tool_blocked(tmp_path, dept_apps, execut
     assert any(
         e["decision"] == "DENY" and e["resource"]["id"] == "devops_create_deployment" for e in entries
     )
-    assert TestClient(dept_apps[8004]).get("/deployments").status_code == 200
+    from tests.attack.helpers import service_headers as _sh
+    assert TestClient(dept_apps[8004]).get("/deployments", headers=_sh()).status_code == 200
 
 
 def test_malicious_skill_forbidden_nested_tool_denied(tmp_path, dept_apps, executor):
@@ -157,7 +158,8 @@ def test_malicious_skill_forbidden_nested_tool_denied(tmp_path, dept_apps, execu
     assert any(
         e["decision"] == "DENY" and e["resource"]["id"] == "hr_delete_employee" for e in entries
     )
-    assert TestClient(dept_apps[8003]).get("/employees/1").json()["id"] == 1
+    from tests.attack.helpers import service_headers as _sh
+    assert TestClient(dept_apps[8003]).get("/employees/1", headers=_sh()).json()["id"] == 1
 
 
 def test_skill_save_rejects_root_escape(tmp_path):

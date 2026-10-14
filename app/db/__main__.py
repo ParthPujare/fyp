@@ -156,7 +156,7 @@ def _mb(n: int) -> str:
     return f"{n / (1024 * 1024):.1f} MB"
 
 
-def cmd_prune(chats: bool, trace_days: int | None, dry_run: bool, episodic_days: int | None = None) -> int:
+def cmd_prune(chats: bool, trace_days: int | None, dry_run: bool, episodic_days: int | None = None, redact: bool = False) -> int:
     if not is_enabled():
         print("DATABASE_URL is not set — nothing to prune.", file=sys.stderr)
         return 1
@@ -182,10 +182,43 @@ def cmd_prune(chats: bool, trace_days: int | None, dry_run: bool, episodic_days:
         cutoff = (datetime.now(UTC) - timedelta(days=trace_days)).isoformat()
         with pool.connection() as conn:
             n = conn.execute("SELECT COUNT(*) AS n FROM trace_runs WHERE started_ts < %s", (cutoff,)).fetchone()["n"]
-            print(f"traces   : {n} run(s) older than {trace_days} day(s) {'would be' if dry_run else 'to be'} deleted")
+            verb = "redacted (payloads scrubbed, chain rehashed)" if redact else "deleted"
+            print(f"traces   : {n} run(s) older than {trace_days} day(s) {'would be' if dry_run else 'to be'} {verb}")
             if n and not dry_run:
-                conn.execute("DELETE FROM trace_events WHERE run_id IN (SELECT run_id FROM trace_runs WHERE started_ts < %s)", (cutoff,))
-                conn.execute("DELETE FROM trace_runs WHERE started_ts < %s", (cutoff,))
+                if redact:
+                    import json as _json
+
+                    from app.harness.sanitize import redact_for_retention
+                    from app.ops.store import GENESIS, TraceStore
+
+                    run_ids = [r["run_id"] for r in conn.execute("SELECT run_id FROM trace_runs WHERE started_ts < %s", (cutoff,)).fetchall()]
+                    total = 0
+                    for rid in run_ids:
+                        rows = conn.execute(
+                            "SELECT event_id, seq, ts, type, source, actor, payload"
+                            " FROM trace_events WHERE run_id = %s ORDER BY seq",
+                            (rid,),
+                        ).fetchall()
+                        prev = GENESIS
+                        for r in rows:
+                            actor = _json.loads(r["actor"])
+                            new_payload = redact_for_retention(_json.loads(r["payload"]))
+                            content = {
+                                "run_id": rid, "seq": r["seq"], "ts": r["ts"],
+                                "type": r["type"], "source": r["source"],
+                                "actor": actor, "payload": new_payload,
+                            }
+                            conn.execute(
+                                "UPDATE trace_events SET payload = %s, prev_hash = %s WHERE event_id = %s",
+                                (_json.dumps(new_payload, sort_keys=True, default=str), prev, r["event_id"]),
+                            )
+                            prev = TraceStore.hash_event(prev, content)
+                        conn.execute("UPDATE trace_runs SET head_hash = %s WHERE run_id = %s", (prev, rid))
+                        total += len(rows)
+                    print(f"           redacted {total} event(s) across {len(run_ids)} run(s)")
+                else:
+                    conn.execute("DELETE FROM trace_events WHERE run_id IN (SELECT run_id FROM trace_runs WHERE started_ts < %s)", (cutoff,))
+                    conn.execute("DELETE FROM trace_runs WHERE started_ts < %s", (cutoff,))
     if episodic_days is not None:
         cutoff = (datetime.now(UTC) - timedelta(days=episodic_days)).isoformat()
         with pool.connection() as conn:
@@ -286,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     pr = sub.add_parser("prune", help="free space on the shared database")
     pr.add_argument("--chats", action="store_true", help="keep only each chat's latest checkpoint")
     pr.add_argument("--traces-older-than", type=int, metavar="DAYS", help="delete run traces older than DAYS days")
+    pr.add_argument("--redact", action="store_true", help="with --traces-older-than: scrub PII payloads and rehash chains instead of deleting")
     pr.add_argument("--episodic-older-than", type=int, metavar="DAYS", help="forget recalled conversations older than DAYS days")
     pr.add_argument("--dry-run", action="store_true", help="only report what would be removed")
     va = sub.add_parser("verify-audit", help="verify the whole shared audit chain")
@@ -303,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "migrate":
             return cmd_migrate(args.if_configured)
         if args.cmd == "prune":
-            return cmd_prune(args.chats, args.traces_older_than, args.dry_run, args.episodic_older_than)
+            return cmd_prune(args.chats, args.traces_older_than, args.dry_run, args.episodic_older_than, redact=args.redact)
         if args.cmd == "verify-audit":
             return cmd_verify_audit(args.log)
         return cmd_status()

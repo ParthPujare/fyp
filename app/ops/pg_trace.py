@@ -65,11 +65,20 @@ class PgTraceStore(TraceStore):
     FLUSH_AT = 200  # buffered events per run before an early flush
     KEEP_RUNS = 256  # in-memory run states retained (flushed ones are evicted oldest-first)
 
-    def __init__(self, pool: ConnectionPool | None = None) -> None:
+    def __init__(self, pool: ConnectionPool | None = None, hmac_key: bytes | str | None = None) -> None:
         self._pool = pool or get_pool()
         ensure_migrated(self._pool)
         self.db_path = None  # type: ignore[assignment]
         self._lock = threading.RLock()
+        # Mk18 Phase H: explicit key wins, else TRACE__HMAC_KEY (None = plain SHA).
+        if hmac_key is None:
+            try:
+                from app.config import get_settings as _gs
+
+                hmac_key = _gs().services.trace_hmac_key
+            except Exception:  # noqa: BLE001
+                hmac_key = None
+        self._key = (hmac_key.encode("utf-8") if isinstance(hmac_key, str) else hmac_key) or None
         self._runs: OrderedDict[str, _Run] = OrderedDict()
         self._db = PgSession(self._pool, hold=False)
 
@@ -118,7 +127,7 @@ class PgTraceStore(TraceStore):
                 "run_id": run_id, "seq": seq, "ts": ts, "type": type_name,
                 "source": source, "actor": actor, "payload": payload,
             }
-            event_hash = self.hash_event(prev_hash, content)
+            event_hash = self._chain_hash(prev_hash, content)
             event_id = str(uuid.uuid4())
             run.pending.append((
                 event_id, run_id, seq, ts, type_name, source,

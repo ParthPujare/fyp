@@ -28,14 +28,14 @@ import json
 import os
 import re
 import sqlite3
+import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
-
 
 # Mk17: identity is email. `members.username` physically stores the email
 # (kept column name to avoid FK rewrites); `display_name` is UI-only.
@@ -59,6 +59,51 @@ def validate_display_name(value: str | None) -> str:
     if "\n" in v or "\r" in v:
         raise MemberError("display name must not contain newlines")
     return v
+
+
+# Mk18 Phase C: brute-force throttle (shared SQLite + PG via MemberStore.verify).
+_LOCK_AFTER_ATTEMPTS = 10
+_LOCK_MINUTES = 15
+
+
+def _locked_until_dt(value: str | None) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
+def is_login_locked(locked_until: str | None, now: datetime | None = None) -> bool:
+    dt = _locked_until_dt(locked_until)
+    if dt is None:
+        return False
+    return dt > (now or datetime.now(UTC))
+
+
+def verify_totp(secret_b32: str, code: str | int, *, window: int = 1) -> bool:
+    """Stdlib TOTP check (30s steps, ±`window`). Never raises — False on any error."""
+    try:
+        key = base64.b32decode(str(secret_b32 or "").strip().upper())
+        step = int(time.time()) // 30
+    except Exception:  # noqa: BLE001
+        return False
+    want = re.sub(r"\D", "", str(code or ""))
+    if not want:
+        return False
+    import hmac as _hmac
+    import struct as _struct
+
+    for offset in range(-window, window + 1):
+        msg = _struct.pack(">Q", step + offset)
+        digest = _hmac.new(key, msg, hashlib.sha1).digest()
+        o = digest[-1] & 0x0F
+        num = (_struct.unpack(">I", digest[o : o + 4])[0] & 0x7FFFFFFF) % 1_000_000
+        if f"{num:06d}" == want:
+            return True
+    return False
 
 
 class MemberError(Exception):
@@ -229,6 +274,8 @@ class MemberRecord:
     created_at: str = ""
     updated_at: str = ""
     display_name: str = ""
+    # Mk18 Phase C: TOTP secret (blank = second factor off). NEVER in to_public.
+    totp_secret: str = ""
 
     @property
     def email(self) -> str:
@@ -379,6 +426,16 @@ class MemberStore:
                 )
             except sqlite3.OperationalError:
                 pass
+            # Mk18 migration (SQLite twin of 0011): login throttle + TOTP.
+            for _ddl in (
+                "ALTER TABLE members ADD COLUMN login_attempts INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE members ADD COLUMN locked_until TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE members ADD COLUMN totp_secret TEXT NOT NULL DEFAULT ''",
+            ):
+                try:
+                    conn.execute(_ddl)
+                except sqlite3.OperationalError:
+                    pass
             # Mk15 migration (SQLite twin of 0008): per-department approval mode.
             try:
                 conn.execute(
@@ -484,6 +541,34 @@ class MemberStore:
                 )
                 """
             )
+            # Mk18 twin of 0013: second-eyes proposals for high-impact writes.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS second_eyes (
+                    id          TEXT PRIMARY KEY,
+                    kind        TEXT NOT NULL,
+                    payload     TEXT NOT NULL,
+                    proposed_by TEXT NOT NULL,
+                    proposed_at TEXT NOT NULL,
+                    status      TEXT NOT NULL DEFAULT 'pending',
+                    decided_by  TEXT NOT NULL DEFAULT '',
+                    decided_at  TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            # Mk18 twin of 0012: per-user/day LLM spend accounting.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_usage (
+                    username   TEXT NOT NULL,
+                    day        TEXT NOT NULL,
+                    calls      INTEGER NOT NULL DEFAULT 0,
+                    cost_cents INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (username, day)
+                )
+                """
+            )
             conn.commit()
         finally:
             conn.close()
@@ -539,8 +624,12 @@ class MemberStore:
             return None
         try:
             display = row["display_name"]
-        except Exception:
+        except Exception:  # noqa: BLE001
             display = ""
+        try:
+            totp = row["totp_secret"]
+        except Exception:  # noqa: BLE001
+            totp = ""
         return MemberRecord(
             username=row["username"],
             password_hash=row["password_hash"],
@@ -551,6 +640,7 @@ class MemberStore:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             display_name=str(display or ""),
+            totp_secret=str(totp or ""),
         )
 
     def _audit(self, actor: str, action: str, username: str) -> None:
@@ -598,6 +688,51 @@ class MemberStore:
     def count_active_admins(self) -> int:
         """Mk17 public: active admin count for the central second-admin rule."""
         return self._active_admin_count()
+
+    # ---- LLM spend accounting (Mk18 Phase H) ----
+
+    @staticmethod
+    def _today() -> str:
+        return datetime.now(UTC).date().isoformat()
+
+    def record_llm_call(self, username: str, cost_cents: int = 1) -> None:
+        """Increment today's (calls, cost) for a user. No version bump — high
+        frequency bookkeeping must not rebuild the enforcer."""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO llm_usage (username, day, calls, cost_cents, updated_at)"
+                    " VALUES (?, ?, 1, ?, ?)"
+                    " ON CONFLICT(username, day) DO UPDATE SET"
+                    " calls = llm_usage.calls + 1,"
+                    " cost_cents = llm_usage.cost_cents + excluded.cost_cents,"
+                    " updated_at = excluded.updated_at",
+                    (username, self._today(), int(cost_cents or 0), _now()),
+                )
+        finally:
+            conn.close()
+
+    def spend_status(self, username: str, call_cap: int, cost_cents_cap: int) -> dict[str, Any]:
+        """Today's spend vs caps. Tolerates pre-0012 databases (zeros)."""
+        conn = self._connect()
+        try:
+            try:
+                row = conn.execute(
+                    "SELECT calls, cost_cents FROM llm_usage WHERE username = ? AND day = ?",
+                    (username, self._today()),
+                ).fetchone()
+            except Exception:  # noqa: BLE001
+                return {"calls_today": 0, "cost_today_cents": 0, "capped": False}
+        finally:
+            conn.close()
+        calls = int((row["calls"] if row else 0) or 0)
+        cost = int((row["cost_cents"] if row else 0) or 0)
+        return {
+            "calls_today": calls,
+            "cost_today_cents": cost,
+            "capped": calls >= call_cap or cost >= cost_cents_cap,
+        }
 
     def _bump_version(self, conn: sqlite3.Connection) -> None:
         """Increment `members_version` inside the caller's transaction so the
@@ -861,11 +996,192 @@ class MemberStore:
         self._audit_entry(actor, "allowlist:revoke", "allowlist", f"{member}|{action}|{args_hash}")
         return True
 
+    # ---- second eyes (Mk18 Phase E) ----
+
+    #: Proposal kinds gated when ≥2 active admins exist (single admin = direct + audit).
+    SECOND_EYES_KINDS = (
+        "policy_rows",
+        "skill_save",
+        "skill_delete",
+        "llm_key_write",
+        "llm_key_delete",
+        "platform_key",
+        "composio_key",
+    )
+
+    def second_eyes_propose(self, kind: str, payload: dict[str, Any], proposer: str) -> dict[str, Any]:
+        """Stage a high-impact write for a second admin. Secrets in `payload`
+        must already be Fernet-encrypted by the caller (never plaintext)."""
+        if kind not in self.SECOND_EYES_KINDS:
+            raise MemberError(f"unknown second-eyes kind {kind!r}")
+        pid, now = str(uuid.uuid4()), _now()
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO second_eyes (id, kind, payload, proposed_by, proposed_at, status)"
+                    " VALUES (?, ?, ?, ?, ?, 'pending')",
+                    (pid, kind, json.dumps(payload, sort_keys=True, default=str), proposer, now),
+                )
+        finally:
+            conn.close()
+        self._audit_entry(proposer, "second-eyes:proposed", "second-eyes", f"{kind}|{pid}")
+        proposal = self.second_eyes_get(pid)
+        assert proposal is not None
+        return proposal
+
+    def second_eyes_get(self, pid: str) -> dict[str, Any] | None:
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM second_eyes WHERE id = ?", (pid,)).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "kind": row["kind"],
+            "payload": json.loads(row["payload"]),
+            "proposed_by": row["proposed_by"],
+            "proposed_at": row["proposed_at"],
+            "status": row["status"],
+            "decided_by": row["decided_by"],
+            "decided_at": row["decided_at"],
+        }
+
+    def second_eyes_pending(self) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM second_eyes WHERE status = 'pending' ORDER BY proposed_at"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [p for p in (self.second_eyes_get(r["id"]) for r in rows) if p is not None]
+
+    def second_eyes_decide(self, pid: str, approver: str, approve: bool) -> dict[str, Any]:
+        """Confirm (apply by caller) or reject a proposal. The proposer can
+        never decide their own item — a different admin must."""
+        proposal = self.second_eyes_get(pid)
+        if proposal is None:
+            raise MemberError(f"proposal {pid!r} not found")
+        if proposal["status"] != "pending":
+            raise MemberError(f"proposal {pid!r} already {proposal['status']}")
+        if proposal["proposed_by"] == approver:
+            raise MemberError("a second admin must decide (proposer cannot self-confirm)")
+        status = "approved" if approve else "rejected"
+        conn = self._connect()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "UPDATE second_eyes SET status = ?, decided_by = ?, decided_at = ?"
+                    " WHERE id = ? AND status = 'pending'",
+                    (status, approver, _now(), pid),
+                )
+        finally:
+            conn.close()
+        if cur.rowcount == 0:
+            raise MemberError(f"proposal {pid!r} already decided")
+        self._audit_entry(approver, f"second-eyes:{status}", "second-eyes", pid)
+        updated = self.second_eyes_get(pid)
+        assert updated is not None
+        return updated
+
+    def _throttle_state(self, username: str) -> tuple[int, str]:
+        """(attempts, locked_until) — tolerates pre-0011 databases without the columns."""
+        conn = self._connect()
+        try:
+            try:
+                row = conn.execute(
+                    "SELECT login_attempts, locked_until FROM members WHERE username = ?",
+                    (username,),
+                ).fetchone()
+            except Exception:  # noqa: BLE001
+                return 0, ""
+        finally:
+            conn.close()
+        if row is None:
+            return 0, ""
+        try:
+            return int(row["login_attempts"] or 0), str(row["locked_until"] or "")
+        except Exception:  # noqa: BLE001
+            return 0, ""
+
+    def _record_failed_login(self, username: str) -> None:
+        # NOTE: no _bump_version — login noise must not rebuild the enforcer.
+        conn = self._connect()
+        try:
+            try:
+                attempts, _ = self._throttle_state(username)
+                attempts += 1
+                if attempts >= _LOCK_AFTER_ATTEMPTS:
+                    locked = (datetime.now(UTC) + timedelta(minutes=_LOCK_MINUTES)).isoformat()
+                    conn.execute(
+                        "UPDATE members SET login_attempts = ?, locked_until = ? WHERE username = ?",
+                        (attempts, locked, username),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE members SET login_attempts = ? WHERE username = ?",
+                        (attempts, username),
+                    )
+                conn.commit()
+            except Exception:  # noqa: BLE001, S110
+                pass
+        finally:
+            conn.close()
+
+    def _clear_failed_login(self, username: str) -> None:
+        conn = self._connect()
+        try:
+            try:
+                conn.execute(
+                    "UPDATE members SET login_attempts = 0, locked_until = '' WHERE username = ?",
+                    (username,),
+                )
+                conn.commit()
+            except Exception:  # noqa: BLE001, S110
+                pass
+        finally:
+            conn.close()
+
     def verify(self, username: str, password: str) -> bool:
-        member = self.get(username)
-        if member is None or not verify_password(password, member.password_hash):
+        # Direct read (never the memo): resets/deactivations apply at once.
+        member = self.get_direct(username)
+        if member is None:
             return False
+        _, locked_until = self._throttle_state(username)
+        if is_login_locked(locked_until):
+            return False
+        if not verify_password(password, member.password_hash):
+            self._record_failed_login(username)
+            return False
+        self._clear_failed_login(username)
         return member.active
+
+    def set_totp_secret(self, username: str, secret_b32: str, actor: str = "admin") -> MemberRecord:
+        """Mk18 Phase C: opt-in TOTP second factor (blank clears). Audit-logged."""
+        if self.get(username) is None:
+            raise MemberError(f"member {username!r} not found")
+        secret = (secret_b32 or "").strip().upper()
+        if secret:
+            try:
+                base64.b32decode(secret)
+            except Exception as exc:
+                raise MemberError("totp secret must be base32") from exc
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE members SET totp_secret = ?, updated_at = ? WHERE username = ?",
+                (secret, _now(), username),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._audit(actor, "totp_set" if secret else "totp_cleared", username)
+        member = self.get(username)
+        assert member is not None
+        return member
 
     # ---- llm keys (BYOK Plan Mk3) ----
 
@@ -1485,7 +1801,7 @@ class MemberStore:
             if dept != "admin":
                 raise MemberError(f"admin role must belong to department 'admin', got {dept!r}")
             return
-        if role.endswith("_head") or role.endswith("_agent"):
+        if role.endswith(("_head", "_agent")):
             expected = role[: -len("_head")] if role.endswith("_head") else role[: -len("_agent")]
             if expected != dept:
                 if role.endswith("_head"):

@@ -160,14 +160,16 @@ def test_changed_args_do_not_match_a_rule(env, member_store):
 
 
 def test_a_forged_rule_cannot_waive_a_critical_tool(env, member_store, dept_apps):
+    from tests.attack.helpers import service_headers as _sh
+
     payload = {"tool": "finance_transfer", "args": TRANSFER}
     member_store.allowlist_add(
         CAROL["sub"], action_key_for(KIND_TOOL, tool="finance_transfer"),
         args_hash(allowlist_payload(KIND_TOOL, payload)), payload, "finance", actor="fhead@acme.com")
-    before = len(TestClient(dept_apps[8005]).get("/transfers").json())
+    before = len(TestClient(dept_apps[8005]).get("/transfers", headers=_sh()).json())
     res = env.call(CAROL, "finance_transfer", TRANSFER, "t-c")
     assert res.interrupted and res.approval_route == "head+admin"
-    assert len(TestClient(dept_apps[8005]).get("/transfers").json()) == before
+    assert len(TestClient(dept_apps[8005]).get("/transfers", headers=_sh()).json()) == before
 
 
 def test_a_forged_rule_cannot_waive_a_central_write(env, member_store):

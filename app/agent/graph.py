@@ -48,6 +48,7 @@ from app.harness.audit import AuditLog
 from app.harness.enforcer import PolicyEnforcer, dept_of_scope, head_role_for
 from app.harness.intercept import intercept_tool
 from app.harness.sanitize import MASK, sanitize_text, sanitize_tool_result
+from app.harness.untrusted import UNTRUSTED_DATA_RULE, sanitize_untrusted
 from app.llm.base import LLMProvider
 from app.memory.approvals import ApprovalStore
 from app.memory.edit import MemoryEditor, MemoryMatchError
@@ -234,7 +235,26 @@ def _relevant_facts(
     failed — then a fallback event follows), `heuristic` (fallback or no key).
     No prompt/key material is ever traced.
     """
+    from app.harness.untrusted import split_instruction_facts as _split_instr
     from app.llm.mock import MockLLM
+
+    def _clean(facts: list[Any]) -> tuple[list[Any], int]:
+        """Mk18 second layer: drop instruction-shaped facts, count them."""
+        return _split_instr(facts)
+
+    def _stamp(facts: list[Any], extraction: str) -> list[Any]:
+        """Mk18 Phase G: record which path proposed each fact (provenance)."""
+        import dataclasses
+
+        out = []
+        for fact in facts:
+            try:
+                prov = dict(getattr(fact, "provenance", None) or {})
+                prov.setdefault("extraction", extraction)
+                out.append(dataclasses.replace(fact, provenance=prov))
+            except Exception:  # noqa: BLE001
+                out.append(fact)
+        return out
 
     user_texts = [str(m.get("content", "")) for m in messages if m.get("role") == "user"]
     asst_texts = [str(m.get("content", "")) for m in messages if m.get("role") == "assistant"]
@@ -277,8 +297,11 @@ def _relevant_facts(
                     tools=[],
                 )
                 facts = _lx.parse_response(getattr(resp, "text", "") or "", claims)
+                facts = _stamp(facts, "system")
+                facts, dropped = _clean(facts)
                 _note("system", len(facts),
-                      getattr(system_provider, "model", ""))
+                      getattr(system_provider, "model", ""),
+                      {"dropped_instructions": dropped} if dropped else None)
                 return facts
             _note("system-skipped", 0, extra={"system": "unconfigured"})
         except Exception as exc:  # noqa: BLE001 - fall through to chat-model/heuristic
@@ -297,8 +320,9 @@ def _relevant_facts(
     # hundreds of tokens on this background task — heuristics are fine there
     # and keep chat latency to one model call per turn instead of two.
     if getattr(deps.provider, "PROVIDER_NAME", "") in ("lmstudio", "ollama", "llamacpp"):
-        facts = extract_facts(messages, claims)
-        _note("heuristic", len(facts))
+        facts = _stamp(extract_facts(messages, claims), "heuristic")
+        facts, dropped = _clean(facts)
+        _note("heuristic", len(facts), extra={"dropped_instructions": dropped} if dropped else None)
         return facts
     if not isinstance(deps.provider, MockLLM) and len(user_msg.strip()) >= 8:
         try:
@@ -306,14 +330,18 @@ def _relevant_facts(
 
             resp = deps.provider.generate(build_messages(user_msg, assistant_reply), tools=[])
             facts = parse_response(getattr(resp, "text", "") or "", claims)
-            _note("chat-model", len(facts))
+            facts = _stamp(facts, "chat-model")
+            facts, dropped = _clean(facts)
+            _note("chat-model", len(facts), extra={"dropped_instructions": dropped} if dropped else None)
             return facts
         except Exception:  # noqa: BLE001 - LLM extract failure falls back to heuristics
-            facts = extract_facts(messages, claims)
-            _note("heuristic", len(facts))
+            facts = _stamp(extract_facts(messages, claims), "heuristic")
+            facts, dropped = _clean(facts)
+            _note("heuristic", len(facts), extra={"dropped_instructions": dropped} if dropped else None)
             return facts
-    facts = extract_facts(messages, claims)
-    _note("heuristic", len(facts))
+    facts = _stamp(extract_facts(messages, claims), "heuristic")
+    facts, dropped = _clean(facts)
+    _note("heuristic", len(facts), extra={"dropped_instructions": dropped} if dropped else None)
     return facts
 
 
@@ -348,6 +376,12 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                 facts_by_scope[scope] = items  # reuse: a second read per scope is a network trip
 
         snapshot_text = build_snapshot(facts_by_scope, deps.memory.snapshot_max_chars)
+        try:
+            from app.memory.snapshot import snapshot_provenance as _snap_prov
+
+            prov_sidecar = _snap_prov(facts_by_scope)
+        except Exception:  # noqa: BLE001
+            prov_sidecar = {}
         deps.trace.add_event(
             deps.run_id,
             TraceEventType.CONTEXT_INJECTION,
@@ -357,11 +391,15 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                 "scopes": read_scopes,
                 "chars": len(snapshot_text),
                 "text": _sanitize_trajectory(snapshot_text, claims, deps.enforcer),
+                "provenance": prov_sidecar,
             },
         )
+        # Mk18: the system message carries the untrusted-data rule ahead of the
+        # snapshot (stored `memory_snapshot` state keeps the raw snapshot).
+        system_text = f"{UNTRUSTED_DATA_RULE}\n\n{snapshot_text}" if snapshot_text else UNTRUSTED_DATA_RULE
         return {
             **reset,
-            "messages": [{"role": "system", "content": snapshot_text}, user_msg],
+            "messages": [{"role": "system", "content": system_text}, user_msg],
             "memory_snapshot": snapshot_text,
             "memory_loaded": True,
         }
@@ -632,12 +670,19 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                             state["claims"],
                             deps.enforcer,
                         )
+                        if result.ok:
+                            # Mk18: external bytes are untrusted — wrap + strip
+                            # before they enter model context (RBAC still denies
+                            # any out-of-scope follow-on call).
+                            result.content = sanitize_untrusted(f"tool:{name}", result.content)
                     else:
                         result = sanitize_tool_result(
                             deps.executor.execute(tool, args),
                             state["claims"],
                             deps.enforcer,
                         )
+                        if result.ok:
+                            result.content = sanitize_untrusted(f"tool:{name}", result.content)
                 else:
                     deps.tracker.mark_denied(name)
             _trace_call(name, args, result)
@@ -726,8 +771,33 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
             for m in messages
             if m.get("role") in ("user", "assistant")
         )
+        editor = MemoryEditor(deps.store, deps.memory)
+        # Mk8 #6: LLM relevance extraction first (durable prefs only); heuristic
+        # fallback keeps offline/Mock runs deterministic.
+        facts = _relevant_facts(messages, claims, deps)
+        # Mk18 Phase G: stamp author + run provenance on every proposed fact.
+        import dataclasses as _dc
+
+        stamped: list[Any] = []
+        for fact in facts:
+            try:
+                prov = dict(getattr(fact, "provenance", None) or {})
+                prov.setdefault("author", str(actor.get("sub", "")))
+                prov.setdefault("run_id", deps.run_id)
+                stamped.append(_dc.replace(fact, provenance=prov))
+            except Exception:  # noqa: BLE001
+                stamped.append(fact)
+        facts = stamped
+        # Mk18 Phase G: transcripts are user-private unless the turn proposed
+        # team/company facts — then the turn was a team moment (dept scope).
+        # Dept peers can no longer recall your 1:1 turns.
+        ep_scope = scope_dept(str(claims.get("dept", "")))
+        if transcript.strip() and not any(
+            str(getattr(f, "scope", "") or "") != scope_user(str(claims.get("sub", "")))
+            for f in facts
+        ):
+            ep_scope = scope_user(str(claims.get("sub", "")))
         if transcript.strip():
-            ep_scope = scope_dept(str(claims.get("dept", "")))
             deps.episodic.append_transcript(ep_scope, deps.run_id, actor, transcript)
             deps.trace.add_event(
                 deps.run_id,
@@ -735,11 +805,6 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                 actor,
                 {"scope": ep_scope, "kind": "episodic", "decision": "allowed"},
             )
-
-        editor = MemoryEditor(deps.store, deps.memory)
-        # Mk8 #6: LLM relevance extraction first (durable prefs only); heuristic
-        # fallback keeps offline/Mock runs deterministic.
-        facts = _relevant_facts(messages, claims, deps)
         if not facts:
             deps.trace.add_event(
                 deps.run_id,
@@ -759,16 +824,15 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                 )
                 continue
 
-            # Mk15 routing: central -> admin; dept -> nobody (own head / allowlist hit),
-            # the head, or head then admin. A resumed run re-attaches to its own approval
-            # first, so a decided item is never re-routed or matched against the allowlist.
+            # Mk15 routing (Mk18: heads included — no self-approval): central
+            # always suspends; every dept write suspends unless an allowlist
+            # rule hits. A resumed run re-attaches to its own approval first,
+            # so a decided item is never re-routed or matched against the
+            # allowlist.
             payload = {"op": fact.op, "text": fact.text, "match": fact.match}
             gate: dict[str, Any] = {}
             approval_id: str | None = None
-            if fact.scope == SCOPE_CENTRAL or (
-                fact.scope.startswith("dept/")
-                and not deps.enforcer.is_dept_head(claims, fact.scope)
-            ):
+            if fact.scope == SCOPE_CENTRAL or fact.scope.startswith("dept/"):
                 approval_id = deps.approvals.find(deps.run_id, resource, payload)
                 if approval_id is None:
                     gate = _resolve_gate(

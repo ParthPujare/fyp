@@ -125,7 +125,12 @@ def route_for(
         tier, _, dept = scope.partition("/")
         if tier != "dept" or not dept:
             return ROUTE_NONE
-        if _is_head_of(actor_role, actor_dept, dept) or allowlist_hit:
+        if _is_head_of(actor_role, actor_dept, dept):
+            # Mk18 Phase E: a head cannot self-approve their own dept writes —
+            # route to an admin (the central second-admin rule still governs
+            # who may decide there; dept items need any admin here).
+            return ROUTE_ADMIN_ONLY
+        if allowlist_hit:
             return ROUTE_NONE
         return _dept_route(dept_mode, head_count)
 

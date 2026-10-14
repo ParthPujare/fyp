@@ -53,7 +53,10 @@ def test_dept_memory_without_an_active_head_escalates_to_admin():
 
 
 def test_head_own_dept_write_auto_commits():
-    assert mem("dept/marketing", head_count=1, dept_mode="head+admin", **HEAD) == ROUTE_NONE
+    # Mk18 Phase E: a head can no longer self-approve their own dept writes —
+    # they route to an admin instead of committing.
+    assert mem("dept/marketing", head_count=1, dept_mode="head+admin", **HEAD) == ROUTE_ADMIN_ONLY
+    assert mem("dept/marketing", head_count=1, dept_mode="head-only", **HEAD) == ROUTE_ADMIN_ONLY
     # ...but only their own department's
     other = {"actor_role": "hr_head", "actor_dept": "hr"}
     assert mem("dept/marketing", head_count=1, **other) == ROUTE_HEAD_ONLY

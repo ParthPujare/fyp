@@ -64,6 +64,11 @@ class FakeComposioClient:
     def list_connections(self, user_id: str) -> list[dict[str, Any]]:  # pragma: no cover - live only
         return []
 
+    def delete_connection(self, user_id: str, connection_id: str) -> tuple[bool, str]:
+        """Fake remote revoke — always succeeds (offline stand-in)."""
+        _ = (user_id, connection_id)
+        return True, "revoked (fake)"
+
 
 @dataclass
 class ComposioClient:
@@ -116,24 +121,12 @@ class ComposioClient:
                 res = sdk.tools.execute(  # type: ignore[attr-defined]
                     slug=slug, user_id=user_id, arguments=arguments, version=version
                 )
-            except Exception as exc:  # noqa: BLE001 - retry without version check
-                if not self._version_error(str(exc)):
-                    return ComposioResult(ok=False, error=str(exc))
-                try:
-                    res = sdk.tools.execute(  # type: ignore[attr-defined]
-                        slug=slug, user_id=user_id, arguments=arguments,
-                        dangerously_skip_version_check=True,
-                    )
-                except Exception as exc2:  # noqa: BLE001 - surface as ToolResult error
-                    return ComposioResult(ok=False, error=str(exc2))
+            except Exception as exc:  # noqa: BLE001 - Mk18: fail closed, no skip-check retry
+                return ComposioResult(ok=False, error=f"tool version check failed, not executed: {exc}")
         else:
-            try:
-                res = sdk.tools.execute(  # type: ignore[attr-defined]
-                    slug=slug, user_id=user_id, arguments=arguments,
-                    dangerously_skip_version_check=True,
-                )
-            except Exception as exc:  # noqa: BLE001 - surface as ToolResult error
-                return ComposioResult(ok=False, error=str(exc))
+            # Mk18: without a pinned version the call is refused rather than
+            # executed with dangerously_skip_version_check=True.
+            return ComposioResult(ok=False, error=f"unknown version for {slug}: not executed")
         data = getattr(res, "data", res)
         if isinstance(data, dict) and data.get("error"):
             return ComposioResult(ok=False, error=str(data.get("error")))
@@ -198,6 +191,33 @@ class ComposioClient:
                 }
             )
         return out
+
+    def delete_connection(self, user_id: str, connection_id: str) -> tuple[bool, str]:
+        """Best-effort remote revoke. Never raises — (ok, note).
+
+        Mk18 Phase F: Disconnect calls this first; only a success flips the
+        local row to revoked. An SDK without a delete API yields a skipped
+        note (local revoke still stands); an explicit API failure is (False).
+        """
+        _ = user_id
+        sdk = self._get_sdk()
+        if sdk is None or not self.api_key:
+            return False, "composio SDK not configured"
+        delete = getattr(getattr(sdk, "connected_accounts", None), "delete", None)
+        if not callable(delete):
+            return True, "remote revoke unsupported by SDK version — local revoke only"
+        if not connection_id:
+            return True, "no remote connection id recorded — local revoke only"
+        try:
+            delete(connection_id)
+        except TypeError:
+            try:
+                delete(id=connection_id)
+            except Exception as exc:  # noqa: BLE001
+                return False, f"remote revoke failed: {exc}"
+        except Exception as exc:  # noqa: BLE001
+            return False, f"remote revoke failed: {exc}"
+        return True, "revoked remotely"
 
     def validate_key(self) -> tuple[bool, str]:
         """Health check for the key wizard — never raises, never leaks the key."""

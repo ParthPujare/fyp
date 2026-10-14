@@ -3,9 +3,14 @@
 Event chain: each event stores the hash of the previous event in the run
 (genesis = 64 zero bytes). Every append also updates the run's head hash in a
 separate `trace_runs` table, so truncating or editing the final event is detected.
+
+Mk18 Phase H: optional HMAC (`hmac_key`) upgrades the chain to HMAC-SHA-256;
+`TRACE__HMAC_KEY_PREV` (comma-separated retired keys) keeps rotated lines
+verifiable. Blank key = plain SHA-256 (default, byte-identical behavior).
 """
 
 import hashlib
+import hmac
 import json
 import sqlite3
 import uuid
@@ -19,10 +24,44 @@ from app.ops.schema import DEFAULT_SOURCE, TraceEventType
 GENESIS = "0" * 64
 
 
+def resolve_trace_keys(explicit: bytes | str | None = None) -> list[bytes | None]:
+    """[current, *retired] trace-chain keys (mirrors audit rotation)."""
+    try:
+        from app.config import get_settings
+
+        current = explicit if explicit is not None else get_settings().services.trace_hmac_key
+        prev_raw = get_settings().services.trace_hmac_key_prev or ""
+    except Exception:  # noqa: BLE001
+        current, prev_raw = explicit, ""
+    keys: list[bytes | None] = []
+    for raw in [current, *str(prev_raw).split(",")]:
+        key = (raw.encode("utf-8") if isinstance(raw, str) else raw) or None
+        if key not in keys:
+            keys.append(key)
+    return keys or [None]
+
+
+def _hash_blob(prev_hash: str, content: dict[str, Any], key: bytes | None) -> str:
+    blob = json.dumps(content, sort_keys=True, default=str).encode("utf-8")
+    if key:
+        return hmac.new(key, prev_hash.encode("utf-8") + blob, hashlib.sha256).hexdigest()
+    return hashlib.sha256(prev_hash.encode("utf-8") + blob).hexdigest()
+
+
 class TraceStore:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, hmac_key: bytes | str | None = None):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Mk18 Phase H: None = plain SHA-256 (default); explicit key wins,
+        # else the configured TRACE__HMAC_KEY. Resolved once per store.
+        if hmac_key is None:
+            try:
+                from app.config import get_settings as _gs
+
+                hmac_key = _gs().services.trace_hmac_key
+            except Exception:  # noqa: BLE001
+                hmac_key = None
+        self._key = (hmac_key.encode("utf-8") if isinstance(hmac_key, str) else hmac_key) or None
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -66,9 +105,13 @@ class TraceStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_trace_run ON trace_events (run_id)")
 
     @staticmethod
-    def hash_event(prev_hash: str, content: dict[str, Any]) -> str:
-        blob = json.dumps(content, sort_keys=True, default=str).encode("utf-8")
-        return hashlib.sha256(prev_hash.encode("utf-8") + blob).hexdigest()
+    def hash_event(prev_hash: str, content: dict[str, Any], key: bytes | None = None) -> str:
+        """Chain hash (plain SHA-256 by default; HMAC with `key`). Kept static
+        so callers (PG twin, prune) can hash explicitly."""
+        return _hash_blob(prev_hash, content, key)
+
+    def _chain_hash(self, prev_hash: str, content: dict[str, Any]) -> str:
+        return _hash_blob(prev_hash, content, self._key)
 
     def start_run(self, actor: dict[str, Any], input_summary: dict[str, Any], run_id: str | None = None) -> str:
         run_id = run_id or str(uuid.uuid4())
@@ -113,7 +156,7 @@ class TraceStore:
                 "actor": actor,
                 "payload": payload,
             }
-            event_hash = self.hash_event(prev_hash, content)
+            event_hash = self._chain_hash(prev_hash, content)
             event_id = str(uuid.uuid4())
             conn.execute(
                 """
@@ -236,24 +279,60 @@ class TraceStore:
         the Postgres store batches a run's events and writes them in one round trip."""
         return
 
+    def redact_run(self, run_id: str) -> int:
+        """Mk18 Phase G: scrub PII from a run's payloads, rehashing forward.
+
+        Structure survives; emails/SSNs/sensitive fields become `***`;
+        `verify_integrity` stays green because every hash from the first
+        rewritten event is recomputed (same ts/seq/actor/type/source).
+        Returns the number of events rewritten.
+        """
+        from app.harness.sanitize import redact_for_retention
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT event_id, seq, ts, type, source, actor, payload"
+                " FROM trace_events WHERE run_id = ? ORDER BY seq",
+                (run_id,),
+            ).fetchall()
+            if not rows:
+                return 0
+            prev = GENESIS
+            for r in rows:
+                actor = json.loads(r["actor"])
+                new_payload = redact_for_retention(json.loads(r["payload"]))
+                content = {
+                    "run_id": run_id,
+                    "seq": r["seq"],
+                    "ts": r["ts"],
+                    "type": r["type"],
+                    "source": r["source"],
+                    "actor": actor,
+                    "payload": new_payload,
+                }
+                conn.execute(
+                    "UPDATE trace_events SET payload = ?, prev_hash = ? WHERE event_id = ?",
+                    (json.dumps(new_payload, sort_keys=True, default=str), prev, r["event_id"]),
+                )
+                prev = self._chain_hash(prev, content)
+            conn.execute("UPDATE trace_runs SET head_hash = ? WHERE run_id = ?", (prev, run_id))
+            return len(rows)
+
     def _check_chains(
         self, by_run: dict[str, list[Any]], heads: dict[str, str]
     ) -> tuple[bool, list[str]]:
         """Recompute every run's hash chain from its event rows (`row["seq"]`, `row["actor"]` as
-        JSON text, ...) and compare with the stored head. Shared by all trace back-ends."""
+        JSON text, ...) and compare with the stored head. Shared by all trace back-ends.
+
+        Mk18 Phase H rotation: each run verifies under any era key (a run is
+        minutes long; rotate during a quiet period so no run spans two eras).
+        """
+        keys = resolve_trace_keys(self._key)
         ok = True
         issues: list[str] = []
         for rid, events in by_run.items():
-            prev_expected = GENESIS
-            last_hash: str | None = None
-            for expected_seq, r in enumerate(events):
-                if r["seq"] != expected_seq:
-                    ok = False
-                    issues.append(f"{rid}: seq gap at {r['seq']} (expected {expected_seq})")
-                if r["prev_hash"] != prev_expected:
-                    ok = False
-                    issues.append(f"{rid} seq {r['seq']}: prev_hash mismatch")
-                content = {
+            contents = [
+                {
                     "run_id": rid,
                     "seq": r["seq"],
                     "ts": r["ts"],
@@ -262,9 +341,28 @@ class TraceStore:
                     "actor": json.loads(r["actor"]),
                     "payload": json.loads(r["payload"]),
                 }
-                last_hash = self.hash_event(r["prev_hash"], content)
-                prev_expected = last_hash
-            if last_hash is not None and heads.get(rid) != last_hash:
+                for r in events
+            ]
+            verified = False
+            run_issues: list[str] = []
+            for key in keys:
+                prev_expected = GENESIS
+                last_hash: str | None = None
+                trial: list[str] = []
+                for expected_seq, (r, content) in enumerate(zip(events, contents)):
+                    if r["seq"] != expected_seq:
+                        trial.append(f"{rid}: seq gap at {r['seq']} (expected {expected_seq})")
+                    if r["prev_hash"] != prev_expected:
+                        trial.append(f"{rid} seq {r['seq']}: prev_hash mismatch")
+                    last_hash = TraceStore.hash_event(r["prev_hash"], content, key=key)
+                    prev_expected = last_hash
+                if last_hash is not None and heads.get(rid) != last_hash:
+                    trial.append(f"{rid}: head hash mismatch (chain truncated or last event edited)")
+                if not trial:
+                    verified = True
+                    break
+                run_issues = trial
+            if not verified:
                 ok = False
-                issues.append(f"{rid}: head hash mismatch (chain truncated or last event edited)")
+                issues.extend(run_issues or [f"{rid}: chain unverifiable under every known key"])
         return ok, issues

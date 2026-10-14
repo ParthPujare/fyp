@@ -127,9 +127,10 @@ def test_unknown_object_action_and_user_denied(enforcer):
     for claims in USERS[:4]:
         assert not enforcer.enforce(claims["sub"], claims["dept"], "ghost", "read")
         assert not enforcer.enforce(claims["sub"], claims["dept"], "crm", "promote")
-    # admin wildcard (obj=*, act=*) legitimately grants *any* object/action…
-    assert enforcer.enforce(ADMIN["sub"], ADMIN["dept"], "ghost", "read")
-    assert enforcer.enforce(ADMIN["sub"], ADMIN["dept"], "crm", "promote")
+    # Mk18 Phase E: the admin wildcard is gone — unknown objects/actions are
+    # denied even for admins (least privilege; new tools need explicit rows).
+    assert not enforcer.enforce(ADMIN["sub"], ADMIN["dept"], "ghost", "read")
+    assert not enforcer.enforce(ADMIN["sub"], ADMIN["dept"], "crm", "promote")
     # …but a user with no role assignment is denied even in the admin domain
     assert not enforcer.enforce("intruder@evil.com", "marketing", "crm", "read")
     assert not enforcer.enforce("ghost@acme.com", "admin", "crm", "read")

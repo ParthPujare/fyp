@@ -40,3 +40,15 @@ def outcome_names(result) -> list[str]:
 
 def outcome_of(result, tool: str) -> dict[str, Any]:
     return next(c for c in result.tool_calls if c["name"] == tool)
+
+
+def service_headers(username: str = "admin@acme.com") -> dict[str, str]:
+    """Authorization header for direct dept-service calls in tests (Mk18: dept
+    services require the operator's JWT; the member_store fixture seeds it)."""
+    from app.auth.jwt import create_token
+    from app.config import get_settings
+
+    settings = get_settings()
+    return {
+        "Authorization": f"Bearer {create_token(USERS[username], settings.jwt.secret, settings.jwt.algorithm, settings.jwt.expiry_minutes)}"
+    }

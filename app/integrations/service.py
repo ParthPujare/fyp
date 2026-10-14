@@ -50,19 +50,19 @@ def visible_external_tools(claims: dict[str, Any]) -> list:
         from app.auth.users import get_store
 
         store = get_store()
-        has_any_key = store.get_composio_key(username) is not None
         cached = store.list_cached_tools()
     except Exception:  # noqa: BLE001
         store = None
-        has_any_key = False
         cached = []
     out = []
     seen: set[str] = set()
+    # Mk18 Phase F: no key → invisible, unconditionally. (The old
+    # `has_any_key` carve-out showed tools whose execution would then fail.)
+    if api_key is None:
+        return out
     for item in cached:
         toolkit = str(item.get("toolkit", ""))
         if not _is_connected(username, toolkit):
-            continue
-        if api_key is None and has_any_key:
             continue
         spec = spec_from_discovered(
             toolkit, str(item.get("slug", "")),
@@ -80,8 +80,6 @@ def visible_external_tools(claims: dict[str, Any]) -> list:
         app = app_for(spec.name) or ""
         enabled = any(t.get("toolkit") == app for t in _catalog_toolkits())
         if not enabled or not _is_connected(username, app):
-            continue
-        if api_key is None and has_any_key:
             continue
         out.append(spec)
     return out
@@ -118,6 +116,19 @@ def execute_external(tool_name: str, args: dict[str, Any], claims: dict[str, Any
             pass
     if entry is None or not slug:
         return ToolResult(ok=False, reason="args", content=f"unknown external tool: {tool_name}")
+    # Mk18 Phase B: shape-check external args too (seed specs carry schemas;
+    # discovered ones default to open object).
+    try:
+        from app.agent.tools import _validate_args as _check_args
+        from app.integrations.adapter import spec_for as _spec_for
+
+        _spec = _spec_for(tool_name)
+        if _spec is not None:
+            _problem = _check_args(_spec, args or {})
+            if _problem is not None:
+                return ToolResult(ok=False, reason="args", content=_problem)
+    except Exception:  # noqa: BLE001, S110 - validation never blocks on validator errors
+        pass
     username = str(claims.get("sub", ""))
     if not _is_connected(username, app):
         return ToolResult(
@@ -126,6 +137,31 @@ def execute_external(tool_name: str, args: dict[str, Any], claims: dict[str, Any
         )
     settings = get_settings()
     api_key = get_composio_key(username, settings.composio.api_key)
+    if not api_key:
+        # Mk18 Phase F: never execute against the Fake client with a missing
+        # key (it would fake-send). Fail closed with a save-key prompt.
+        return ToolResult(
+            ok=False, denied=True, reason="auth",
+            content="Composio key missing. Save your key in Account → Integrations first.",
+        )
+    # Mk18 Phase F: provenance travels with external data (source identity for
+    # the untrusted-data boundary + audit). URLs stay intact (display_url must
+    # remain clickable) — no defanging.
+    import datetime as _dt
+
+    provenance = {
+        "_provenance": {
+            "toolkit": app,
+            "tool": tool_name,
+            "user": username,
+            "ts": _dt.datetime.now(_dt.UTC).isoformat(),
+        }
+    }
+
+    def _with_provenance(data: Any) -> Any:
+        if isinstance(data, dict):
+            return {**data, **provenance}
+        return data
     client = build_client(api_key, settings.composio.base_url, settings.composio.timeout_seconds)
     comp_args = to_composio_args(tool_name, args) if tool_name in EXTERNAL_TOOLS else dict(args or {})
     started = time.monotonic()
@@ -135,8 +171,9 @@ def execute_external(tool_name: str, args: dict[str, Any], claims: dict[str, Any
         latency_ms = int((time.monotonic() - started) * 1000)
         if not res.ok:
             return ToolResult(ok=False, reason="http", content=res.error, latency_ms=latency_ms)
+        data = _with_provenance(res.data)
         return ToolResult(
-            ok=True, content=json.dumps(res.data)[:4000], data=res.data, latency_ms=latency_ms
+            ok=True, content=json.dumps(data)[:4000], data=data, latency_ms=latency_ms
         )
     try:
         res = client.execute(slug=slug, user_id=entity_id_for(claims), arguments=comp_args)  # type: ignore[union-attr]
@@ -147,4 +184,5 @@ def execute_external(tool_name: str, args: dict[str, Any], claims: dict[str, Any
         reason = "timeout" if "timed out" in res.error.lower() else "http"
         timeout = reason == "timeout"
         return ToolResult(ok=False, timeout=timeout, reason=reason, content=res.error, latency_ms=latency_ms)
-    return ToolResult(ok=True, content=json.dumps(res.data)[:4000], data=res.data, latency_ms=latency_ms)
+    data = _with_provenance(res.data)
+    return ToolResult(ok=True, content=json.dumps(data)[:4000], data=data, latency_ms=latency_ms)

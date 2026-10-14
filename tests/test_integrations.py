@@ -39,6 +39,9 @@ def test_fake_client_deterministic():
 def test_visible_only_when_connected(member_store):
     alice = {"sub": "alice@acme.com", "role": "marketing_agent", "dept": "marketing"}
     assert visible_external_tools(alice) == []
+    # Mk18 Phase F: visibility also requires the member's own saved key.
+    member_store.set_composio_key("alice@acme.com", "ck-alice-1", actor="alice@acme.com")
+    assert visible_external_tools(alice) == []  # still nothing: not connected
     member_store.set_connected_account("alice@acme.com", "gmail", "acc-1", "active")
     names = {t.name for t in visible_external_tools(alice)}
     assert "gmail_fetch" in names and "gmail_send" in names
@@ -51,11 +54,28 @@ def test_execute_requires_connection(member_store):
     assert not res.ok and res.denied and res.reason == "auth"
 
 
-def test_execute_fake_success(member_store):
+def test_execute_fake_success(member_store, monkeypatch):
+    """Fake-client execution with a saved key (offline stand-in for the real SDK)."""
+    import app.integrations.service as _svc
+    from app.integrations.client import FakeComposioClient
+
+    monkeypatch.setattr(_svc, "build_client", lambda *a, **k: FakeComposioClient())
     alice = {"sub": "alice@acme.com", "role": "marketing_agent", "dept": "marketing"}
+    member_store.set_composio_key("alice@acme.com", "ck-alice-1", actor="alice@acme.com")
     member_store.set_connected_account("alice@acme.com", "gmail", "acc-1", "active")
     res = execute_external("gmail_fetch", {"query": "standup"}, alice)
     assert res.ok and "msg-001" in res.content
+
+
+def test_execute_denies_without_key(member_store):
+    """Mk18 Phase F: connected but key deleted → fail closed, never fake-send."""
+    alice = {"sub": "alice@acme.com", "role": "marketing_agent", "dept": "marketing"}
+    member_store.set_composio_key("alice@acme.com", "ck-alice-1", actor="alice@acme.com")
+    member_store.set_connected_account("alice@acme.com", "gmail", "acc-1", "active")
+    member_store.delete_composio_key("alice@acme.com", actor="alice@acme.com")
+    res = execute_external("gmail_fetch", {"query": "standup"}, alice)
+    assert not res.ok and res.denied and res.reason == "auth"
+    assert visible_external_tools(alice) == []
 
 
 def test_filter_tools_respects_casbin(member_store, enforcer):
@@ -138,12 +158,15 @@ def test_catalog_seeds_and_dynamic_tool_visibility(member_store):
     from app.integrations.service import visible_external_tools
 
     assert risk_for_slug("SLACK_SEND_MESSAGE") == "critical"
-    assert risk_for_slug("NOTION_SEARCH") == "read"
+    # Mk18: unknown slugs fail closed (was "read" by bare heuristic).
+    assert risk_for_slug("NOTION_SEARCH") == "critical"
     spec = spec_from_discovered("slack", "SLACK_SEND_MESSAGE", "Send", {"type": "object"})
     assert spec.name == "slack_slack_send_message"
     assert spec.required_scope == "slack:write"
     assert spec.risk_level == "critical"
 
+    # Mk18 Phase F: dynamic visibility also requires the member's own key.
+    member_store.set_composio_key("alice@acme.com", "ck-alice-1", actor="alice@acme.com")
     member_store.upsert_toolkit("slack", enabled=True, actor="admin")
     member_store.cache_toolkit_tools(
         "slack",
@@ -166,6 +189,48 @@ def test_dynamic_execute_unknown_and_not_connected(member_store):
     alice = {"sub": "alice@acme.com", "role": "marketing_agent", "dept": "marketing"}
     res = execute_external("slack_slack_send_message", {"text": "hi"}, alice)
     assert not res.ok and res.denied and "slack" in res.content
+
+
+def test_connect_refuses_unprovisioned_toolkit(member_store):
+    """Mk18 Phase F: members cannot auto-provision shared auth configs — a
+    toolkit without a catalog auth_config is 422 (ask an admin)."""
+    from fastapi.testclient import TestClient
+
+    from app.auth.jwt import create_token
+    from app.auth.users import USERS
+    from app.config import get_settings
+    from app.dashboard.app import app as dash_app
+
+    settings = get_settings()
+    member_store.set_composio_key("alice@acme.com", "ck-alice-1", actor="alice@acme.com")
+    token = create_token(
+        USERS["alice@acme.com"], settings.jwt.secret, settings.jwt.algorithm,
+        settings.jwt.expiry_minutes,
+    )
+    resp = TestClient(dash_app).post(
+        "/api/integrations/connect",
+        json={"app": "gmail"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    # No catalog row with auth_config in this isolated store → admin path.
+    assert resp.status_code == 422
+    assert "admin" in resp.text.lower()
+
+
+def test_external_results_carry_provenance(member_store, monkeypatch):
+    """Mk18 Phase F: external data carries toolkit/user/ts provenance."""
+    import app.integrations.service as _svc
+    from app.integrations.client import FakeComposioClient
+    from app.integrations.service import execute_external
+
+    monkeypatch.setattr(_svc, "build_client", lambda *a, **k: FakeComposioClient())
+    alice = {"sub": "alice@acme.com", "role": "marketing_agent", "dept": "marketing"}
+    member_store.set_composio_key("alice@acme.com", "ck-alice-1", actor="alice@acme.com")
+    member_store.set_connected_account("alice@acme.com", "gmail", "acc-1", "active")
+    res = execute_external("gmail_fetch", {"query": "standup"}, alice)
+    assert res.ok
+    assert res.data.get("_provenance", {}).get("toolkit") == "gmail"
+    assert res.data["_provenance"]["user"] == "alice@acme.com"
 
 
 def test_key_save_validates_key(member_store, monkeypatch):

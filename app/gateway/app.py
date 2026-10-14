@@ -29,6 +29,7 @@ from app.auth.users import get_store, is_active_member
 from app.config import get_settings
 from app.harness.audit import open_audit_log
 from app.harness.enforcer import PolicyEnforcer
+from app.llm.metered import SpendCapExceeded
 from app.memory.approval_flow import (
     DecisionError,
     apply_decision,
@@ -96,8 +97,8 @@ def get_runner() -> Runner:
 
 
 def get_resumer():
-    def _resume(approval_id: str):
-        return resume_agent(approval_id, **_get_components())
+    def _resume(approval_id: str, auth_token: str | None = None):
+        return resume_agent(approval_id, **_get_components(), auth_token=auth_token)
 
     return _resume
 
@@ -170,8 +171,15 @@ def hello(req: HelloRequest) -> dict:
     }
 
 
-def _call_runner(runner: Any, claims: dict, message: str, thread_id: str | None, key_id: str | None):
-    """Invoke a runner, passing `key_id` only if it accepts one.
+def _call_runner(
+    runner: Any,
+    claims: dict,
+    message: str,
+    thread_id: str | None,
+    key_id: str | None,
+    auth_token: str | None = None,
+):
+    """Invoke a runner, passing `key_id`/`auth_token` only if it accepts them.
 
     Tests override `get_runner` with 3-argument callables. Deciding by signature
     rather than catching TypeError matters: a TypeError raised *inside* the agent
@@ -182,19 +190,36 @@ def _call_runner(runner: Any, claims: dict, message: str, thread_id: str | None,
         params = inspect.signature(runner).parameters
     except (TypeError, ValueError):  # builtins / C callables have no signature
         params = {}
-    accepts_key_id = "key_id" in params or any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
-    )
-    if accepts_key_id:
-        return runner(claims, message, thread_id, key_id=key_id)
+    kwargs: dict[str, Any] = {}
+    if "key_id" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        kwargs["key_id"] = key_id
+    # Mk18 Phase C: forward the caller's own JWT for dept-service passthrough.
+    if "auth_token" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        kwargs["auth_token"] = auth_token
+    if kwargs:
+        return runner(claims, message, thread_id, **kwargs)
     return runner(claims, message, thread_id)
+
+
+def _call_resumer(resumer: Any, approval_id: str, auth_token: str | None = None):
+    """Invoke a resumer, passing `auth_token` only if it accepts it (Mk18)."""
+    try:
+        params = inspect.signature(resumer).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "auth_token" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return resumer(approval_id, auth_token=auth_token)
+    return resumer(approval_id)
 
 
 @app.post("/chat")
 def chat(req: ChatRequest, runner: Annotated[Runner, Depends(get_runner)]) -> dict:
     claims = _verified_active(req.token)
     try:
-        result = _call_runner(runner, claims, req.message, req.thread_id, req.key_id)
+        result = _call_runner(runner, claims, req.message, req.thread_id, req.key_id, req.token)
+    except SpendCapExceeded as exc:
+        # Mk18 Phase H: daily spend cap — clean rate-limit, not a 500.
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except (RuntimeError, ValueError) as exc:
         # Providers raise RuntimeError carrying a classified, sanitized message
         # (bad key / quota / model not found / upstream 4xx) and ValueError for an
@@ -341,7 +366,10 @@ def decide_approval(
         raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
     if req.defer or decided["status"] == "pending":
         return decision_response(decided)
-    result = resumer(approval_id)
+    try:
+        result = _call_resumer(resumer, approval_id, req.token)
+    except SpendCapExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     decided = approvals.get(approval_id)
     return {
         "approval_id": approval_id,
@@ -382,7 +410,9 @@ def resume_approval(
             detail="this run's saved state was not found (was the chat deleted?), so it cannot be resumed",
         )
     try:
-        result = resumer(approval_id)
+        result = _call_resumer(resumer, approval_id, req.token)
+    except SpendCapExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
     except ValueError as exc:

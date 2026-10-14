@@ -30,6 +30,32 @@ _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 
 
+# Mk18 Phase B — outbound DLP: secret-shaped values must never leave in tool
+# args. Each entry is (label, pattern); `scan_args_for_exfil` returns the first
+# matching label or None. Patterns are pinned by tests/test_exfil.py.
+_EXFIL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
+    ("card", re.compile(r"\b(?:\d[ -]*?){13,19}\b")),
+    ("private-key", re.compile(r"BEGIN [A-Z ]*PRIVATE KEY")),
+    ("api-key", re.compile(r"\bsk-[A-Za-z0-9]{8,}\b")),
+    ("slack-token", re.compile(r"\bxox[bap]-[A-Za-z0-9-]{8,}\b")),
+    ("github-token", re.compile(r"\bghp_[A-Za-z0-9]{8,}\b")),
+    ("aws-key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+)
+
+
+def scan_args_for_exfil(args: Any) -> str | None:
+    """Return the exfil label if serialized args carry secret-shaped values."""
+    try:
+        blob = json.dumps(args, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        blob = str(args)
+    for label, pattern in _EXFIL_PATTERNS:
+        if pattern.search(blob):
+            return label
+    return None
+
+
 def pii_read_allowed(enforcer: PolicyEnforcer, claims: dict[str, Any], field: str) -> bool:
     """Can (sub, dom) read this PII field? Obj = `pii_<field>`, act = `read`.
 
@@ -81,6 +107,25 @@ def sanitize_text(
     if not pii_read_allowed(enforcer, claims, "ssn"):
         text = _SSN_RE.sub(MASK, text)
     return text
+
+
+def redact_for_retention(obj: Any) -> Any:
+    """Mk18 Phase G: deny-all scrub for retained trace payloads.
+
+    Field-name masking (email/salary/ssn, any depth) + email/SSN regex on all
+    strings. Structure and non-PII text survive; the chain is rehashed forward
+    by the caller (`prune --redact`), so `verify_integrity` stays green.
+    """
+    if isinstance(obj, dict):
+        return {
+            key: (MASK if str(key).lower() in SENSITIVE_FIELDS else redact_for_retention(value))
+            for key, value in obj.items()
+        }
+    if isinstance(obj, list):
+        return [redact_for_retention(item) for item in obj]
+    if isinstance(obj, str):
+        return _SSN_RE.sub(MASK, _EMAIL_RE.sub(MASK, obj))
+    return obj
 
 
 def sanitize_tool_result(

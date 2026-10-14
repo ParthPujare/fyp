@@ -98,7 +98,7 @@ class PgPolicyStore:
                 from app.config import get_settings
 
                 seed_from = get_settings().services.policy_path
-            except Exception:
+            except Exception:  # noqa: BLE001
                 seed_from = POLICY_PATH
         if seed_from is not None:
             seed_policy(self._pool, seed_from)
@@ -176,7 +176,7 @@ class PgPolicyStore:
                 from app.config import get_settings
 
                 path = get_settings().services.policy_path
-            except Exception:
+            except Exception:  # noqa: BLE001
                 path = POLICY_PATH
         return policy_drift(self._pool, path)
 
@@ -190,7 +190,7 @@ def policy_drift(
             from app.config import get_settings
 
             path = get_settings().services.policy_path
-        except Exception:
+        except Exception:  # noqa: BLE001
             path = POLICY_PATH
     in_file = file_rows(path)
     with pool.connection() as conn:
@@ -228,7 +228,7 @@ def seed_policy(pool: ConnectionPool, path: str | Path | None = None) -> int:
             from app.config import get_settings
 
             path = get_settings().services.policy_path
-        except Exception:
+        except Exception:  # noqa: BLE001
             path = POLICY_PATH
     if pool in _seeded:
         return 0

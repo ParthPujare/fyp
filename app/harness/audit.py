@@ -81,6 +81,36 @@ def resolve_key(hmac_key: str | bytes | None) -> bytes | None:
     return (hmac_key.encode("utf-8") if isinstance(hmac_key, str) else hmac_key) or None
 
 
+def resolve_key_chain(hmac_key: str | bytes | None = None) -> list[bytes | None]:
+    """Mk18 Phase H: [current, *retired] verification keys for rotation.
+
+    Retired keys come from `SERVICES__AUDIT_HMAC_KEY_PREV` (comma-separated).
+    The first entry signs new lines; every entry verifies old ones.
+    """
+    try:
+        from app.config import get_settings
+
+        prev_raw = get_settings().services.audit_hmac_key_prev or ""
+    except Exception:  # noqa: BLE001
+        prev_raw = ""
+    keys: list[bytes | None] = [resolve_key(hmac_key)]
+    for part in str(prev_raw).split(","):
+        part = part.strip()
+        if part:
+            keys.append(part.encode("utf-8"))
+    # Deduplicate while keeping order (None = plain-SHA era always verifiable).
+    seen: list[bytes | None] = []
+    for key in keys:
+        if key not in seen:
+            seen.append(key)
+    return seen
+
+
+def _hash_matches(prev_hash: str, entry: dict[str, Any], stored: Any, keys: list[bytes | None]) -> bool:
+    """True iff `stored` equals the hash under any rotation-era key."""
+    return any(_hash_entry(prev_hash, entry, key) == stored for key in keys)
+
+
 def open_audit_log(path: str | Path) -> AuditLog:
     """The shared Postgres chain when `DATABASE_URL` is set (named after the file's stem, so the
     default `data/audit.jsonl` becomes log "audit"), else the local JSONL file."""
@@ -204,6 +234,8 @@ class AuditLog:
     def _verify_locked(self) -> tuple[bool, list[str]]:
         if not self.path.exists():
             return False, ["audit file missing"]
+        # Mk18 Phase H rotation: each line verifies under any era key.
+        keys = resolve_key_chain(self._key)
         ok, issues = True, []
         expected = GENESIS
         head: str | None = None
@@ -227,10 +259,10 @@ class AuditLog:
                 if obj.get("prev_hash") != expected:
                     ok = False
                     issues.append(f"line {lineno}: prev_hash mismatch (edited/reordered/deleted)")
-                computed = _hash_entry(expected, entry, self._key) if obj.get("prev_hash") == expected else None
-                if computed is not None and stored != computed:
+                computed = _hash_matches(expected, entry, stored, keys) if obj.get("prev_hash") == expected else None
+                if computed is not None and not computed:
                     ok = False
-                    issues.append(f"line {lineno}: hash mismatch (entry edited)")
+                    issues.append(f"line {lineno}: hash mismatch under every known key (entry edited)")
                 expected = stored
                 head = stored
         if saw_hashed:

@@ -419,7 +419,8 @@ def test_a_run_paused_on_laptop_a_is_approved_and_resumed_on_laptop_b(two_laptop
     provider = MockLLM(sequence=[{"text": "sending", "tool_calls": [{"name": "finance_transfer", "args": T1}]}])
     first = run_agent(CAROL, "transfer 1", provider=provider, thread_id="user:carol@acme.com:hop", **a.kwargs)
     assert first.interrupted and first.approval_id
-    before = len(TestClient(dept_apps[8005]).get("/transfers").json())
+    from tests.attack.helpers import service_headers as _sh
+    before = len(TestClient(dept_apps[8005]).get("/transfers", headers=_sh()).json())
 
     # laptop B: a different process/machine. It sees the approval, decides it, and resumes the run.
     assert b.kwargs["approvals"].get(first.approval_id)["status"] == "pending"
@@ -427,7 +428,7 @@ def test_a_run_paused_on_laptop_a_is_approved_and_resumed_on_laptop_b(two_laptop
     resumed = resume_agent(first.approval_id, provider=MockLLM(sequence=[]), **b.kwargs)
 
     assert not resumed.interrupted and resumed.reply
-    assert len(TestClient(dept_apps[8005]).get("/transfers").json()) == before + 1  # executed exactly once
+    assert len(TestClient(dept_apps[8005]).get("/transfers", headers=_sh()).json()) == before + 1  # executed exactly once
     # one continuous, verifiable trace across both machines
     fresh = PgTraceStore(pool)
     types = [e["type"] for e in fresh.get_run_tree(first.run_id)]
@@ -546,11 +547,12 @@ def test_a_run_paused_for_approval_still_resumes_after_pruning(two_laptops, monk
     with two_laptops.pool.connection() as conn:
         assert conn.execute("SELECT COUNT(*) AS n FROM checkpoints WHERE thread_id = %s", (thread,)).fetchone()["n"] == 1
 
-    before = len(TestClient(dept_apps[8005]).get("/transfers").json())
+    from tests.attack.helpers import service_headers as _sh
+    before = len(TestClient(dept_apps[8005]).get("/transfers", headers=_sh()).json())
     b.kwargs["approvals"].decide(first.approval_id, True, "admin@acme.com")
     resumed = resume_agent(first.approval_id, provider=MockLLM(sequence=[]), **b.kwargs)  # on the OTHER machine
     assert not resumed.interrupted and resumed.reply
-    assert len(TestClient(dept_apps[8005]).get("/transfers").json()) == before + 1  # the paused call ran once
+    assert len(TestClient(dept_apps[8005]).get("/transfers", headers=_sh()).json()) == before + 1  # the paused call ran once
     users = [m["content"] for m in _thread_messages(b.saver, thread) if m["role"] == "user"]
     assert users[:3] == ["earlier 0", "earlier 1", "earlier 2"] and "transfer" in users  # history intact
 

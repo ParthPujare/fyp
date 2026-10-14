@@ -9,9 +9,10 @@ the most-overlapping fact already extracted this conversation.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from app.harness.untrusted import contains_instruction
 from app.memory.scopes import SCOPE_CENTRAL, scope_dept, scope_user
 
 MEMORY_MARKER = re.compile(
@@ -32,6 +33,9 @@ class Fact:
     scope: str
     op: str = "add"  # add | replace | remove
     match: str | None = None  # unique-substring match for replace/remove
+    # Mk18 Phase G: write-time provenance (author turn, extraction path).
+    # Empty for pre-Mk18 rows (read as "unknown").
+    provenance: dict[str, Any] = field(default_factory=dict)
 
 
 def normalize(text: str) -> str:
@@ -64,6 +68,9 @@ def extract_facts(messages: list[dict[str, Any]], claims: dict[str, Any]) -> lis
         for sentence in _sentences(str(message.get("content", ""))):
             sentence = sentence.strip()
             if len(sentence) < MIN_FACT_LENGTH or not MEMORY_MARKER.search(sentence):
+                continue
+            # Mk18: instruction-shaped sentences are never durable facts.
+            if contains_instruction(sentence):
                 continue
             scope = classify(sentence, claims)
             if CORRECTION_MARKER.search(sentence) and facts:

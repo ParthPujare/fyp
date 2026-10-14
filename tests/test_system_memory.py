@@ -196,14 +196,18 @@ def test_relevant_facts_falls_back_on_system_error(monkeypatch, trace_store):
 
 
 def test_relevant_facts_no_key_parity(monkeypatch, trace_store):
-    """Without a system key the turn behaves exactly like the old heuristic path."""
+    """Without a system key the turn behaves exactly like the old heuristic path
+    (Mk18: facts additionally carry extraction provenance)."""
     from app.llm.mock import MockLLM
     from app.memory.extract import extract_facts
 
     monkeypatch.setattr(system_mod, "get_system_provider", lambda *a, **k: None)
     deps = _deps(MockLLM(), trace_store)
     msgs = [{"role": "user", "content": "I prefer Slack over Teams always"}]
-    assert graph_mod._relevant_facts(msgs, ALICE, deps) == extract_facts(msgs, ALICE)
+    got = graph_mod._relevant_facts(msgs, ALICE, deps)
+    want = extract_facts(msgs, ALICE)
+    assert [(f.text, f.scope, f.op) for f in got] == [(f.text, f.scope, f.op) for f in want]
+    assert all(f.provenance.get("extraction") == "heuristic" for f in got)
 
 
 def test_end_to_end_user_fact_commits_no_approval(runner_factory, memory_store, trace_store, member_store):

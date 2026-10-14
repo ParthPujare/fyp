@@ -68,18 +68,31 @@ class MemoryEditor:
             return self.replace(fact.scope, fact.text, fact.match or fact.text)
         if fact.op == "remove":
             return self.remove(fact.scope, fact.match or fact.text)
+        prov = getattr(fact, "provenance", None) or {}
+        if prov:
+            return self._add_with_provenance(fact.scope, fact.text, dict(prov))
         return self.add(fact.scope, fact.text)
 
     def add(self, scope: str, text: str) -> EditOutcome:
         text = self._check_text(text)
+        return self._add_with_provenance(scope, text, {})
+
+    def _add_with_provenance(self, scope: str, text: str, provenance: dict) -> EditOutcome:
+        """Mk18 Phase G: persist write-time provenance alongside the fact."""
         ns = scope_to_namespace(scope)
         norm = normalize(text)
         for item in self._store.items_in(ns):
             if normalize(str(item.value.get("text", ""))) == norm:
-                self._store.put(ns, item.key, {**item.value, "text": text, "op": "replace"})
+                merged = {**item.value, "text": text, "op": "replace"}
+                if provenance:
+                    merged["provenance"] = provenance
+                self._store.put(ns, item.key, merged)
                 return EditOutcome(op="replaced", scope=scope, text=text)
         key = str(uuid.uuid4())
-        self._store.put(ns, key, {"text": text, "op": "add"})
+        value: dict = {"text": text, "op": "add"}
+        if provenance:
+            value["provenance"] = provenance
+        self._store.put(ns, key, value)
         evicted = self._enforce_budget(ns, scope)
         return EditOutcome(op="add", scope=scope, text=text, evicted=evicted)
 

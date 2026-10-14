@@ -13,12 +13,16 @@ _CRITICAL_HINTS = ("SEND", "DELETE")
 
 
 def risk_for_slug(slug: str) -> str:
+    """Mk18: unknown slugs fail closed as critical (an unfamiliar external
+    action suspends for HITL instead of running). Seed specs carry explicit
+    risk_level; discovered tools should carry cached risk metadata (the
+    service layer prefers it over this heuristic)."""
     s = (slug or "").upper()
     if any(h in s for h in _CRITICAL_HINTS):
         return "critical"
     if any(h in s for h in _WRITE_HINTS):
         return "write"
-    return "read"
+    return "critical" if s else "read"
 
 
 def action_for_slug(slug: str) -> str:

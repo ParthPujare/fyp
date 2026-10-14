@@ -132,5 +132,5 @@ def open_policy_store():
         from app.config import get_settings
 
         return FilePolicyStore(get_settings().services.policy_path)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return FilePolicyStore(POLICY_PATH)

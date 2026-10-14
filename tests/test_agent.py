@@ -92,7 +92,9 @@ def test_deny_storm_never_reaches_service(dept_apps, runner_factory):
     assert all(c["outcome"] == "denied" for c in result.tool_calls)
 
     client = TestClient(dept_apps[8003])
-    assert client.get("/employees/1").json()["id"] == 1
+    from tests.attack.helpers import service_headers as _sh
+
+    assert client.get("/employees/1", headers=_sh()).json()["id"] == 1
 
 
 def test_tool_budget_forced_final(runner_factory, settings_with_budget):

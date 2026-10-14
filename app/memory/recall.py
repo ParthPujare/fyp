@@ -14,6 +14,7 @@ from app.agent.tools import ToolResult
 from app.config import MemorySettings
 from app.harness.enforcer import PolicyEnforcer
 from app.harness.sanitize import sanitize_text
+from app.harness.untrusted import sanitize_untrusted
 from app.memory.episodic import EpisodicStore, RecallIsolationError
 from app.memory.scopes import SCOPE_CENTRAL, scope_dept, scope_user
 
@@ -60,7 +61,9 @@ class RecallService:
                 ok=True,
                 content=f"No recalled conversations matching {query!r} in your permitted scopes.",
             )
-        lines = [
-            f"[{h['scope']}] {sanitize_text(h['transcript'], claims, self._enforcer)}" for h in hits
-        ]
+        lines = []
+        for h in hits:
+            scope = h["scope"]
+            clean = sanitize_text(h["transcript"], claims, self._enforcer)
+            lines.append(f"[{scope}] {sanitize_untrusted('recall:' + str(scope), clean)}")
         return ToolResult(ok=True, content="\n".join(lines))

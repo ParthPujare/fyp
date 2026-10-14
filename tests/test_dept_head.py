@@ -139,11 +139,13 @@ def test_member_dept_write_suspends(runner_factory, memory_store, episodic, appr
 def test_head_own_dept_write_auto_commits(
     runner_factory, memory_store, episodic, approvals, enforcer, _heads
 ):
+    # Mk18 Phase E: a head's own dept write suspends for an admin (no more
+    # self-approval) — nothing commits until the admin step decides.
     res = _dept_runner(runner_factory, memory_store, episodic, approvals, enforcer, MHEAD, DEPT_MSG)
-    assert not res.interrupted
-    assert approvals.pending_items() == []
+    assert res.interrupted
+    assert len(approvals.pending_items()) == 1
     items = memory_store.items_in(("dept", "marketing"))
-    assert any("standups" in str(i.value.get("text", "")) for i in items)
+    assert not any("standups" in str(i.value.get("text", "")) for i in items)
 
 
 def test_head_approve_resume_commits(

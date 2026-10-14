@@ -43,7 +43,6 @@ from app.auth.store import (
     LLMKeyRecord,
     MemberRecord,
     MemberStore,
-    verify_password,
 )
 from app.db import get_pool
 from app.db.compat import PgSession
@@ -199,8 +198,9 @@ class PgMemberStore(MemberStore):
 
     # ---- never cached ---------------------------------------------------------------------
     def verify(self, username: str, password: str) -> bool:
-        """Sign-in check straight from the database (a reset/deactivation must apply at once)."""
-        member = MemberStore.get(self, username)
-        if member is None or not verify_password(password, member.password_hash):
-            return False
-        return member.active
+        """Sign-in check straight from the database (a reset/deactivation must apply at once).
+
+        Mk18: delegates to MemberStore.verify so the brute-force throttle and
+        direct-read semantics are identical on both back-ends.
+        """
+        return MemberStore.verify(self, username, password)

@@ -210,11 +210,22 @@ Body.
 @pytest.fixture
 def components(tmp_path, skills_registry):
     """Swap the dashboard's shared components for isolated temp ones (restored after)."""
+    import shutil
+
     import app.dashboard.app as dash
+    from app.dashboard.app import _policy_csv
     from app.harness.audit import AuditLog
+    from app.harness.enforcer import POLICY_PATH
     from app.memory.edit import MemoryEditor
     from app.memory.store import SqliteBaseStore
 
+    # Mk18: dashboard writes policy rows (dept register, skill admin rows) —
+    # redirect at a temp copy so the repo policy.csv is never touched.
+    dst = tmp_path / "policy.csv"
+    shutil.copy(POLICY_PATH, dst)
+    original_policy = dash.settings.services.policy_path
+    dash.settings.services.policy_path = dst
+    assert _policy_csv() == dst
     store = SqliteBaseStore(tmp_path / "memory.sqlite")
     audit = AuditLog(tmp_path / "audit.jsonl")
     original = dash._components
@@ -227,6 +238,7 @@ def components(tmp_path, skills_registry):
     }
     yield dash, audit
     dash._components = original
+    dash.settings.services.policy_path = original_policy
 
 
 def test_skills_memory_require_admin(skills_registry):

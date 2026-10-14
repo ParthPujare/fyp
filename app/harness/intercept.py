@@ -13,6 +13,11 @@ from typing import Any
 from app.agent.tools import ToolResult, ToolSpec
 from app.harness.audit import AuditLog
 from app.harness.enforcer import PolicyEnforcer
+from app.harness.sanitize import scan_args_for_exfil
+
+# Tools whose args are the operator's own search text (stays in-boundary) —
+# exempt from the outbound exfil scan to avoid false positives.
+_EXFIL_EXEMPT_TOOLS = frozenset({"recall"})
 
 
 def intercept_tool(
@@ -32,6 +37,19 @@ def intercept_tool(
     }
     resource = {"type": "tool", "id": tool.name}
     if enforcer.tool_allowed(tool, claims):
+        # Mk18 Phase B: outbound DLP — secret-shaped values in args never
+        # leave, even on an allowed call. Checked after RBAC so denies stay
+        # RBAC-attributed; exfil gets its own audit reason.
+        if tool.name not in _EXFIL_EXEMPT_TOOLS:
+            label = scan_args_for_exfil(args or {})
+            if label is not None:
+                audit.log(decision="DENY", resource=resource, actor=actor, run_id=run_id, reason="exfil")
+                return ToolResult(
+                    ok=False,
+                    denied=True,
+                    reason="exfil",
+                    content=f"Blocked: tool arguments contain a secret-shaped value ({label}).",
+                )
         audit.log(decision="ALLOW", resource=resource, actor=actor, run_id=run_id)
         return None
     audit.log(decision="DENY", resource=resource, actor=actor, run_id=run_id, reason="rbac")
