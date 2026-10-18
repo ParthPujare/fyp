@@ -196,7 +196,8 @@ def test_admin_approve_via_gateway_resumes(tmp_path, dept_apps, executor, enforc
     gateway_app.dependency_overrides[get_resumer] = lambda: resumer
     gateway_app.dependency_overrides[get_approval_store] = lambda: approvals
     try:
-        chat = gateway.post("/chat", json={"token": token, "message": "transfer 5000", "thread_id": "t-gw"})
+        # Mk19 Phase 1: owner-only /chat — the admin's own namespaced thread
+        chat = gateway.post("/chat", json={"token": token, "message": "transfer 5000", "thread_id": "user:admin@acme.com:t-gw"})
         assert chat.status_code == 200
         body = chat.json()
         assert body["interrupted"] is True and body["approval_id"]

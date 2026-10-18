@@ -134,6 +134,19 @@ def list_user_threads(username: str, settings: Settings | None = None) -> list[s
     return sorted(t for t in found if t == default or t.startswith(prefix))
 
 
+def is_own_thread(thread_id: str, username: str) -> bool:
+    """Mk19 Phase 1: the single ownership predicate for every thread-scoped endpoint.
+
+    True only for `user:<username>` and `user:<username>:<chat>` — the exact-prefix
+    form (colon-terminated) prevents a username that is a prefix of another
+    (`alice@x.com` vs `alice@x.com.evil`) from matching the other's threads.
+    Shared by the gateway `/chat` + history and the dashboard history/delete/
+    by-thread checks (previously four copy-pasted predicates). Owner-only:
+    admins get no override (locked decision, plan Mk19).
+    """
+    return thread_id == f"user:{username}" or thread_id.startswith(f"user:{username}:")
+
+
 def prune_chats(pool: ConnectionPool, thread_ids: list[str] | None = None) -> dict[str, int]:
     """Keep only each chat's LATEST checkpoint; drop the superseded ones and what only they used.
 

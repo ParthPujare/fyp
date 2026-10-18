@@ -195,7 +195,8 @@ def test_approval_decision_endpoint(tmp_path, dept_apps, executor, enforcer, aud
     gateway_app.dependency_overrides[get_resumer] = lambda: resumer
     gateway_app.dependency_overrides[get_approval_store] = lambda: approvals
     try:
-        resp = gateway.post("/chat", json={"token": token, "message": message, "thread_id": "t-approve"})
+        # Mk19 Phase 1: /chat is owner-only — threads must be user:<sub>[:suffix]
+        resp = gateway.post("/chat", json={"token": token, "message": message, "thread_id": "user:admin@acme.com:t-approve"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["interrupted"] is True and body["approval_id"] is not None

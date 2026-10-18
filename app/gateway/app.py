@@ -22,7 +22,7 @@ from typing import Annotated, Any
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
-from app.agent.checkpoints import list_user_threads, make_checkpointer
+from app.agent.checkpoints import is_own_thread, list_user_threads, make_checkpointer
 from app.agent.runner import AgentResult, resume_agent, run_agent, run_state_is_local
 from app.auth.jwt import AuthError, verify_token
 from app.auth.users import get_store, is_active_member
@@ -215,6 +215,10 @@ def _call_resumer(resumer: Any, approval_id: str, auth_token: str | None = None)
 @app.post("/chat")
 def chat(req: ChatRequest, runner: Annotated[Runner, Depends(get_runner)]) -> dict:
     claims = _verified_active(req.token)
+    # Mk19 Phase 1 (IDOR fix): a caller may only open their own thread — owner-only,
+    # admins included. `thread_id=None` still defaults to `user:{sub}` in Runner.
+    if req.thread_id is not None and not is_own_thread(req.thread_id, str(claims.get("sub", ""))):
+        raise HTTPException(status_code=403, detail="not your thread")
     try:
         result = _call_runner(runner, claims, req.message, req.thread_id, req.key_id, req.token)
     except SpendCapExceeded as exc:
@@ -289,8 +293,7 @@ def thread_history(
     thread_id: str, req: ThreadHistoryRequest, checkpointer: Annotated[Any, Depends(get_checkpointer_obj)]
 ) -> dict:
     claims = _verified_active(req.token)
-    username = str(claims.get("sub", ""))
-    if thread_id != f"user:{username}" and not thread_id.startswith(f"user:{username}:"):
+    if not is_own_thread(thread_id, str(claims.get("sub", ""))):
         raise HTTPException(status_code=403, detail="not your thread")
     return {"thread_id": thread_id, "messages": _thread_messages(checkpointer, thread_id)}
 

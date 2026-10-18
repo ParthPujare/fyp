@@ -26,7 +26,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app.agent.checkpoints import make_checkpointer
+from app.agent.checkpoints import is_own_thread, make_checkpointer
 from app.agent.routing import entry_allowlist_eligible
 from app.agent.runner import resume_agent, run_state_is_local
 from app.auth.jwt import AuthError, verify_token
@@ -577,7 +577,11 @@ def chat_member(
     and forwarded to the gateway `/chat`; the gateway envelope
     (reply/guardrail_hits/tool_calls/interrupted/approval_id/…) is returned
     unchanged so the UI renders it directly. Admin endpoints stay admin-only."""
-    _claims, token = _verified_member(authorization)
+    claims, token = _verified_member(authorization)
+    # Mk19 Phase 1 (IDOR fix): owner-only thread access, enforced here as well as at
+    # the gateway so the browser-facing seam can never forward a foreign thread_id.
+    if req.thread_id is not None and not is_own_thread(req.thread_id, str(claims.get("sub", ""))):
+        raise HTTPException(status_code=403, detail="not your thread")
     return sender(token, req.message, req.thread_id, key_id=req.key_id)
 
 
@@ -617,8 +621,7 @@ def own_thread_history(
     authorization: str | None = Header(default=None),
 ) -> dict:
     claims, _token = _verified_member(authorization)
-    username = str(claims.get("sub", ""))
-    if thread_id != f"user:{username}" and not thread_id.startswith(f"user:{username}:"):
+    if not is_own_thread(thread_id, str(claims.get("sub", ""))):
         raise HTTPException(status_code=403, detail="not your thread")
     return {"thread_id": thread_id, "messages": _thread_messages_local(checkpointer, thread_id)}
 
@@ -638,7 +641,7 @@ def delete_own_thread(
     """
     claims, _token = _verified_member(authorization)
     username = str(claims.get("sub", ""))
-    if thread_id != f"user:{username}" and not thread_id.startswith(f"user:{username}:"):
+    if not is_own_thread(thread_id, username):
         raise HTTPException(status_code=403, detail="not your thread")
     rejected = 0
     for item in approvals.pending_items():
@@ -865,7 +868,7 @@ def approvals_by_thread(
     claims, _token = _verified_member(authorization)
     username = str(claims.get("sub", ""))
     is_admin = str(claims.get("role", "")) == "admin"
-    if not is_admin and thread_id != f"user:{username}" and not thread_id.startswith(f"user:{username}:"):
+    if not is_admin and not is_own_thread(thread_id, username):
         raise HTTPException(status_code=403, detail="not your thread")
     return [_approval_view(i) for i in approvals.for_thread(thread_id)]
 

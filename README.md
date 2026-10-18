@@ -273,10 +273,12 @@ first (see *Two-level department approvals* below); a `{dept}_head` JWT can call
 same `decide` endpoint for its own department's step 1.
 
 ```bash
+# Mk19: /chat is OWNER-ONLY — thread_id must be `user:<you>` / `user:<you>:…`;
+# anyone else's id (yes, even an admin's) → 403 "not your thread".
 curl -s -X POST localhost:8001/chat \
   -H 'content-type: application/json' \
-  -d '{"token":"<access_token>","message":"find customer acme","thread_id":"t1"}'
-# => {"reply":"...","run_id":"...","guardrail_hits":[],"tool_calls":[],"thread_id":"t1",
+  -d '{"token":"<access_token>","message":"find customer acme","thread_id":"user:alice@acme.com:t1"}'
+# => {"reply":"...","run_id":"...","guardrail_hits":[],"tool_calls":[],"thread_id":"user:alice@acme.com:t1",
 #     "interrupted":false,"approval_id":null}
 ```
 

@@ -97,6 +97,7 @@ Unrestricted-login key rule: **same `sub` on 2 PCs = same chats (shared). Differ
 | CHAT-16 | + | Any PC: kill-mid-turn (send then `docker restart app` before reply) → resend same msg. | Progress lost is EXPECTED (durability=exit); resend works | working | progess was lost |
 | CHAT-17 | + | Any PC: suspend (HITL) → restart container → owner resumes. | Suspended state survived (persisted at pause); resume still works |  |  |
 | CHAT-18 | + | Any PC: every turn → Ops finds `run_id` with PROMPT/REASONING/CONTEXT_INJECTION/tool I/O. | Full trajectory, sanitized |  |  |
+| CHAT-19 | - | Any PC (automated `tests/test_thread_ownership.py`): alice POSTs `/chat` + `/api/chat` with bob's thread id; admin does the same with alice's. | Both → 403 `not your thread` before any run; own thread → 200 (Mk19 Phase 1, owner-only incl. admin) | working (automated) | added by Mk19 — suite green |
 
 **Bug notes (CHAT):**
 
