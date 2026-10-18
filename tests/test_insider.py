@@ -19,10 +19,17 @@ def _isolated_dashboard(tmp_path):
     audit log, or memory store."""
     import app.dashboard.app as dash
     from app.dashboard.app import _policy_csv
+    from app.config import get_settings
     from app.harness.audit import AuditLog
     from app.memory.edit import MemoryEditor
     from app.memory.store import SqliteBaseStore
     from app.skills.registry import SkillRegistry
+
+    # An earlier module (e.g. test_dev_guard) may have cache_clear()ed the settings
+    # singleton; re-bind dash.settings to whatever get_settings() now returns, or
+    # the mutation below lands on a stale object _policy_csv() never reads.
+    get_settings.cache_clear()
+    dash.settings = get_settings()
 
     dst = tmp_path / "policy.csv"
     shutil.copy(POLICY_PATH, dst)

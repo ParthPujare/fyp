@@ -83,7 +83,7 @@ def test_log_entries_len_and_verify(audit):
     audit.log(decision="APPROVED", resource=TOOL, actor=ALICE, run_id="r1", reason="hitl")
     got = audit.entries()
     assert [(e["decision"], e["run_id"]) for e in got] == [("ALLOW", "r1"), ("DENY", "r2"), ("APPROVED", "r1")]
-    assert set(got[0]) == {"ts", "event_id", "run_id", "decision", "resource", "actor", "guardrail_hit", "reason"}
+    assert set(got[0]) == {"ts", "event_id", "run_id", "decision", "resource", "actor", "guardrail_hit", "reason", "keyed"}
     assert got[1]["resource"] == TOOL and got[2]["reason"] == "hitl" and got[0]["actor"] == ALICE
     assert len(audit) == 3
     assert audit.verify_integrity() == (True, [])

@@ -183,7 +183,8 @@ def test_intercept_audit_entries_match_schema(enforcer, audit_log):
         run_id="r",
     )
     entry = audit_log.entries()[0]
-    assert {"ts", "event_id", "run_id", "decision", "resource", "actor", "guardrail_hit", "reason"} == set(entry)
+    # Mk19 Phase 5: every line carries the `keyed` HMAC-mode marker.
+    assert {"ts", "event_id", "run_id", "decision", "resource", "actor", "guardrail_hit", "reason", "keyed"} == set(entry)
 
 
 # --- agent integration: enforcement happens in the graph loop ---
