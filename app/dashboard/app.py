@@ -44,6 +44,7 @@ from app.harness.audit import open_audit_log
 from app.harness.enforcer import PolicyEnforcer
 from app.harness.policy_store import FilePolicyStore
 from app.harness.sanitize import MASK
+from app.harness.url_policy import UrlPolicyError, validate_outbound_url
 from app.llm.base import strip_routing_prefix
 from app.llm.registry import PROVIDERS, is_supported, normalize_provider_type
 from app.memory.approval_flow import (
@@ -1207,6 +1208,7 @@ def _apply_second_eyes(kind: str, payload: dict[str, Any], actor: str) -> dict[s
     if kind == "llm_key_write":
         from app.auth.crypto import decrypt_secret
 
+        _validated_base_url(str(payload.get("base_url", "")))  # Mk19 Phase 2 (SSRF)
         record = store.set_llm_key(
             str(payload["username"]),
             str(payload["provider"]),
@@ -2125,12 +2127,31 @@ class LLMKeyUpdateRequest(BaseModel):
     active: bool | None = None
 
 
+def _validated_base_url(base_url: str, *, allow_public: bool = True) -> str:
+    """Mk19 Phase 2 (SSRF): every non-empty member-/admin-supplied `base_url` must
+    pass the outbound URL policy before it is probed or persisted. Fixed-message
+    422 — the offending URL is never echoed back.
+
+    `allow_public=True` (stored BYOK endpoints): public LLM gateways are legal,
+    metadata/link-local/CGNAT, own-service ports and bad schemes are not.
+    The live fetch in `/api/account/local-models` passes `allow_public=False`
+    (strict loopback/private allowlist) — see app/harness/url_policy.py.
+    """
+    if not base_url:
+        return base_url
+    try:
+        return validate_outbound_url(base_url, settings, allow_public=allow_public)
+    except UrlPolicyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 def _validated_key_fields(req: LLMKeyRequest) -> tuple[str, str, str, str]:
     """Normalize + validate a BYOK submission (shared by the member and admin routes)."""
     provider = (req.provider or "").strip()
     model = _normalize_model(provider, req.model or "")
     api_key = (req.api_key or "").strip()
     base_url = (req.base_url or "").strip()
+    _validated_base_url(base_url)  # Mk19 Phase 2: reject before anything is stored
     p_type = normalize_provider_type(provider)
     if p_type in ("lmstudio", "ollama", "llamacpp"):
         from app.llm.lmstudio_provider import DUMMY_API_KEY, LOCAL_BASE_URLS
@@ -2201,13 +2222,17 @@ def list_local_models(
             detail=f"model detection supports local providers only, got {provider!r}",
         )
     url = base.rstrip("/") + "/models"
+    # Mk19 Phase 2: STRICT allowlist before any server-side fetch (public internet
+    # denied here — the probe exists to discover local servers only).
+    _validated_base_url(url, allow_public=False)
     try:
         resp = httpx.get(url, timeout=5.0)
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"local server unreachable: {exc}") from exc
     if resp.status_code != 200:
+        # Mk19 Phase 2: never echo upstream response bodies (SSRF data exfil path).
         raise HTTPException(
-            status_code=502, detail=f"local server returned {resp.status_code}: {resp.text[:200]}"
+            status_code=502, detail=f"local server returned {resp.status_code}"
         )
     try:
         data = resp.json()
@@ -2264,6 +2289,9 @@ def update_own_llm_key(
         if not model_str:
             raise HTTPException(status_code=422, detail="model cannot be empty")
         normalized_model = _normalize_model(current_key.provider, model_str)
+
+    if req.base_url is not None:  # Mk19 Phase 2: PATCH is its own base_url entry point
+        _validated_base_url(req.base_url)
 
     try:
         record = store.update_llm_key(
@@ -2373,6 +2401,9 @@ def update_member_llm_key(
         if not model_str:
             raise HTTPException(status_code=422, detail="model cannot be empty")
         normalized_model = _normalize_model(current_key.provider, model_str)
+
+    if req.base_url is not None:  # Mk19 Phase 2: PATCH is its own base_url entry point
+        _validated_base_url(req.base_url)
 
     try:
         record = store.update_llm_key(
