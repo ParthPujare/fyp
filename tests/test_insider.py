@@ -18,8 +18,8 @@ def _isolated_dashboard(tmp_path):
     temp copy. Nothing in these tests may touch the repo policy.csv, skills/,
     audit log, or memory store."""
     import app.dashboard.app as dash
-    from app.dashboard.app import _policy_csv
     from app.config import get_settings
+    from app.dashboard.app import _policy_csv
     from app.harness.audit import AuditLog
     from app.memory.edit import MemoryEditor
     from app.memory.store import SqliteBaseStore
