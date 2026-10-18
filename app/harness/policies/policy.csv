@@ -173,9 +173,12 @@ p, devops_agent, devops, gmail, write
 
 # ---- Admin explicit grants (Mk18: scoped replacement for p,admin,admin,*,*) ----
 p, admin, admin, crm, create
+p, admin, admin, crm, delete
 p, admin, admin, crm, read
 p, admin, admin, devops, create
+p, admin, admin, devops, delete
 p, admin, admin, devops, read
+p, admin, admin, finance, delete
 p, admin, admin, finance, read
 p, admin, admin, finance, transfer
 p, admin, admin, github, create
@@ -201,5 +204,10 @@ p, admin, admin, skill_send_campaign_email, use
 p, admin, admin, skill_triage_github_issue, use
 p, admin, admin, skill_triage_incident, use
 
-# ---- Admin explicit grants (Mk18: scoped replacement for p,admin,admin,*,*) ----
+# NOTE (Mk19 Phase 3): DELETE means Casbin act "delete" at the dept services —
+# rows below are ADMIN-ONLY by design (members/heads stay denied: hr.delete was
+# already deliberately absent above, and crm/devops/finance delete follows it).
+# Intentionally ABSENT for everyone: `finance, create` — the raw routes
+# POST /accounts and POST /invoices map to act "create" and stay deny-by-default
+# (locked "deny for everyone" decision: finance writes go through transfers).
 p, admin, admin, hr, delete

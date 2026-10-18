@@ -52,7 +52,15 @@ def make_app(
     schema: dict[str, list[str]],
     seed: dict[str, list[dict]],
     db_path: Path | None = None,
+    *,
+    scope_obj: str,
 ) -> FastAPI:
+    """Build one dept CRUD service.
+
+    `scope_obj` is the Casbin object this service answers for (crm/hr/devops/
+    finance) — Mk19 Phase 3: every table route is policy-checked against the
+    same rows the gateway uses, so direct port access cannot exceed tool scope.
+    """
     if db_path is None:
         slug = service_name.lower().replace(" ", "_")
         db_path = get_settings().services.data_dir / f"{slug}.sqlite"
@@ -62,11 +70,13 @@ def make_app(
     @app.middleware("http")
     async def _require_service_auth(request: Request, call_next):
         """Mk18 Phase C: dept services accept only the operator's own JWT.
+        Mk19 Phase 3: AND the same Casbin decision the gateway enforces.
 
         `/health` stays open (container healthchecks); every table route needs
         a valid, active-member Bearer token — the same JWT the gateway verified,
-        forwarded by `ToolExecutor`. Anyone reaching the port directly without
-        a token gets 401, never data.
+        forwarded by `ToolExecutor` — plus a policy row for (member, route).
+        Anyone reaching the port directly gets 401 without a token and 403
+        without permission, never data.
         """
         if request.url.path == "/health":
             return await call_next(request)
@@ -90,6 +100,26 @@ def make_app(
             member = None
         if member is None or not member.active:
             return JSONResponse({"detail": "account disabled or not a member"}, status_code=403)
+        # Mk19 Phase 3: Casbin (obj=scope_obj, act=route) with the FRESH member.
+        from app.services.authz import decide, log_route_decision
+
+        try:
+            allowed, act = decide(member, scope_obj, request.method, request.url.path)
+        except Exception:  # noqa: BLE001 - a broken policy store must fail closed
+            return JSONResponse({"detail": "permission denied"}, status_code=403)
+        try:
+            log_route_decision(
+                scope_obj=scope_obj,
+                method=request.method,
+                path=request.url.path,
+                member=member,
+                decision="ALLOW" if allowed else "DENY",
+                act=act,
+            )
+        except Exception:  # noqa: BLE001, S110 - audit failure must not flip the verdict
+            pass
+        if not allowed:
+            return JSONResponse({"detail": "permission denied"}, status_code=403)
         request.state.claims = claims
         return await call_next(request)
 

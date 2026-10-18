@@ -38,7 +38,7 @@ SEED = {
 def create_app(db_path: Path | None = None):
     if db_path is None:
         db_path = get_settings().services.data_dir / "finance.sqlite"
-    return make_app("Finance Service", SCHEMA, SEED, db_path)
+    return make_app("Finance Service", SCHEMA, SEED, db_path, scope_obj="finance")
 
 
 app = create_app()
