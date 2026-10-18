@@ -2,7 +2,7 @@
 
 ## Metadata
 - Date: 2026-10-18
-- Status: Complete 2026-10-18 (Phases 0–8 delivered phase-per-commit, `b260d8b`→`cd23e28`; gates: ruff clean, `make test` = 664 passed / 2 pre-existing failures (identical to Phase 0 baseline), live 7-service Tier-1 exercise green; `make test-pg` pending Docker; user-side .env rotation remains manual)
+- Status: Complete 2026-10-18 (Phases 0–8 delivered phase-per-commit, `b260d8b`→`cd23e28`; gates: ruff clean, `make test` = 666 passed / **0 failed** — the 2 Phase 0 baseline failures were stale Mk18 test expectations and were cleared in session 035 `389d805`; live 7-service Tier-1 exercise green; `make test-pg` pending Docker; user-side .env rotation remains manual)
 - Follows: Mk18 (zero-trust closure), Mk17 (core hardening)
 - Scope: all code-fixable findings from the 2026-10-18 static security audit (VERDICT: FAIL — 1 HIGH, 6 MEDIUM + dead code): findings 1-5, 7-8 + dependency cleanup. `.env` credential rotation (OpenRouter, Neon) is a documented user-side step, not code.
 - Locked decisions (user, 2026-10-18, two grilling rounds): owner-only `/chat` thread access (admins included); SSRF = loopback+private allowlist **+ own-service-port block**; **full Casbin** enforcement inside dept services; DELETE = admin-only policy rows; unbacked POST routes = deny for everyone; dev secrets fail closed (`ALLOW_DEV_SECRETS=1` hatch, compose **and** `run_dev.sh` default it to 1); audit/trace HMAC warn-in-dev/require-in-prod with mixed-mode verify; strict `cred_ver` (no grace window); remove `litellm`+`langchain-core`; one-pass phase-per-commit delivery; 7 acceptance criteria below.
