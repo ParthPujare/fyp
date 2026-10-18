@@ -17,6 +17,7 @@ data), so a test that passes because nothing is ever returned cannot hide a brok
 from __future__ import annotations
 
 import random
+import re
 import threading
 from types import SimpleNamespace
 
@@ -134,10 +135,16 @@ def world(episodic, enforcer):
     return SimpleNamespace(store=episodic, recall=recall)
 
 
+_MARKER_RE = re.compile(r"secretbody[a-z0-9]+")
+
+
 def markers_in(text: str) -> set[str]:
-    return {w for w in text.replace("\n", " ").split() if w.startswith("secretbody")} | {
-        m for m in ("secretbodyuserbob", "secretbodycentral") if m in text
-    }
+    # Mk18 fences every recall line in <untrusted ...>...</untrusted>; the closing tag
+    # glues onto the transcript's last word, so whitespace-splitting would see a fake
+    # "secretbodyX</untrusted>" token and miscount it as a foreign marker. Extract the
+    # marker tokens directly instead — a genuine foreign marker still matches, so the
+    # leak assertions below keep failing loudly on a real cross-scope leak.
+    return set(_MARKER_RE.findall(text))
 
 
 def allowed_markers(scopes: list[str]) -> set[str]:

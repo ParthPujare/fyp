@@ -264,7 +264,10 @@ def test_own_write_is_visible_at_once_even_with_a_long_poll_interval(pg, skills_
 
 def test_policy_store_contract(policy_store):
     rules = policy_store.rules()
-    assert ["admin", "admin", "*", "*"] in rules["p"]
+    # Mk18 removed the `p, admin, admin, *, *` wildcard (deny-by-default) and replaced
+    # it with scoped explicit admin grants — see policy.csv "Admin explicit grants".
+    assert ["admin", "admin", "*", "*"] not in rules["p"]
+    assert ["admin", "admin", "crm", "read"] in rules["p"]
     assert policy_store.has_row(("p", "hr_agent", "hr", "hr", "read"))
     assert not policy_store.has_row(("p", "hr_agent", "hr", "hr", "delete"))  # deliberately absent
     v0 = policy_store.version()
