@@ -16,11 +16,14 @@ from app.auth.store import SEED_PASSWORDS, MemberStore
 from app.config import DEFAULT_FERNET_KEY, DEFAULT_JWT_SECRET, Settings, get_settings
 
 # Prod-mode env: real-looking secrets so the built-in-default check passes and
-# the test exercises ONLY the seeding/lockdown behavior.
+# the test exercises ONLY the seeding/lockdown behavior. Mk19 Phase 5: prod
+# also requires keyed audit/trace chains, so the HMAC keys are part of "real".
 _PROD_REAL_SECRETS = {
     "ENV": "prod",
     "JWT__SECRET": "prod-secret-0123456789abcdef-prod-secret",
     "LLM__FERNET_KEY": "prod-fernet-key-not-a-real-one-but-nondefault-000=",
+    "SERVICES__AUDIT_HMAC_KEY": "prod-audit-hmac-not-a-real-key-0001",
+    "SERVICES__TRACE_HMAC_KEY": "prod-trace-hmac-not-a-real-key-0001",
 }
 
 
@@ -32,8 +35,13 @@ def _settings(**overrides) -> Settings:
 # ---------------------------------------------------------------- guard matrix
 
 def test_default_secrets_with_env_prod_raise():
+    # keyed chains first: the HMAC validator must not mask the dev-defaults refusal
     with pytest.raises(ValidationError, match="built-in dev default"):
-        _settings(env="prod", allow_dev_secrets=False)
+        _settings(
+            env="prod",
+            allow_dev_secrets=False,
+            services={"audit_hmac_key": "k", "trace_hmac_key": "k"},
+        )
 
 
 def test_dev_without_hatch_raises():
@@ -53,14 +61,18 @@ def test_hatch_with_env_prod_still_raises():
     """The hatch never applies outside dev — even a stray ALLOW_DEV_SECRETS=1
     in prod is refused loudly, not silently ignored."""
     with pytest.raises(ValidationError, match="only valid with ENV=dev"):
-        _settings(env="prod", allow_dev_secrets=True)
+        _settings(
+            env="prod",
+            allow_dev_secrets=True,
+            services={"audit_hmac_key": "k", "trace_hmac_key": "k"},
+        )
 
 
 def test_prod_with_real_secrets_loads_without_hatch(monkeypatch):
     # env vars carry the secret names (JWT__SECRET etc.); explicit kwargs carry
     # the field names — and beat conftest's suite-wide hatch env var.
-    monkeypatch.setenv("JWT__SECRET", _PROD_REAL_SECRETS["JWT__SECRET"])
-    monkeypatch.setenv("LLM__FERNET_KEY", _PROD_REAL_SECRETS["LLM__FERNET_KEY"])
+    for k in ("JWT__SECRET", "LLM__FERNET_KEY", "SERVICES__AUDIT_HMAC_KEY", "SERVICES__TRACE_HMAC_KEY"):
+        monkeypatch.setenv(k, _PROD_REAL_SECRETS[k])
     s = Settings(_env_file=None, env="prod", allow_dev_secrets=False)
     assert s.env == "prod"
     assert s.allow_dev_secrets is False
@@ -137,5 +149,56 @@ def test_lockdown_is_idempotent(tmp_path, monkeypatch):
         MemberStore(db)  # lockdown pass 1
         store = MemberStore(db)  # pass 2: no crash, no change
         assert all(not m.active for m in store.list())
+    finally:
+        get_settings.cache_clear()
+
+
+# --------------------------------------------- Mk19 Phase 5: HMAC enforcement
+
+def test_prod_without_hmac_keys_raises():
+    """ENV=prod with real secrets but unkeyed chains must refuse to boot."""
+    s_base = {k: v for k, v in _PROD_REAL_SECRETS.items() if k != "ENV"}
+    with pytest.raises(ValidationError, match="HMAC_KEY"):
+        Settings(
+            _env_file=None,
+            env="prod",
+            allow_dev_secrets=False,
+            jwt={"secret": s_base["JWT__SECRET"]},
+            llm={"fernet_key": s_base["LLM__FERNET_KEY"]},
+            services={},  # audit/trace keys blank
+        )
+
+
+def test_prod_with_only_audit_key_raises():
+    """One chain keyed, the other blank: still refuses."""
+    with pytest.raises(ValidationError, match="SERVICES__TRACE_HMAC_KEY"):
+        Settings(
+            _env_file=None,
+            env="prod",
+            allow_dev_secrets=False,
+            jwt={"secret": _PROD_REAL_SECRETS["JWT__SECRET"]},
+            llm={"fernet_key": _PROD_REAL_SECRETS["LLM__FERNET_KEY"]},
+            services={"audit_hmac_key": "a-key"},
+        )
+
+
+def test_dev_without_hmac_keys_loads_with_warning(caplog, monkeypatch):
+    """Dev keeps the unkeyed default; open_audit_log warns once (finding 7 fix)."""
+    import logging
+
+    from app.harness import audit as audit_mod
+
+    # hermetic: a dev's real .env must not carry a key into this test
+    monkeypatch.delenv("SERVICES__AUDIT_HMAC_KEY", raising=False)
+    get_settings.cache_clear()
+    try:
+        s = Settings(_env_file=None, env="dev", allow_dev_secrets=True)
+        assert s.services.audit_hmac_key is None
+        audit_mod._warned_unkeyed.clear()  # other tests may have consumed the one-shot
+        with caplog.at_level(logging.WARNING, logger="app.harness.audit"):
+            audit_mod.open_audit_log("data/audit.jsonl")
+            audit_mod.open_audit_log("data/audit.jsonl")  # second open: no repeat
+        warnings = [r for r in caplog.records if "UNKEYED" in r.getMessage()]
+        assert len(warnings) == 1
     finally:
         get_settings.cache_clear()

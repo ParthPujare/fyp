@@ -44,6 +44,22 @@ key, so rotation never rewrites history.
    Dropping it makes pre-rotation lines report tamper — that is expected,
    not an attack; re-add the key if it happens by accident.
 
+### Enabling HMAC on an existing (plain) chain — no migration
+
+Mk19: a chain written before any key was set keeps verifying after you set
+one. Each line/run carries a hashed era flag (`keyed`); plain-era lines
+verify under plain SHA-256, keyed lines under the key chain. Nothing is
+rewritten and nothing is archived.
+
+1. Set `SERVICES__AUDIT_HMAC_KEY` (and `SERVICES__TRACE_HMAC_KEY` for the
+   trace chain); restart. Required when `ENV!=dev` — the app refuses to boot
+   without them (Mk19 Phase 5).
+2. `python -m app.db verify-audit` → `chain intact` (plain era + new keyed
+   lines together).
+3. One rule to remember: a **plain line after keyed lines** is reported as
+   tampering (key stripped or chain rewritten). New lines are always keyed
+   once the key exists, so a healthy chain never trips this.
+
 ## 4. Spend caps (abuse containment)
 
 - Defaults: `LLM__DAILY_CALL_CAP=500`, `LLM__DAILY_COST_CENTS_CAP=500`

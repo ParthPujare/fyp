@@ -282,10 +282,21 @@ def test_g8_eviction_order_is_deterministic_when_timestamps_tie(tmp_path, monkey
 
 
 # ---------------------------------------------------------------- config hardening
-def test_non_dev_env_refuses_the_public_default_secrets():
+def test_non_dev_env_refuses_the_public_default_secrets(monkeypatch):
+    """Mk19 Phase 4/5: prod refuses built-in dev secrets AND unkeyed chains —
+    set the HMAC keys first so this isolates the dev-defaults refusal."""
+    monkeypatch.setenv("SERVICES__AUDIT_HMAC_KEY", "k-audit")
+    monkeypatch.setenv("SERVICES__TRACE_HMAC_KEY", "k-trace")
+    monkeypatch.delenv("ALLOW_DEV_SECRETS", raising=False)
     with pytest.raises(ValueError, match="built-in dev default"):
-        Settings(env="prod")
-    Settings(env="prod", jwt={"secret": "x" * 40}, llm={"fernet_key": "Qk9WLU5PVC1BLVJFQUwtS0VZLTEyMzQ1Njc4OTAxMjM="})
+        Settings(_env_file=None, env="prod", allow_dev_secrets=False)
+    Settings(
+        _env_file=None,
+        env="prod",
+        allow_dev_secrets=False,
+        jwt={"secret": "x" * 40},
+        llm={"fernet_key": "Qk9WLU5PVC1BLVJFQUwtS0VZLTEyMzQ1Njc4OTAxMjM="},
+    )
 
 
 # ---------------------------------------------------------------- delete chat

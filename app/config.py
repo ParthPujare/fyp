@@ -57,15 +57,19 @@ class ServiceSettings(BaseModel):
     hr_url: str = "http://127.0.0.1:8003"
     devops_url: str = "http://127.0.0.1:8004"
     finance_url: str = "http://127.0.0.1:8005"
-    # Optional: HMAC key for the audit hash chain. Set it BEFORE the first audit line is
-    # written (an existing plain-SHA chain will fail verification once a key is added).
+    # Optional: HMAC key for the audit hash chain (tamper-evidence against someone who can
+    # edit files but doesn't hold this key). Mk19 Phase 5: REQUIRED when ENV!=dev (startup
+    # refuses without it); dev runs unkeyed with a warning. Mixed-mode verify: lines written
+    # before a key was set stay plain-SHA and keep verifying — set the key at ANY time, no
+    # migration, no chain rewrite (ref_docs/runbook_backup.md "enabling HMAC on an existing chain").
     audit_hmac_key: str | None = None
     # Mk18 Phase H: retired audit key(s) for rotation. Comma-separated; lines signed
     # under a retired key still verify (rotation = new current + old appended here).
     # See ref_docs/runbook_backup.md "HMAC rotation".
     audit_hmac_key_prev: str | None = None
     # Mk18 Phase H: optional HMAC for the trace chain (same rotation semantics).
-    # Blank = plain SHA-256 (default, byte-identical behavior).
+    # Blank = plain SHA-256 (default, byte-identical behavior) in dev only;
+    # Mk19 Phase 5: required when ENV!=dev, same mixed-mode verify as audit.
     trace_hmac_key: str | None = None
     trace_hmac_key_prev: str | None = None
 
@@ -197,6 +201,32 @@ class Settings(BaseSettings):
         self.system.openrouter_api_key = next((c for c in candidates if c), None)
         if isinstance(self.openrouter_api_key, str) and not self.openrouter_api_key.strip():
             self.openrouter_api_key = None
+        return self
+
+    @model_validator(mode="after")
+    def _no_unkeyed_chains_outside_dev(self) -> "Settings":
+        """Mk19 Phase 5: audit + trace chains must be HMAC-keyed outside dev.
+
+        A plain-SHA chain is forgeable by anyone who can edit the file. Dev
+        keeps the unkeyed default with a startup warning (open_audit_log);
+        every other env refuses to boot until both keys are set. Mixed-mode
+        VERIFY already accepts old plain lines (resolve_key_chain keeps None),
+        so adding a key to an existing chain needs no migration.
+        """
+        if self.env.strip().lower() != "dev":
+            missing = [
+                name
+                for name, blank in (
+                    ("SERVICES__AUDIT_HMAC_KEY", not (self.services.audit_hmac_key or "").strip()),
+                    ("SERVICES__TRACE_HMAC_KEY", not (self.services.trace_hmac_key or "").strip()),
+                )
+                if blank
+            ]
+            if missing:
+                raise ValueError(
+                    f"ENV={self.env!r} requires keyed audit/trace chains; set "
+                    f"{', '.join(missing)} (any value; existing plain lines keep verifying)"
+                )
         return self
 
     @model_validator(mode="after")

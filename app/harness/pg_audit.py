@@ -150,6 +150,9 @@ class PgAuditLog(AuditLog):
             "actor": actor,
             "guardrail_hit": None,
             "reason": reason,
+            # Mk19 Phase 5 mixed-mode era flag (hashed; inside the entry so the
+            # column body and the hash always agree).
+            "keyed": self._key is not None,
         }
         body = json.dumps(entry, sort_keys=True, default=str)
         chain = self._chain
@@ -261,18 +264,25 @@ class PgAuditLog(AuditLog):
         head = rows[0]["head_hash"] if rows else None
         head_seq = rows[0]["head_seq"] if rows else None
         chain_rows = [r for r in rows if r["seq"] is not None]
-        # Mk18 Phase H rotation: each row verifies under any era key.
+        # Mk18 Phase H rotation: each KEYED row verifies under any era key.
+        # Mk19 Phase 5 mixed-mode: the row's own `keyed` flag picks its era;
+        # a plain row after keyed rows is flagged (key stripped / rewritten).
         keys = resolve_key_chain(self._key)
         ok, issues = True, []
         expected_seq, expected = 1, GENESIS
+        saw_keyed = False
 
         if anchor is not None:
             first = chain_rows[0] if chain_rows else None
+            first_entry = json.loads(first["entry"]) if first is not None and first["entry"] else None
+            first_keys = keys if (first_entry or {}).get("keyed") else [None]
+            if first_entry is not None:
+                saw_keyed = bool(first_entry.get("keyed", False))
             if (
                 first is None
                 or first["seq"] != anchor[0]
                 or first["hash"] != anchor[1]
-                or not _hash_matches(first["prev_hash"], json.loads(first["entry"]), anchor[1], keys)
+                or not _hash_matches(first["prev_hash"], first_entry, anchor[1], first_keys)
             ):
                 ok = False
                 issues.append(f"row {anchor[0]}: changed or deleted since the last verification")
@@ -291,10 +301,19 @@ class PgAuditLog(AuditLog):
                 ok, issues = False, issues + [f"row {n}: not valid JSON"]
                 expected, expected_seq, last = r["hash"], n + 1, (n, r["hash"])
                 continue
+            line_keyed = bool(entry.get("keyed", False))
+            line_keys = keys if line_keyed else [None]
+            if line_keyed:
+                saw_keyed = True
+            elif saw_keyed:
+                ok = False
+                issues.append(
+                    f"row {n}: plain (unkeyed) row after keyed rows (key stripped or chain rewritten)"
+                )
             if r["prev_hash"] != expected:
                 ok = False
                 issues.append(f"row {n}: prev_hash mismatch (edited/reordered/deleted)")
-            elif not _hash_matches(expected, entry, r["hash"], keys):
+            elif not _hash_matches(expected, entry, r["hash"], line_keys):
                 ok = False
                 issues.append(f"row {n}: hash mismatch under every known key (entry edited)")
             # the indexed columns are copies of hashed fields: a copy that disagrees was edited

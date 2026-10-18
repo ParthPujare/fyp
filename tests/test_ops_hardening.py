@@ -77,6 +77,86 @@ def test_audit_rotation_dual_verify(tmp_path):
         audit_mod.resolve_key_chain = original
 
 
+def test_audit_mixed_mode_plain_then_keyed(tmp_path):
+    """Mk19 Phase 5 (32a): keying an existing plain chain needs no migration —
+    the plain era keeps verifying, new lines are keyed, and a plain line that
+    follows keyed lines is flagged as tampering."""
+    import json
+
+    from app.harness.audit import AuditLog
+
+    path = tmp_path / "audit.jsonl"
+    entry = {
+        "decision": "ALLOW",
+        "resource": {"type": "t", "id": "1"},
+        "actor": {"sub": "a"},
+        "run_id": "r",
+        "reason": "rbac",
+    }
+
+    plain = AuditLog(path, hmac_key=None)
+    plain.log(**entry)
+    plain.log(**entry)
+    original = path.read_text()
+
+    keyed = AuditLog(path, hmac_key="k")
+    keyed.log(**entry)
+    ok, issues = keyed.verify_integrity()
+    assert ok, issues  # plain era + keyed era together: green
+
+    # tampering with a KEYED line is caught (no key to recompute it)
+    lines = path.read_text().splitlines()
+    obj = json.loads(lines[2])
+    obj["entry"]["reason"] = "forged"
+    lines[2] = json.dumps(obj, sort_keys=True)
+    path.write_text("\n".join(lines) + "\n")
+    ok2, issues2 = keyed.verify_integrity()
+    assert not ok2 and any("line 3" in i for i in issues2)
+
+    # restore the chain, then append a keyed line and a NEW plain line after
+    # it: a key-less writer (stripped key / rewritten chain) must be flagged
+    path.write_text(original)
+    path.with_name(path.name + ".head").write_text(json.loads(original.splitlines()[-1])["hash"])
+    AuditLog(path, hmac_key="k").log(**entry)   # line 3: keyed
+    AuditLog(path, hmac_key=None).log(**entry)  # line 4: plain AFTER keyed → flagged
+    ok3, issues3 = keyed.verify_integrity()
+    assert not ok3
+    assert any("plain (unkeyed) line after keyed lines" in i for i in issues3), issues3
+
+
+def test_trace_mixed_mode_plain_runs_after_keying(tmp_path):
+    """Mk19 Phase 5 (32c): the trace twin matches — runs written before keying
+    keep verifying after the store is keyed; new runs are keyed."""
+    from app.ops.store import TraceStore
+
+    actor = {"sub": "a", "role": "admin", "dept": "admin"}
+    db = tmp_path / "trace.sqlite"
+    plain = TraceStore(db, hmac_key=None)
+    old_run = plain.start_run(actor, {"message": "plain era"})
+    plain.end_run(old_run, {"output": "done"})
+
+    keyed = TraceStore(db, hmac_key=b"trace-key-1")
+    new_run = keyed.start_run(actor, {"message": "keyed era"})
+    keyed.end_run(new_run, {"output": "done"})
+
+    assert keyed.verify_integrity()[0], keyed.verify_integrity()[1]
+    assert keyed.verify_integrity(old_run)[0]  # the plain-era run still verifies
+    assert keyed.verify_integrity(new_run)[0]  # so does the keyed run
+
+    # a keyed run cannot be edited without the key
+    import json
+    import sqlite3
+
+    with sqlite3.connect(db) as conn:
+        row = conn.execute(
+            "SELECT event_id, payload FROM trace_events WHERE run_id = ? AND seq = 1", (new_run,)
+        ).fetchone()
+        forged = json.dumps({"input": {"message": "forged"}}, sort_keys=True)
+        conn.execute("UPDATE trace_events SET payload = ? WHERE event_id = ?", (forged, row[0]))
+    ok, issues = keyed.verify_integrity(new_run)
+    assert not ok and issues
+
+
 def test_trace_hmac_roundtrip(tmp_path):
     """HMAC-chained trace verifies; wrong key fails; retired key passes."""
     from app.ops.store import TraceStore, resolve_trace_keys

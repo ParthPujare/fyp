@@ -162,10 +162,11 @@ class PgTraceStore(TraceStore):
     def _write_chunk(self, run_id: str, chunk: list[tuple[Any, ...]], head: str, started_ts: str) -> None:
         values = ", ".join([_ROW] * len(chunk))
         params: list[Any] = [v for row in chunk for v in row]
-        params += [run_id, head, started_ts]
+        # Mk19 Phase 5: the run's era flag (first insert wins; conflict keeps it).
+        params += [run_id, head, started_ts, int(self._key is not None)]
         self._db.execute(
             f"WITH ins AS (INSERT INTO trace_events ({_COLUMNS}) VALUES {values}) "
-            "INSERT INTO trace_runs (run_id, head_hash, started_ts) VALUES (?, ?, ?) "
+            "INSERT INTO trace_runs (run_id, head_hash, started_ts, keyed) VALUES (?, ?, ?, ?) "
             "ON CONFLICT (run_id) DO UPDATE SET head_hash = excluded.head_hash",
             params,
         )
@@ -233,17 +234,24 @@ class PgTraceStore(TraceStore):
             rows = [dict(zip(r.keys(), r, strict=True)) for r in self._db.execute(
                 "SELECT event_id, run_id, seq, ts, type, source, actor, payload, prev_hash "
                 "FROM trace_events ORDER BY run_id, seq").fetchall()]
-            heads = {r["run_id"]: r["head_hash"] for r in self._db.execute("SELECT run_id, head_hash FROM trace_runs").fetchall()}
+            run_rows = self._db.execute("SELECT run_id, head_hash, keyed FROM trace_runs").fetchall()
+            heads = {r["run_id"]: r["head_hash"] for r in run_rows}
+            keyed_by_run = {r["run_id"]: bool(r["keyed"]) for r in run_rows}
         else:
             rows = self._rows(run_id)
             with self._lock:
                 run = self._runs.get(run_id)
             head = run.head if run else None
+            keyed = bool(self._key)  # an in-memory run is written under the current key
             if head is None:
-                stored = self._db.execute("SELECT head_hash FROM trace_runs WHERE run_id = ?", (run_id,)).fetchone()
+                stored = self._db.execute(
+                    "SELECT head_hash, keyed FROM trace_runs WHERE run_id = ?", (run_id,)
+                ).fetchone()
                 head = stored["head_hash"] if stored else None
+                keyed = bool(stored["keyed"]) if stored else keyed
             heads = {run_id: head} if head else {}
+            keyed_by_run = {run_id: keyed}
         by_run: dict[str, list[Any]] = defaultdict(list)
         for r in rows:
             by_run[r["run_id"]].append(r)
-        return self._check_chains(by_run, heads)
+        return self._check_chains(by_run, heads, keyed_by_run)

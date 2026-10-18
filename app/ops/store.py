@@ -98,10 +98,16 @@ class TraceStore:
                 CREATE TABLE IF NOT EXISTS trace_runs (
                     run_id TEXT PRIMARY KEY,
                     head_hash TEXT NOT NULL,
-                    started_ts TEXT NOT NULL
+                    started_ts TEXT NOT NULL,
+                    keyed INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            # Mk19 Phase 5: pre-existing files get the era column (0 = plain era).
+            try:
+                conn.execute("ALTER TABLE trace_runs ADD COLUMN keyed INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # column already present
             conn.execute("CREATE INDEX IF NOT EXISTS idx_trace_run ON trace_events (run_id)")
 
     @staticmethod
@@ -177,10 +183,11 @@ class TraceStore:
             )
             conn.execute(
                 """
-                INSERT INTO trace_runs (run_id, head_hash, started_ts) VALUES (?, ?, ?)
+                INSERT INTO trace_runs (run_id, head_hash, started_ts, keyed)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET head_hash = excluded.head_hash
                 """,
-                (run_id, event_hash, ts),
+                (run_id, event_hash, ts, int(self._key is not None)),
             )
         return event_id
 
@@ -268,11 +275,16 @@ class TraceStore:
                 params,
             ).fetchall()
             heads = {r["run_id"]: r["head_hash"] for r in conn.execute("SELECT run_id, head_hash FROM trace_runs").fetchall()}
+            # Mk19 Phase 5: the run's era flag (plain runs keep verifying after keying).
+            keyed_by_run = {
+                r["run_id"]: bool(r["keyed"])
+                for r in conn.execute("SELECT run_id, keyed FROM trace_runs").fetchall()
+            }
 
         by_run: dict[str, list[Any]] = defaultdict(list)
         for r in rows:
             by_run[r["run_id"]].append(r)
-        return self._check_chains(by_run, heads)
+        return self._check_chains(by_run, heads, keyed_by_run)
 
     def flush(self, run_id: str | None = None) -> None:
         """Persist any buffered events. SQLite writes immediately, so this is a no-op here;
@@ -297,6 +309,14 @@ class TraceStore:
             ).fetchall()
             if not rows:
                 return 0
+            # Mk19 Phase 5: rehash in the run's OWN era — a plain run redacted
+            # after the store was keyed must stay plain-hashed (its flag says 0).
+            run_row = conn.execute("SELECT keyed FROM trace_runs WHERE run_id = ?", (run_id,)).fetchone()
+            era_key = self._key if (run_row is None or run_row["keyed"]) else None
+
+            def _era_hash(prev_hash: str, content: dict[str, Any]) -> str:
+                return _hash_blob(prev_hash, content, era_key)
+
             prev = GENESIS
             for r in rows:
                 actor = json.loads(r["actor"])
@@ -314,20 +334,27 @@ class TraceStore:
                     "UPDATE trace_events SET payload = ?, prev_hash = ? WHERE event_id = ?",
                     (json.dumps(new_payload, sort_keys=True, default=str), prev, r["event_id"]),
                 )
-                prev = self._chain_hash(prev, content)
+                prev = _era_hash(prev, content)
             conn.execute("UPDATE trace_runs SET head_hash = ? WHERE run_id = ?", (prev, run_id))
             return len(rows)
 
     def _check_chains(
-        self, by_run: dict[str, list[Any]], heads: dict[str, str]
+        self,
+        by_run: dict[str, list[Any]],
+        heads: dict[str, str],
+        keyed_by_run: dict[str, bool] | None = None,
     ) -> tuple[bool, list[str]]:
         """Recompute every run's hash chain from its event rows (`row["seq"]`, `row["actor"]` as
         JSON text, ...) and compare with the stored head. Shared by all trace back-ends.
 
         Mk18 Phase H rotation: each run verifies under any era key (a run is
         minutes long; rotate during a quiet period so no run spans two eras).
+        Mk19 Phase 5 mixed-mode: a run whose stored era flag says plain
+        verifies under None even after the store is keyed (keying never
+        invalidates old runs); a keyed run uses the rotation chain.
         """
         keys = resolve_trace_keys(self._key)
+        keyed_by_run = keyed_by_run or {}
         ok = True
         issues: list[str] = []
         for rid, events in by_run.items():
@@ -343,9 +370,10 @@ class TraceStore:
                 }
                 for r in events
             ]
+            run_keys = keys if keyed_by_run.get(rid, bool(self._key)) else [None]
             verified = False
             run_issues: list[str] = []
-            for key in keys:
+            for key in run_keys:
                 prev_expected = GENESIS
                 last_hash: str | None = None
                 trial: list[str] = []

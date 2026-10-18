@@ -63,6 +63,7 @@ def _hash_entry(prev_hash: str, entry: dict[str, Any], key: bytes | None = None)
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
 _LOCK_TIMEOUT_S = 30.0
+_warned_unkeyed = threading.Event()  # Mk19 Phase 5: one-time dev warning per process
 
 
 def _thread_lock(path: Path) -> threading.Lock:
@@ -86,6 +87,9 @@ def resolve_key_chain(hmac_key: str | bytes | None = None) -> list[bytes | None]
 
     Retired keys come from `SERVICES__AUDIT_HMAC_KEY_PREV` (comma-separated).
     The first entry signs new lines; every entry verifies old ones.
+    Mk19 Phase 5: plain (pre-key) lines are NOT verified with this chain —
+    each line's hashed `keyed` flag selects its era, and a plain line that
+    follows keyed lines is flagged as tampering (see `_verify_locked`).
     """
     try:
         from app.config import get_settings
@@ -98,7 +102,8 @@ def resolve_key_chain(hmac_key: str | bytes | None = None) -> list[bytes | None]
         part = part.strip()
         if part:
             keys.append(part.encode("utf-8"))
-    # Deduplicate while keeping order (None = plain-SHA era always verifiable).
+    # Deduplicate while keeping order (None only when no key is configured:
+    # the plain-SHA era of the chain verifies via each line's `keyed` flag).
     seen: list[bytes | None] = []
     for key in keys:
         if key not in seen:
@@ -113,14 +118,29 @@ def _hash_matches(prev_hash: str, entry: dict[str, Any], stored: Any, keys: list
 
 def open_audit_log(path: str | Path) -> AuditLog:
     """The shared Postgres chain when `DATABASE_URL` is set (named after the file's stem, so the
-    default `data/audit.jsonl` becomes log "audit"), else the local JSONL file."""
+    default `data/audit.jsonl` becomes log "audit"), else the local JSONL file.
+
+    Mk19 Phase 5: an unkeyed (plain-SHA) chain is refused outright when
+    ENV!=dev (config validator); in dev it boots with a one-time warning.
+    """
     from app.db import is_enabled
 
     if is_enabled():
         from app.harness.pg_audit import PgAuditLog
 
-        return PgAuditLog(log_name=Path(path).stem)
-    return AuditLog(path)
+        log: AuditLog = PgAuditLog(log_name=Path(path).stem)
+    else:
+        log = AuditLog(path)
+    if resolve_key(None) is None and not _warned_unkeyed.is_set():
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "audit chain runs UNKEYED (plain SHA-256): anyone who can edit it can forge "
+            "entries. Set SERVICES__AUDIT_HMAC_KEY — required when ENV!=dev (Mk19 Phase 5); "
+            "existing plain lines keep verifying after keying (mixed-mode verify)."
+        )
+        _warned_unkeyed.set()
+    return log
 
 
 class AuditLog:
@@ -199,6 +219,9 @@ class AuditLog:
             "actor": actor,
             "guardrail_hit": None,
             "reason": reason,
+            # Mk19 Phase 5 mixed-mode era flag: hashed, so verification knows
+            # whether this line must match a key or the plain SHA-256 era.
+            "keyed": self._key is not None,
         }
         with self._exclusive():
             prev_hash = self._last_hash()
@@ -234,12 +257,18 @@ class AuditLog:
     def _verify_locked(self) -> tuple[bool, list[str]]:
         if not self.path.exists():
             return False, ["audit file missing"]
-        # Mk18 Phase H rotation: each line verifies under any era key.
+        # Mk18 Phase H rotation: each KEYED line verifies under any era key.
+        # Mk19 Phase 5 mixed-mode: a line's own `keyed` flag (hashed into it)
+        # picks its era — keyed lines use the rotation chain, plain lines
+        # (written before any key, `keyed` absent/false) verify under None.
+        # A plain line AFTER keyed lines means the key was stripped or the
+        # chain was rewritten: flagged, never silently accepted.
         keys = resolve_key_chain(self._key)
         ok, issues = True, []
         expected = GENESIS
         head: str | None = None
         saw_hashed = False
+        saw_keyed = False
         with self.path.open(encoding="utf-8") as fh:
             for lineno, line in enumerate(fh, 1):
                 if not line.strip():
@@ -256,10 +285,20 @@ class AuditLog:
                     continue
                 saw_hashed = True
                 entry, stored = obj["entry"], obj.get("hash")
+                line_keyed = bool(entry.get("keyed", False))
+                line_keys = keys if line_keyed else [None]
+                if line_keyed:
+                    saw_keyed = True
+                elif saw_keyed:
+                    ok = False
+                    issues.append(
+                        f"line {lineno}: plain (unkeyed) line after keyed lines "
+                        "(key stripped or chain rewritten)"
+                    )
                 if obj.get("prev_hash") != expected:
                     ok = False
                     issues.append(f"line {lineno}: prev_hash mismatch (edited/reordered/deleted)")
-                computed = _hash_matches(expected, entry, stored, keys) if obj.get("prev_hash") == expected else None
+                computed = _hash_matches(expected, entry, stored, line_keys) if obj.get("prev_hash") == expected else None
                 if computed is not None and not computed:
                     ok = False
                     issues.append(f"line {lineno}: hash mismatch under every known key (entry edited)")
