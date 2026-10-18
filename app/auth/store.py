@@ -575,11 +575,23 @@ class MemberStore:
         self._seed_if_empty()
 
     def _seed_if_empty(self) -> None:
-        """Migrate the 5 current users + departments on an empty table (plan_mk2 Phase 1/4)."""
+        """Migrate the 5 current users + departments on an empty table (plan_mk2 Phase 1/4).
+
+        Mk19 Phase 4 (fail-closed seeded credentials):
+        * member seeding runs only when `ENV=dev` — a fresh non-dev store starts
+          with ZERO members (the operator provisions real accounts);
+        * departments still seed everywhere (they carry no credentials);
+        * on EVERY init in a non-dev env, any member whose stored hash still
+          verifies against the repo-public `SEED_PASSWORDS` plaintext is
+          deactivated (`actor="system:seed-lockdown"`, idempotent) — a store
+          that ever ran dev seeding cannot be promoted to prod with those
+          passwords live.
+        """
+        env = get_settings().env.strip().lower()
         conn = self._connect()
         try:
             count = conn.execute("SELECT COUNT(*) FROM members").fetchone()[0]
-            if count == 0:
+            if count == 0 and env == "dev":
                 now = _now()
                 for m in SEED_MEMBERS:
                     conn.execute(
@@ -615,9 +627,38 @@ class MemberStore:
                             now,
                         ),
                     )
+            if env != "dev":
+                # Mk19 Phase 4: never let repo-public seed passwords stay live
+                # outside dev (idempotent; no-op on already-clean stores).
+                self._lockdown_seed_passwords(conn)
             conn.commit()
         finally:
             conn.close()
+
+    def _lockdown_seed_passwords(self, conn: sqlite3.Connection) -> None:
+        """Mk19 Phase 4: deactivate members still holding a seed password.
+
+        Runs on every init outside `ENV=dev`. A member counts as "still holding"
+        the seed password when `verify_password(SEED_PASSWORDS[username],
+        stored_hash)` passes — i.e. nobody has rotated it yet. Already-inactive
+        members are skipped so repeated inits stay quiet (idempotent).
+        """
+        rows = conn.execute("SELECT username, password_hash, active FROM members").fetchall()
+        now = _now()
+        deactivated: list[str] = []
+        for row in rows:
+            username = str(row["username"])
+            if not row["active"]:
+                continue
+            plain = SEED_PASSWORDS.get(username)
+            if plain and verify_password(plain, str(row["password_hash"])):
+                conn.execute(
+                    "UPDATE members SET active = 0, updated_at = ? WHERE username = ?",
+                    (now, username),
+                )
+                deactivated.append(username)
+        for username in deactivated:
+            self._audit("system:seed-lockdown", "deactivate", username)
 
     def _row_to_record(self, row: sqlite3.Row | None) -> MemberRecord | None:
         if row is None:

@@ -13,8 +13,10 @@
 # .env is OPTIONAL. Without it the app runs on its built-in ENV=dev defaults
 # (mock LLM, dev secrets, seeded demo accounts) — identical to copying .env.example.
 # Create .env only to change something: a real LLM/Composio key, DASHBOARD_PORT, ...
-# app/config.py refuses the built-in dev secrets when ENV is not "dev", so a real
-# deployment must set real JWT__SECRET / LLM__FERNET_KEY there.
+# Mk19: the built-in dev secrets (JWT__SECRET, LLM__FERNET_KEY) require the explicit
+# ALLOW_DEV_SECRETS=1 hatch (defaulted below, dev-only); app/config.py refuses them
+# when ENV is not "dev" and refuses the hatch itself outside dev, so a real
+# deployment must set ENV=prod AND real JWT__SECRET / LLM__FERNET_KEY there.
 
 services:
   app:
@@ -22,6 +24,12 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      # Mk19 dev hatch: compose defaults it to 1 so the container boots on the
+      # built-in dev secrets without any .env. Set ALLOW_DEV_SECRETS=0 (and real
+      # secrets) for anything beyond local dev — with ENV=prod the app refuses
+      # to start if this stays 1.
+      ALLOW_DEV_SECRETS: ${ALLOW_DEV_SECRETS:-1}
     ports:
       # Change the LEFT side (or set DASHBOARD_PORT in .env) if 8006 is taken on your machine.
       - "${DASHBOARD_PORT:-8006}:8006"

@@ -20,6 +20,10 @@ os.environ["DATABASE_URL"] = ""
 # provider inject a stub via monkeypatch instead.
 os.environ["OPENROUTER_API_KEY"] = ""
 os.environ["SYSTEM__OPENROUTER_API_KEY"] = ""
+# Mk19 Phase 4: the suite runs with the documented dev hatch (built-in
+# JWT__SECRET / LLM__FERNET_KEY). Tests that verify the fail-closed guard
+# override/clear this explicitly (tests/test_dev_guard.py).
+os.environ.setdefault("ALLOW_DEV_SECRETS", "1")
 
 import httpx
 import pytest

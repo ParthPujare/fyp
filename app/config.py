@@ -162,6 +162,12 @@ class Settings(BaseSettings):
     composio: ComposioSettings = ComposioSettings()
     system: SystemLLMSettings = SystemLLMSettings()
 
+    # Mk19 Phase 4: explicit hatch to run with the repo-public dev secrets
+    # (JWT__SECRET, LLM__FERNET_KEY). Applies ONLY when ENV=dev; see
+    # _no_dev_secrets_outside_dev. docker-compose.yml and scripts/run_dev.sh
+    # default it to 1; every other deployment must set real secrets.
+    allow_dev_secrets: bool = False
+
     model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")
 
     @field_validator("database_url", mode="before")
@@ -195,8 +201,22 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _no_dev_secrets_outside_dev(self) -> "Settings":
-        """Fail fast: the repo-public dev secrets must not run anywhere but ENV=dev."""
-        if self.env.strip().lower() != "dev":
+        """Fail fast: built-in dev secrets need an explicit hatch (Mk19 Phase 4).
+
+        The hatch is `ENV=dev` **and** `ALLOW_DEV_SECRETS=1`. Both conditions
+        are required: `ENV=prod` (or any other env) refuses the built-ins even
+        with the hatch set — a stray `ALLOW_DEV_SECRETS=1` leaking into prod is
+        itself a misconfiguration and raises, rather than silently weakening the
+        check. docker-compose.yml and scripts/run_dev.sh default the hatch to 1
+        so bare-metal/compose dev keeps booting.
+        """
+        env = self.env.strip().lower()
+        if self.allow_dev_secrets and env != "dev":
+            raise ValueError(
+                f"ALLOW_DEV_SECRETS=1 is only valid with ENV=dev (ENV={self.env!r}); "
+                "unset it and set real JWT__SECRET / LLM__FERNET_KEY values"
+            )
+        if not (env == "dev" and self.allow_dev_secrets):
             unsafe = [
                 name
                 for name, bad in (
@@ -208,7 +228,7 @@ class Settings(BaseSettings):
             if unsafe:
                 raise ValueError(
                     f"ENV={self.env!r} but {', '.join(unsafe)} still use the built-in dev default; "
-                    "set your own values"
+                    "set your own values (or ALLOW_DEV_SECRETS=1 with ENV=dev)"
                 )
         return self
 
