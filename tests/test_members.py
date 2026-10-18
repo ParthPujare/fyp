@@ -108,12 +108,18 @@ def test_me_reflects_store_claims_after_update(member_store):
     assert me.status_code == 200
     assert me.json()["role"] == "marketing_agent"
 
-    # Admin edits role/dept; the NEXT /auth/me (same token) reflects it.
+    # Mk19 Phase 6: an admin edit supersedes her old token (cred_ver bump)...
     member_store.update("molly@acme.com", role="hr_agent", dept="hr", scopes=["hr:read"], actor="admin@acme.com")
-    refreshed = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
-    assert refreshed.status_code == 200
-    assert refreshed.json()["role"] == "hr_agent"
-    assert refreshed.json()["dept"] == "hr"
+    stale = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert stale.status_code == 401
+    assert "superseded" in stale.json()["detail"]
+
+    # ...and a fresh login's /auth/me reflects the store claims.
+    refreshed = login(client, "molly@acme.com", "molly123").json()["access_token"]
+    me2 = client.get("/auth/me", headers={"Authorization": f"Bearer {refreshed}"})
+    assert me2.status_code == 200
+    assert me2.json()["role"] == "hr_agent"
+    assert me2.json()["dept"] == "hr"
 
 
 def test_update_unknown_member_raises(member_store):

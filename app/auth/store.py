@@ -436,6 +436,15 @@ class MemberStore:
                     conn.execute(_ddl)
                 except sqlite3.OperationalError:
                     pass
+            # Mk19 Phase 6 (SQLite twin of 0015): credential-generation claim.
+            # Bumped on password reset, role/dept/scope update and TOTP set;
+            # JWTs carrying an older value verify as superseded (jwt.py).
+            try:
+                conn.execute(
+                    "ALTER TABLE members ADD COLUMN credentials_version INTEGER NOT NULL DEFAULT 1"
+                )
+            except sqlite3.OperationalError:
+                pass
             # Mk15 migration (SQLite twin of 0008): per-department approval mode.
             try:
                 conn.execute(
@@ -1213,7 +1222,8 @@ class MemberStore:
         conn = self._connect()
         try:
             conn.execute(
-                "UPDATE members SET totp_secret = ?, updated_at = ? WHERE username = ?",
+                "UPDATE members SET totp_secret = ?, updated_at = ?,"
+                " credentials_version = credentials_version + 1 WHERE username = ?",
                 (secret, _now(), username),
             )
             conn.commit()
@@ -1930,13 +1940,15 @@ class MemberStore:
         try:
             if display_name is None:
                 conn.execute(
-                    "UPDATE members SET role = ?, dept = ?, scopes = ?, updated_at = ? WHERE username = ?",
+                    "UPDATE members SET role = ?, dept = ?, scopes = ?, updated_at = ?,"
+                    " credentials_version = credentials_version + 1 WHERE username = ?",
                     (role, dept, json.dumps(scopes or []), _now(), username),
                 )
             else:
                 disp = validate_display_name(display_name)
                 conn.execute(
-                    "UPDATE members SET role = ?, dept = ?, scopes = ?, display_name = ?, updated_at = ? WHERE username = ?",
+                    "UPDATE members SET role = ?, dept = ?, scopes = ?, display_name = ?, updated_at = ?,"
+                    " credentials_version = credentials_version + 1 WHERE username = ?",
                     (role, dept, json.dumps(scopes or []), disp, _now(), username),
                 )
             self._bump_version(conn)
@@ -1978,7 +1990,8 @@ class MemberStore:
         conn = self._connect()
         try:
             conn.execute(
-                "UPDATE members SET password_hash = ?, updated_at = ? WHERE username = ?",
+                "UPDATE members SET password_hash = ?, updated_at = ?,"
+                " credentials_version = credentials_version + 1 WHERE username = ?",
                 (hash_password(new_password), _now(), username),
             )
             self._bump_version(conn)
@@ -1990,12 +2003,52 @@ class MemberStore:
         assert member is not None
         return member
 
+    def credentials_version(self, username: str) -> int:
+        """Mk19 Phase 6: this member's current credential generation.
+
+        Bumped by password reset, role/dept/scope update and TOTP set; JWTs
+        carry the version they were minted under and verify_token rejects any
+        older one as superseded. 0 = no such member (ghost/demo tokens).
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT credentials_version FROM members WHERE username = ?", (username,)
+            ).fetchone()
+        finally:
+            conn.close()
+        return int(row["credentials_version"]) if row is not None else 0
+
     def __len__(self) -> int:
         return len(self.list())
 
 
-if __name__ == "__main__":  # manual migration / demo: uv run python -m app.auth.store
+if __name__ == "__main__":  # manual bootstrap: uv run python -m app.auth.store [list|create-admin <user>]
+    import getpass
+    import sys
+
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "list"
     store = MemberStore()
-    print(f"members db: {store.path}")
-    for m in store.list():
-        print(f"  {m.username:<22} role={m.role:<16} dept={m.dept:<10} active={m.active}")
+    if cmd == "list":
+        print(f"members db: {store.path}")
+        for m in store.list():
+            print(f"  {m.username:<22} role={m.role:<16} dept={m.dept:<10} active={m.active}")
+    elif cmd == "create-admin":
+        # Mk19 Phase 4: bootstrap outside dev (member seeding is dev-only).
+        # The password is read from the terminal, never from argv; min 6 chars.
+        if len(sys.argv) != 3:
+            raise SystemExit("usage: python -m app.auth.store create-admin <username-email>")
+        username = sys.argv[2]
+        pw1 = getpass.getpass("password: ")
+        pw2 = getpass.getpass("repeat password: ")
+        if len(pw1) < 6:
+            raise SystemExit("password must be at least 6 characters")
+        if pw1 != pw2:
+            raise SystemExit("passwords do not match")
+        try:
+            store.create(username, pw1, role="admin", dept="admin", actor="cli:create-admin")
+        except MemberError as exc:  # MemberExistsError + validation share the base class
+            raise SystemExit(str(exc)) from exc
+        print(f"created admin {username}")
+    else:
+        raise SystemExit(f"unknown command {cmd!r} (expected: list, create-admin)")

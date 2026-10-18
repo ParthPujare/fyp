@@ -42,6 +42,28 @@ def test_direct_port_admin_delete_allowed(tmp_path, member_store):
     assert cid not in remaining
 
 
+def test_hr_token_denied_on_crm_port(tmp_path, member_store):
+    """bob (hr_agent) has zero CRM acts: his token is 403 on the CRM port too."""
+    c = TestClient(crm.create_app(tmp_path / "crm.sqlite"))
+    h = service_headers("bob@acme.com")
+    assert c.get("/customers", headers=h).status_code == 403
+    assert c.post("/customers", json={"name": "x"}, headers=h).status_code == 403
+
+
+def test_finance_agent_can_create_transfers(tmp_path, member_store):
+    """carol (finance_agent) gets 200 on her dept's raw transfer write — the
+    act her role actually holds (parity with the gateway's allow)."""
+    c = TestClient(finance.create_app(tmp_path / "finance.sqlite"))
+    h = service_headers("carol@acme.com")
+    assert c.get("/health").json()["status"] == "ok"  # open, no token needed
+    r = c.post(
+        "/transfers",
+        json={"from_account": "a", "to_account": "b", "amount": 1, "memo": "m"},
+        headers=h,
+    )
+    assert r.status_code == 200
+
+
 def test_finance_raw_writes_denied_for_everyone(tmp_path, member_store):
     """Unbacked POST /accounts maps to act `create`, which policy grants to NO
     role — not even admin. Locked decision: deny for everyone."""
@@ -78,17 +100,21 @@ def test_fallback_covers_unbacked_routes():
 
 def test_member_role_edit_applies_immediately(tmp_path, member_store):
     """Fresh MemberStore record drives the service decision: no re-login needed
-    to lose (or gain) rights — same semantics as the gateway's live g rows."""
+    to lose (or gain) rights — same semantics as the gateway's live g rows.
+    Mk19 Phase 6: each edit supersedes the old token (cred_ver bump), so the
+    caller re-authenticates; the 403 below is Casbin's, not the token layer's."""
     c = TestClient(crm.create_app(tmp_path / "crm.sqlite"))
     h = service_headers("alice@acme.com")
     assert c.get("/customers", headers=h).status_code == 200
     # valid role switch (Mk17 strict role/dept pairs): marketing_agent → hr_agent
-    # drops crm:read immediately; no re-login needed.
+    # drops crm:read immediately; the fresh token proves it is policy, not token.
     member_store.update("alice@acme.com", role="hr_agent", dept="hr", actor="admin@acme.com")
+    h = service_headers("alice@acme.com")  # re-login after the credential bump
     assert c.get("/customers", headers=h).status_code == 403
     member_store.update(
         "alice@acme.com", role="marketing_agent", dept="marketing", actor="admin@acme.com"
     )
+    h = service_headers("alice@acme.com")
     assert c.get("/customers", headers=h).status_code == 200
 
 
