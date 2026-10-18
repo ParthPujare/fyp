@@ -540,3 +540,18 @@ Triage order: `Blocker` (leak/bypass/unapproved execute/auth bypass) → `Major`
 6. **Round 6 (last, announced):** §20 DEST → final `verify-audit` + scribe triage.
 
 End state: every row has `Status` + `Notes`; every `Fail` has a `FYP-Txxx`; every suite has `General notes`. That pack IS the fix plan input.
+
+---
+
+## 22. Mk19 security remediation (automated + manual spot-checks)
+
+Automated rows run in the suite (`uv run pytest <file>`); the manual column is the one-line spot-check a human can redo on any PC.
+
+| ID | +/- | Steps | Expected | Status | Notes |
+|---|---|---|---|---|---|
+| MK19-01 | - | Automated `tests/test_thread_ownership.py`: alice and admin POST `/chat` + `/api/chat` with a foreign thread id. | 403 `not your thread` before any run; own thread 200 | working (automated) | owner-only chat (Phase 1) |
+| MK19-02 | - | Automated `tests/test_ssrf_guard.py`: the agent tries localhost/private/metadata/self-port targets. | Loopback/private probe blocked; own service ports 422 **without echoing the body back**; public BYOK base_url still allowed | working (automated) | SSRF guard (Phase 2) |
+| MK19-03 | - | Any PC: `curl` a dept port directly (e.g. CRM `:8011/customers`) with your member JWT and a DELETE. | Same decision as the gateway: allowed acts 200, others 403; anonymous/forged 401; finance raw writes 403 for everyone | working (automated `tests/test_service_authz.py`) | service-level Casbin (Phase 3) |
+| MK19-04 | - | Set `ENV=prod` with dev JWT/Fernet secrets or empty `SERVICES__AUDIT_HMAC_KEY` → boot container. | Boot fails with an actionable message; no silent fallback | working (automated `tests/test_dev_guard.py`) | fail-closed secrets (Phase 4/5) |
+| MK19-05 | + | Boot dev with a fresh HMAC key while an old plain audit chain exists → run turns → `verify-audit`. | Old lines verify as plain, new lines as keyed, chain green; editing an old line → red | working (automated `tests/test_ops_hardening.py`) | mixed-mode HMAC (Phase 5) |
+| MK19-06 | - | Admin resets your password (or edits your role / sets TOTP) while you hold a session → reuse the old token at `/chat`, dashboard, dept port, `/auth/me`. | All → 401 `token superseded`; fresh login works | working (automated `tests/test_token_lifetime.py`) | cred_ver supersession (Phase 6) |

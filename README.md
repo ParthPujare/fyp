@@ -519,7 +519,34 @@ member **Chat** tab gains a **"My memory"** panel backed by `GET /api/memory/me`
 (the caller's readable scopes only — central + own dept + own user, Casbin-filtered),
 so any member can see — with clicks — the shared dept memory (a 2nd marketing
 member reads `dept/marketing`) and the cross-dept gap (an HR member sees no
-`dept/marketing` scope).
+`dept/marketing` scope.
+
+### Security hardening (Mk19)
+
+The 2026-10-18 audit fixes, one line each:
+
+- **Owner-only chat** — `/chat` (gateway and dashboard) accepts only threads named
+  `user:<you>` or `user:<you>:…`; admins included, no override.
+- **SSRF guard** — every outbound HTTP the agent makes passes `app/harness/url_policy.py`:
+  public hosts are allowed for BYOK endpoints, but the local-model probe is
+  loopback/private-only, and **your own service ports are always blocked** (the agent
+  cannot call the gateway back with an admin token).
+- **Service-level authz** — the dept services (CRM/HR/DevOps/Finance, each with a
+  published port) run the same Casbin policy as the gateway; direct-port traffic no
+  longer skips policy. Policy rows live in `policy.csv`; on a shared database re-sync
+  with `uv run python -m app.db sync-config` after editing them (see runbook §5).
+- **Fail-closed secrets** — `ENV=prod` refuses to boot on the repo-public dev JWT/Fernet
+  secrets, on an empty audit/trace HMAC key, and on empty members/key-store paths.
+  Dev keeps working via the explicit `ALLOW_DEV_SECRETS=1` hatch (compose and
+  `run_dev.sh` set it). Outside dev the demo accounts are **not** seeded; bootstrap with
+  `uv run python -m app.auth.store create-admin <email>` (password typed, never argv).
+- **Audit/trace HMAC** — prod requires `SERVICES__AUDIT_HMAC_KEY` + `TRACE_HMAC_KEY`;
+  existing plain chains stay verifiable while new lines are keyed (mixed-mode verify),
+  so you can enable HMAC without breaking old evidence. See the runbook.
+- **Token supersession** — password resets, role/dept/scope edits and TOTP setup bump
+  `members.credentials_version`; old JWTs are rejected as `token superseded` at every
+  verify site on the next request. Rotate the `.env` credentials (OpenRouter, Neon) once,
+  by hand — code cannot rotate provider secrets for you.
 
 ## Configuration
 

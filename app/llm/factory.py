@@ -1,5 +1,6 @@
 """Provider factory — picks MockLLM (offline/CI) or custom Hermes-style providers from registry/settings."""
 
+import logging
 from typing import Any
 
 from app.auth.store import MemberStore
@@ -7,6 +8,8 @@ from app.config import Settings, get_settings
 from app.llm.base import LLMProvider
 from app.llm.mock import MockLLM
 from app.llm.registry import get_provider_instance, is_supported
+
+log = logging.getLogger(__name__)
 
 # Pre-Mk5 configs said `LLM__PROVIDER=litellm` and carried the real backend in the
 # model prefix (`gemini/…`, `anthropic/…`). LiteLLM is gone; resolve those configs
@@ -75,7 +78,9 @@ def get_provider_for_user(
             # kill the turn — fall back to the global/mock provider so chat keeps
             # working. The row is flagged stale in /api/users; re-saving the key
             # restores per-user routing.
-            print(f"[LLM] Stored key for {username} unusable ({exc.detail}); using fallback provider.")
+            log.warning(
+                "Stored key for %s unusable (%s); using fallback provider.", username, exc.detail
+            )
             key_data = None
         if key_data:
             provider_type, model_name, decrypted_key, base_url = key_data

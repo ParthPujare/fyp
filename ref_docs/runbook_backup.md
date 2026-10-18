@@ -70,3 +70,30 @@ rewritten and nothing is archived.
   `SELECT username, day, calls, cost_cents FROM llm_usage ORDER BY day DESC`.
 - Caps count real providers only; MockLLM is never metered (offline/tests
   unaffected).
+
+## 5. Bootstrap & policy sync on a shared database (Mk19)
+
+- **No demo members outside dev** — with `ENV=prod` (and no
+  `ALLOW_DEV_SECRETS=1`), a fresh shared database seeds **zero** members; the
+  five demo accounts are a dev-only convenience. Bootstrap the first admin by
+  hand:
+
+  ```bash
+  uv run python -m app.auth.store create-admin you@yourco.com   # password typed, never argv
+  uv run python -m app.auth.store list                          # sanity check
+  ```
+
+  Existing prod rows are never touched; unrotated seed accounts found outside
+  dev are deactivated once (actor `system:seed-lockdown`, audit-logged).
+- **Policy rows live in `policy.csv`** (git) but the enforcer on a shared
+  database reads the DB table. After editing `policy.csv` — or after the
+  dashboard's Departments tab appends a `p, <role>, <dept>, *, *` row on
+  another machine — run on ONE machine:
+
+  ```bash
+  uv run python -m app.db sync-config --dry-run   # review drift first
+  uv run python -m app.db sync-config             # add missing rows
+  ```
+
+  `sync-config --prune` removes only file-seeded rules that left the CSV; it
+  never removes `source='dashboard'` rows.
