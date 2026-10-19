@@ -156,39 +156,46 @@ def test_policy_rows_gated_on_dept_register(member_store, _isolated_dashboard):
 
 
 def test_allowlist_grant_defers_with_two_admins(member_store):
-    """A solo admin's always_allow on an eligible item approves the action
-    but does NOT create the standing rule while a second admin exists."""
+    """A solo ADMIN's always_allow on an eligible item approves the action but does
+    NOT create the standing rule while a second admin exists — it is staged as a
+    second-eyes proposal instead (Mk20). A head's always_allow is not affected: the
+    department's own approver granted it (Mk20 fix: it used to be dropped too)."""
     from app.agent.routing import KIND_TOOL, action_key_for, allowlist_payload, args_hash
     from app.memory.approval_flow import _create_allow_rules
 
     _two_admins(member_store)
-    payload = {"tool": "crm_create_campaign", "args": {"name": "x"}}
     action = action_key_for(KIND_TOOL, tool="crm_create_campaign")
-    ah = args_hash(allowlist_payload(KIND_TOOL, payload))
-    entry = {
-        "action": action,
-        "args_hash": ah,
-        "dept": "marketing",
-        "actor": {"sub": "alice@acme.com"},
-        "payload": payload,
-        "resource": {"type": "tool", "id": "crm_create_campaign"},
-        "steps": [{"by": "mhead@acme.com", "always_allow": True}],
-        "run_id": "r1",
-    }
-    # Sanity: identical shape without the defer (covered by existing APPR-14
-    # suite on single-admin stores).
+
+    def entry_for(name, by, level):
+        payload = {"tool": "crm_create_campaign", "args": {"name": name}}
+        return payload, {
+            "action": action,
+            "args_hash": args_hash(allowlist_payload(KIND_TOOL, payload)),
+            "dept": "marketing",
+            "actor": {"sub": "alice@acme.com"},
+            "payload": payload,
+            "resource": {"type": "tool", "id": "crm_create_campaign"},
+            "steps": [{"by": by, "level": level, "always_allow": True}],
+            "run_id": "r1",
+        }
+
     assert member_store.count_active_admins() == 2
-    assert member_store.allowlist_match("alice@acme.com", action, ah) is False
-    _create_allow_rules(member_store, entry)
-    assert member_store.allowlist_match("alice@acme.com", action, ah) is False
-    # Sanity: with a single admin the same shape WOULD create the rule.
+    # admin alone -> staged, no rule yet
+    _p, solo = entry_for("x", "admin@acme.com", "admin")
+    _create_allow_rules(member_store, solo)
+    assert member_store.allowlist_match("alice@acme.com", action, solo["args_hash"]) is False
+    [proposal] = member_store.second_eyes_pending()
+    assert proposal["kind"] == "allowlist_rule" and proposal["proposed_by"] == "admin@acme.com"
+    # head -> rule at once, even with two admins
+    _p, by_head = entry_for("z", "mhead@acme.com", "head")
+    _create_allow_rules(member_store, by_head)
+    assert member_store.allowlist_match("alice@acme.com", action, by_head["args_hash"]) is True
+    # Sanity: with a single admin the admin-alone shape creates the rule directly.
     member_store.set_active("admin2@acme.com", False, actor="admin@acme.com")
     try:
-        payload2 = {"tool": "crm_create_campaign", "args": {"name": "y"}}
-        ah2 = args_hash(allowlist_payload(KIND_TOOL, payload2))
-        entry2 = dict(entry, payload=payload2, args_hash=ah2)
-        _create_allow_rules(member_store, entry2)
-        assert member_store.allowlist_match("alice@acme.com", action, ah2) is True
+        _p, single = entry_for("y", "admin@acme.com", "admin")
+        _create_allow_rules(member_store, single)
+        assert member_store.allowlist_match("alice@acme.com", action, single["args_hash"]) is True
     finally:
         member_store.set_active("admin2@acme.com", True, actor="admin@acme.com")
 

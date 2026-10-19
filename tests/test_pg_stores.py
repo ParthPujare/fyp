@@ -332,6 +332,26 @@ def test_another_laptops_change_is_seen_after_the_version_poll(pg):
     assert laptop_b.is_active("teammate@acme.com") is False
 
 
+def test_credentials_version_is_cached_but_never_stale(pg, monkeypatch):
+    """Mk20: verify_token reads the credential version on EVERY token check, so it must
+    come from the cache — yet a password reset must supersede tokens on this laptop at
+    once and on another laptop after the version poll."""
+    pool, _admin, _schema = pg
+    a = PgMemberStore(pool, version_ttl=0, read_ttl=60)
+    b = PgMemberStore(pool, version_ttl=0, read_ttl=60)
+    v0 = a.credentials_version("alice@acme.com")
+    assert b.credentials_version("alice@acme.com") == v0
+    seen = _count_statements(monkeypatch)
+    for _ in range(50):
+        a.credentials_version("alice@acme.com")
+    assert not [s for s in seen if s.startswith("SELECT members")], seen  # cached (only the version poll runs)
+    a.reset_password("alice@acme.com", "newpass1", actor="admin@acme.com")
+    assert a.credentials_version("alice@acme.com") == v0 + 1  # own write: immediate
+    assert b.credentials_version("alice@acme.com") == v0 + 1  # other laptop: after the version poll
+    a.set_totp_secret("alice@acme.com", "JBSWY3DPEHPK3PXP", actor="admin@acme.com")
+    assert b.credentials_version("alice@acme.com") == v0 + 2  # TOTP set now bumps members_version too
+
+
 def test_other_laptop_change_is_visible_within_the_version_ttl(pg):
     pool, _admin, _schema = pg
     a = PgMemberStore(pool)

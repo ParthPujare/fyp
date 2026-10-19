@@ -51,13 +51,34 @@ def test_allowed_urls_strict_mode():
     assert validate_outbound_url("http://[::1]:1234/v1", settings)
     assert validate_outbound_url("http://192.168.1.10:1234", settings)
     assert validate_outbound_url("http://10.1.2.3:8080", settings)
-    assert validate_outbound_url("http://172.16.0.5:9000", settings)
     assert validate_outbound_url("http://[fd00::1]:1234", settings)  # IPv6 ULA
     # host.docker.internal for local models from inside Docker (only when it resolves)
     from app.harness.url_policy import _resolve
 
     if _resolve("host.docker.internal"):
         assert validate_outbound_url("http://host.docker.internal:1234/v1", settings)
+
+
+def test_private_targets_only_on_local_model_ports(monkeypatch):
+    """Mk20: loopback/private addresses only on SECURITY__LOCAL_LLM_PORTS (both modes),
+    so the probe is no internal port scanner and stored keys cannot target internal APIs."""
+    for mode in (False, True):
+        for url in ("http://172.16.0.5:9000", "http://127.0.0.1:5432/", "http://10.0.0.7:22", "http://192.168.1.1/"):
+            with pytest.raises(UrlPolicyError, match="not allowed for a local model"):
+                validate_outbound_url(url, settings, allow_public=mode)
+    # public addresses are unaffected (stored mode)
+    assert validate_outbound_url("https://openrouter.ai/api/v1", settings, allow_public=True)
+    # admin escape hatches: extra port, or any private port
+    monkeypatch.setattr(settings.security, "local_llm_ports", [1234, 11434, 8080, 9000])
+    assert validate_outbound_url("http://172.16.0.5:9000", settings)
+    monkeypatch.setattr(settings.security, "local_llm_ports", [1234])
+    monkeypatch.setattr(settings.security, "allow_any_private_port", True)
+    assert validate_outbound_url("http://10.0.0.7:2222", settings)
+    # ...but the always-denied ranges and own-service ports stay dead even then
+    with pytest.raises(UrlPolicyError):
+        validate_outbound_url("http://127.0.0.1:8001/", settings)
+    with pytest.raises(UrlPolicyError):
+        validate_outbound_url("http://169.254.169.254/", settings)
 
 
 def test_public_urls_split_by_mode():
@@ -145,8 +166,16 @@ def test_error_messages_never_echo_input():
 # ---- live stub server (the allow path, end to end) ----
 
 
+def _allow_port(monkeypatch, port: int) -> None:
+    """Register a test server's ephemeral port as a local-model port (Mk20 rule)."""
+    import app.dashboard.app as dash
+
+    for cfg in {id(settings): settings, id(dash.settings): dash.settings}.values():
+        monkeypatch.setattr(cfg.security, "local_llm_ports", [*cfg.security.local_llm_ports, port])
+
+
 @pytest.fixture
-def stub_llm():
+def stub_llm(monkeypatch):
     """A stdlib local LLM endpoint serving GET /models — the legit probe target."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -167,6 +196,7 @@ def stub_llm():
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = srv.server_address[1]
     assert port not in SERVICE_PORTS  # ephemeral port, never one of ours
+    _allow_port(monkeypatch, port)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{port}"
@@ -175,7 +205,7 @@ def stub_llm():
 
 
 @pytest.fixture
-def error_stub():
+def error_stub(monkeypatch):
     """A local endpoint that answers 500 with a secret-laden body (exfil bait)."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -189,6 +219,7 @@ def error_stub():
 
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = srv.server_address[1]
+    _allow_port(monkeypatch, port)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{port}"

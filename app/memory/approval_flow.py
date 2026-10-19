@@ -91,39 +91,25 @@ def apply_decision(
     Returns the updated entry: still `pending` (now at the admin step) after a head's
     step-1 approve on a `head+admin` item, otherwise `approved` / `rejected`.
     """
-    check_decision(
+    entry = check_decision(
         approvals, approval_id, claims, approve=approve, as_level=as_level, always_allow=always_allow
     )
-    # Mk17: central memory needs a second admin. Self-approval is allowed only
-    # as a single-admin fallback (audited); with ≥2 active admins the decider
-    # must differ from the requester.
-    if approve and as_level == LEVEL_ADMIN:
-        entry = approvals.get(approval_id)
-        if entry is not None:
-            resource = entry.get("resource") or {}
-            is_central = resource.get("type") == "memory" and str(resource.get("id", "")) == "central"
-            if is_central:
-                requester = str((entry.get("actor") or {}).get("sub", ""))
-                decider = str(claims.get("sub", ""))
-                if requester and decider and requester == decider:
-                    count = None
-                    for attr in ("count_active_admins", "_active_admin_count"):
-                        try:
-                            fn = getattr(members, attr, None)
-                            if callable(fn):
-                                try:
-                                    count = fn()
-                                except TypeError:
-                                    count = fn(exclude=None) if attr.startswith("_") else fn()
-                                break
-                        except Exception:  # noqa: BLE001
-                            count = None
-                    if isinstance(count, int) and count >= 2:
-                        raise DecisionError(
-                            409,
-                            "central memory needs a second admin to approve "
-                            f"(requested by {requester!r})",
-                        )
+    # Mk17: central memory needs a second admin. Mk20: so does an admin-only
+    # critical tool call (e.g. an admin's own `finance_transfer`). Self-approval
+    # is allowed only as the single-admin fallback; with ≥2 active admins — or
+    # when the admin count cannot be read (fail closed) — the decider must differ
+    # from the requester.
+    if approve and as_level == LEVEL_ADMIN and _needs_second_admin(entry):
+        requester = str((entry.get("actor") or {}).get("sub", ""))
+        decider = str(claims.get("sub", ""))
+        if requester and decider and requester == decider:
+            count = active_admin_count(members)
+            if count is None or count >= 2:
+                what = "central memory" if _is_central(entry) else "a critical action"
+                raise DecisionError(
+                    409,
+                    f"{what} needs a second admin to approve (requested by {requester!r})",
+                )
     try:
         decided = approvals.decide_step(
             approval_id,
@@ -142,47 +128,75 @@ def apply_decision(
     return decided
 
 
-def _create_allow_rules(members: Any, entry: dict[str, Any]) -> None:
-    wanted = [s for s in entry.get("steps") or [] if s.get("always_allow")]
-    if not wanted or not entry_allowlist_eligible(entry):
-        return
-    # Mk18 Phase E: an always-allow rule granted by ONE admin acting alone never
-    # takes effect while a second admin exists — the action stays approved, but
-    # the standing rule waits for a second pair of eyes (audited). Head+admin
-    # chains already have two deciders, so they pass through.
+def active_admin_count(members: Any) -> int | None:
+    """Active admins, or None when the store cannot answer (callers fail closed)."""
     try:
-        deciders = {str(s.get("by", "")) for s in entry.get("steps") or [] if s.get("by")}
-        count = members.count_active_admins() if hasattr(members, "count_active_admins") else 1
-    except Exception:  # noqa: BLE001
-        deciders, count = set(), 1
-    if count >= 2 and len(deciders) <= 1:
-        try:
-            from app.config import get_settings as _gs
-            from app.harness.audit import open_audit_log
+        count = members.count_active_admins()
+    except Exception:  # noqa: BLE001 - unknown count: the caller decides how to fail closed
+        return None
+    return count if isinstance(count, int) else None
 
-            open_audit_log(_gs().services.audit_path).log(
-                decision="DENY",
-                resource={"type": "allowlist", "id": entry.get("action", "?")},
-                actor={"sub": next(iter(deciders), "?"), "role": "admin", "dept": "admin"},
-                run_id=str(entry.get("run_id", "dashboard")),
-                reason="allowlist:deferred-second-eyes",
-            )
-        except Exception:  # noqa: BLE001, S110
-            pass
-        return
+
+def _is_central(entry: dict[str, Any]) -> bool:
+    resource = entry.get("resource") or {}
+    return resource.get("type") == "memory" and str(resource.get("id", "")) == "central"
+
+
+def _needs_second_admin(entry: dict[str, Any]) -> bool:
+    """Central memory, or a critical tool no department owns (an admin's own call)."""
+    if _is_central(entry):
+        return True
+    resource = entry.get("resource") or {}
+    if resource.get("type") != KIND_TOOL or ApprovalStore.dept_of(entry) is not None:
+        return False
+    from app.agent.routing import RISK_CRITICAL, risk_of_tool
+
+    return risk_of_tool(str(resource.get("id", ""))) == RISK_CRITICAL
+
+
+def allowlist_rule_payload(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """The rule an approved, eligible item asks for — or None if it cannot have one."""
     resource = entry.get("resource") or {}
     kind = KIND_MEMORY if resource.get("type") == KIND_MEMORY else KIND_TOOL
     dept = ApprovalStore.dept_of(entry)
     member = str((entry.get("actor") or {}).get("sub", ""))
-    if not dept or not member:
+    if not dept or not member or not entry.get("action") or not entry.get("args_hash"):
+        return None
+    return {
+        "member": member,
+        "action": entry["action"],
+        "args_hash": entry["args_hash"],
+        "args": allowlist_payload(kind, entry["payload"]),
+        "dept": dept,
+    }
+
+
+def _create_allow_rules(members: Any, entry: dict[str, Any]) -> None:
+    wanted = [s for s in entry.get("steps") or [] if s.get("always_allow")]
+    if not wanted or not entry_allowlist_eligible(entry):
         return
+    rule = allowlist_rule_payload(entry)
+    if rule is None:
+        return
+    granted_by = str(wanted[0].get("by", ""))
+    # Mk18 Phase E / Mk20: a standing rule granted by ONE ADMIN acting alone needs a
+    # second admin when one exists. It is staged as a second-eyes proposal that any
+    # other admin confirms (the approved action itself is not held back). A head's
+    # rule — alone on a head-only item, or with the admin on a head+admin chain — is
+    # already a decision by the department's own approver and applies at once.
+    steps = [s for s in entry.get("steps") or [] if s.get("by")]
+    admin_alone = (
+        bool(steps)
+        and all(s.get("level") == LEVEL_ADMIN for s in steps)
+        and len({str(s["by"]) for s in steps}) <= 1
+    )
+    if admin_alone:
+        count = active_admin_count(members)
+        if count is None or count >= 2:
+            members.second_eyes_propose("allowlist_rule", rule, granted_by)
+            return
     members.allowlist_add(
-        member,
-        entry["action"],
-        entry["args_hash"],
-        allowlist_payload(kind, entry["payload"]),
-        dept,
-        actor=str(wanted[0].get("by", "")),
+        rule["member"], rule["action"], rule["args_hash"], rule["args"], rule["dept"], actor=granted_by
     )
 
 

@@ -27,6 +27,12 @@ local-model endpoint must pass :func:`validate_outbound_url` first:
   schemes still fail. Denying RFC1918 here would break legitimate BYOK use
   without adding safety (LLM calls are supposed to leave the host).
 
+Mk20: a URL that resolves to loopback / a private network must ALSO use one of the
+local-model ports (``SECURITY__LOCAL_LLM_PORTS``, default 1234 / 11434 / 8080), in both
+modes, unless ``SECURITY__ALLOW_ANY_PRIVATE_PORT=true``. That closes the remaining
+internal-port-scan oracle (the probe's "unreachable" vs "returned N" answer) and stops a
+stored BYOK endpoint from pointing chat POSTs at arbitrary internal APIs.
+
 Accepted residual (documented in plan Mk19): DNS rebinding — the address is
 resolved here and again by httpx at connect time; pinning the connection to the
 validated IP is explicitly out of scope for a single-host deployment.
@@ -97,6 +103,16 @@ def _unmapped(ip: ipaddress.IPv6Address | ipaddress.IPv4Address) -> ipaddress.IP
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         return ip.ipv4_mapped
     return ip
+
+
+def _is_private(raw: str) -> bool:
+    """Loopback / RFC1918 / ULA — the ranges a member must not roam freely."""
+    try:
+        ip = _unmapped(ipaddress.ip_address(raw))
+    except ValueError:
+        return False
+    nets = _V4_ALLOW if ip.version == 4 else _V6_ALLOW
+    return any(ip in net for net in nets)
 
 
 def _ip_allowed(raw: str, allow_public: bool) -> bool:
@@ -198,4 +214,11 @@ def validate_outbound_url(url: str, settings=None, *, allow_public: bool = False
         raise UrlPolicyError("URL points at an internal service")
     if port not in _DEFAULT_PORTS and port in svc_ports:
         raise UrlPolicyError("URL points at an internal service")
+
+    # Mk20: private / loopback targets only on local-model ports.
+    security = getattr(settings, "security", None)
+    if any(_is_private(ip) for ip in resolved) and not getattr(security, "allow_any_private_port", False):
+        allowed_ports = set(getattr(security, "local_llm_ports", None) or (1234, 11434, 8080))
+        if port not in allowed_ports:
+            raise UrlPolicyError("URL uses a port that is not allowed for a local model")
     return url

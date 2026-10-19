@@ -60,6 +60,17 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
                              line-height: 1; opacity: .5; cursor: pointer; flex-shrink: 0; }
   .thread-item .thread-del:hover { opacity: 1; color: var(--bad); }
   .thread-item.active .thread-del:hover { color: #7f1d1d; }
+  /* Mk20: narrow screens — stack the chat sidebar above the conversation, no sideways scroll. */
+  @media (max-width: 700px) {
+    main { padding: 12px; }
+    header { padding: 8px 12px; }
+    #chat-layout { flex-direction: column; }
+    #chat-sidebar { width: 100%; max-height: 30vh; }
+    #chat-main { width: 100%; min-width: 0; }
+    .chat-user, .chat-assistant { max-width: 100%; }
+    table { display: block; overflow-x: auto; }
+    pre, code { white-space: pre-wrap; word-break: break-word; }
+  }
 </style>
 </head>
 <body>
@@ -174,6 +185,8 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     <div id="approvals-view" class="hidden">
       <h2>Pending approvals</h2>
       <div id="approvals"></div>
+      <h2 style="margin-top:24px">Waiting for a second admin <span class="muted" style="font-weight:normal;font-size:13px">(high-impact changes one admin proposed; another admin must confirm)</span></h2>
+      <div id="second-eyes"></div>
     </div>
     <div id="dept-approvals-view" class="hidden">
       <h2>Department approvals <span class="muted" style="font-weight:normal;font-size:13px">(your department's pending memory writes and tool actions — step 1)</span></h2>
@@ -360,6 +373,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     // Mk18 Phase D: token stays in memory for this page lifetime; the server
     // also set the httpOnly cookie, which is what survives reloads.
     identities[label] = { token: token || null, claims };
+    csrfToken = null;  // Mk20: CSRF tokens are per member — never reuse another identity's
     localStorage.setItem(CLAIMS[label], JSON.stringify(claims));
     localStorage.removeItem(TOKENS[label]);
   }
@@ -398,9 +412,21 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     if (active) { currentTab = defaultTabFor(identities[active].claims.role); loadCurrent(); }
   }
 
-  function switchTo(label) {
+  async function switchTo(label) {
     if (!identities[label]) return;
+    // Mk20: tell the server which cookie slot is active (after a reload the tokens live
+    // only in httpOnly cookies, so without this requests keep going out as whoever
+    // signed in last). Sent with the CURRENT slot's CSRF token, before it is dropped.
+    try {
+      const headers = { "content-type": "application/json" };
+      const csrf = await ensureCsrf();
+      if (csrf) headers["X-CSRF-Token"] = csrf;
+      // Plain fetch, not api(): a failed switch must not sign the CURRENT identity out.
+      await fetch("/api/session/switch", { method: "POST", headers, credentials: "same-origin",
+        body: JSON.stringify({ label }) });
+    } catch (e) { /* in-memory Bearer tokens (same page lifetime) still work without it */ }
     active = label;
+    csrfToken = null;  // Mk20: the other slot is a different member with its own CSRF token
     localStorage.setItem("harness_active", label);
     loginMode = null;
     resetChatState();
@@ -424,7 +450,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     return body || (resp.status + " " + resp.statusText);
   }
 
-  async function api(path, opts = {}) {
+  async function api(path, opts = {}, csrfRetried = false) {
     const headers = Object.assign({}, opts.headers || {});
     const id = identities[active];
     if (id && id.token) headers["Authorization"] = "Bearer " + id.token;
@@ -434,6 +460,12 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       if (csrf) headers["X-CSRF-Token"] = csrf;
     }
     const resp = await fetch(path, Object.assign({}, opts, { headers, credentials: "same-origin" }));
+    if (resp.status === 403 && !csrfRetried) {
+      // Mk20: a stale CSRF token (identity switched, or credentials changed) is not a
+      // reason to sign the user out — fetch a fresh one and retry the request once.
+      const detail = await resp.clone().text().catch(() => "");
+      if (detail.includes("CSRF")) { csrfToken = null; return api(path, opts, true); }
+    }
     if (resp.status === 401 || resp.status === 403) { invalidate(active); throw new Error("unauthorized"); }
     if (!resp.ok) { throw new Error(await errorMessage(resp)); }
     return resp.json();
@@ -747,10 +779,10 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
           + `<td><span class="muted">${esc((a.updated_at || "").slice(0, 19).replace("T", " "))}</span></td>`
           + `<td style="text-align:right">`
           + (a.status === "active"
-            ? `<button class="bad" onclick="disconnectApp('${esc(a.app)}')">Disconnect</button>`
+            ? `<button class="bad" data-app-act="disconnect" data-app="${esc(a.app)}">Disconnect</button>`
             : a.status === "pending"
-            ? `<button class="ghost" onclick="refreshApp('${esc(a.app)}')">Refresh</button> <button class="bad" onclick="disconnectApp('${esc(a.app)}')">Disconnect</button>`
-            : `<button onclick="connectApp('${esc(a.app)}')">Connect</button>`)
+            ? `<button class="ghost" data-app-act="refresh" data-app="${esc(a.app)}">Refresh</button> <button class="bad" data-app-act="disconnect" data-app="${esc(a.app)}">Disconnect</button>`
+            : `<button data-app-act="connect" data-app="${esc(a.app)}">Connect</button>`)
           + `</td>`;
         list.appendChild(tr);
       });
@@ -943,6 +975,19 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   // ---- Chat ------------------------------------------------------------------
   let currentThreadId = null;
 
+  // Mk20: remember the open chat per identity so a reload reopens it (UI convenience only;
+  // storage can be unavailable — then the newest chat opens instead).
+  function lastThreadKey() {
+    const sub = identities[active] && identities[active].claims && identities[active].claims.sub;
+    return sub ? "harness_last_thread:" + sub : null;
+  }
+  function lastThreadFor() {
+    try { const k = lastThreadKey(); return k ? localStorage.getItem(k) : null; } catch (e) { return null; }
+  }
+  function rememberThread(t) {
+    try { const k = lastThreadKey(); if (k && t) localStorage.setItem(k, t); } catch (e) { /* ignore */ }
+  }
+
   // Mk8: strip storage prefix `user:<sub>:` for display; raw id stays in `title` attr.
   function displayThread(t) {
     const s = String(t || "");
@@ -988,7 +1033,14 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       const visible = [...threads];
       if (pendingNewThread && !visible.includes(pendingNewThread)) visible.unshift(pendingNewThread);
       list.innerHTML = "";
-      if (!currentThreadId && visible.length) currentThreadId = visible[0];
+      // Mk20: after a reload reopen the chat the user was last in (else the newest) AND
+      // load its transcript — previously the list showed but the transcript stayed empty.
+      let autoOpened = false;
+      if (!currentThreadId && visible.length) {
+        const last = lastThreadFor();
+        currentThreadId = last && visible.includes(last) ? last : visible[0];
+        autoOpened = currentThreadId !== pendingNewThread;
+      }
       visible.forEach((t) => {
         const div = document.createElement("div");
         div.className = "thread-item" + (t === currentThreadId ? " active" : "");
@@ -1012,6 +1064,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
             pendingNewThread = null;
           }
           currentThreadId = t;
+          rememberThread(t);
           $("chat-transcript").innerHTML = "";
           $("chat-status").textContent = "";
           if (t !== pendingNewThread) await loadThreadHistory(t);
@@ -1021,6 +1074,10 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       });
       // Best-effort title resolution (server threads only, non-blocking).
       threads.forEach((t) => { if (!threadTitles[t]) resolveThreadTitle(t); });
+      if (autoOpened && currentThreadId && !$("chat-transcript").children.length) {
+        rememberThread(currentThreadId);
+        await loadThreadHistory(currentThreadId);
+      }
     } catch (e) {
       list.innerHTML = '<span class="muted" style="font-size:12px">Could not load threads</span>';
     }
@@ -1193,6 +1250,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
         body: JSON.stringify({ message: msg, thread_id: currentThreadId, key_id: keyId }) });
       if (out.thread_id) {
         currentThreadId = out.thread_id;
+        rememberThread(out.thread_id);
         if (!threadTitles[out.thread_id] || threadTitles[out.thread_id] === "New chat") {
           threadTitles[out.thread_id] = msg.replace(/\s+/g, " ").slice(0, 40);
         }
@@ -1232,12 +1290,12 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
           ? "switch to the admin session and open Approvals to approve it."
           : "an admin must approve it (Approvals tab).");
       html += `<div class="status" style="color:#fef08a">&#9209; run suspended (approval <code>${esc(out.approval_id)}</code>) — ${esc(hint)} This chat updates by itself once it is decided.`
-        + ` <button class="ghost" onclick="resumeNow('${esc(out.approval_id)}', '${esc(out.thread_id || "")}')">Resume now</button></div>`;
+        + ` <button class="ghost" data-resume="${esc(out.approval_id)}" data-thread="${esc(out.thread_id || "")}">Resume now</button></div>`;
     }
     if (out.connect_required && out.connect_required.length) {
       html += `<div class="card" style="margin-top:8px"><b>Connect to continue:</b> `
         + out.connect_required.map((t) =>
-          `<button class="ghost" onclick="connectFromChat('${esc(t)}')">Connect ${esc(t)}</button>`).join(" ")
+          `<button class="ghost" data-connect="${esc(t)}">Connect ${esc(t)}</button>`).join(" ")
         + `<div class="muted">After connecting, press Refresh in Account → Integrations, then re-send your message.</div></div>`;
     }
     return html;
@@ -1359,7 +1417,50 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     } catch (e) { btn.textContent = "error: " + e.message; }
   }
 
+  // Mk20: second-eyes proposals (an admin-alone "always allow", skill/policy/key writes).
+  const SECOND_EYES_LABELS = {
+    allowlist_rule: "Always-allow rule", policy_rows: "Policy rows", skill_save: "Save skill",
+    skill_delete: "Delete skill", llm_key_write: "Save a member's LLM key", llm_key_delete: "Delete a member's LLM key",
+    platform_key: "Platform extractor key", composio_key: "Composio key",
+  };
+  async function loadSecondEyes() {
+    const host = $("second-eyes");
+    if (!host) return;
+    try {
+      const items = await api("/api/second-eyes/pending");
+      host.innerHTML = "";
+      if (!items.length) { host.innerHTML = '<p class="muted">Nothing waiting.</p>'; return; }
+      const me = identities[active] && identities[active].claims.sub;
+      items.forEach((p) => {
+        const own = p.proposed_by === me;
+        const card = elm(`<div class="card">
+          <div class="row">
+            <span class="badge pending">pending</span>
+            <b>${esc(SECOND_EYES_LABELS[p.kind] || p.kind)}</b>
+            <span class="muted">proposed by ${esc(p.proposed_by)} at ${esc(fmtTs(p.proposed_at))}</span>
+          </div>
+          <pre style="white-space:pre-wrap;color:var(--muted);font-size:12px">${esc(JSON.stringify(p.payload, null, 2))}</pre>
+          ${own
+            ? '<div class="status muted">You proposed this — a different admin must confirm it.</div>'
+            : `<div class="row"><button class="ok" data-se="confirm">Confirm</button><button class="bad" data-se="reject">Reject</button></div>`}
+          <div class="status" data-se-status></div>
+        </div>`);
+        card.querySelectorAll("button[data-se]").forEach((b) => b.addEventListener("click", async () => {
+          const status = card.querySelector("[data-se-status]");
+          try {
+            await api(`/api/second-eyes/${encodeURIComponent(p.id)}/${b.dataset.se}`, { method: "POST" });
+            status.textContent = b.dataset.se === "confirm" ? "confirmed — applied" : "rejected";
+            card.querySelectorAll("button[data-se]").forEach((x) => (x.disabled = true));
+            setTimeout(loadSecondEyes, 1200);
+          } catch (e) { status.textContent = "error: " + e.message; }
+        }));
+        host.appendChild(card);
+      });
+    } catch (e) { host.textContent = "error: " + e.message; }
+  }
+
   async function loadApprovals() {
+    loadSecondEyes();
     $("approvals").textContent = "loading...";
     try {
       const items = await api("/api/approvals/pending");
@@ -2072,6 +2173,23 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   $("pass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
   $("login-cancel").addEventListener("click", () => { loginMode = null; render(); });
   $("chat-send").addEventListener("click", sendChat);
+  // Mk20: data-* attributes + delegated listeners instead of inline onclick="f('${value}')".
+  // An HTML-escaped quote inside an attribute is decoded back to a quote before the inline
+  // handler runs, so data values must never be spliced into JavaScript source.
+  $("int-apps").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-app-act]");
+    if (!b) return;
+    const app = b.dataset.app;
+    if (b.dataset.appAct === "connect") connectApp(app);
+    else if (b.dataset.appAct === "refresh") refreshApp(app);
+    else if (b.dataset.appAct === "disconnect") disconnectApp(app);
+  });
+  $("chat-transcript").addEventListener("click", (ev) => {
+    const resumeBtn = ev.target.closest("button[data-resume]");
+    if (resumeBtn) { resumeNow(resumeBtn.dataset.resume, resumeBtn.dataset.thread); return; }
+    const connectBtn = ev.target.closest("button[data-connect]");
+    if (connectBtn) connectFromChat(connectBtn.dataset.connect);
+  });
   $("chat-msg").addEventListener("keydown", (e) => {
     // Mk8 #5: Enter sends, Shift/Ctrl+Enter inserts a newline.
     if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); sendChat(); }

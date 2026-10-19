@@ -4,8 +4,10 @@ Bearer-header API clients (tests, curl, service-to-service) are exempt: they
 prove possession per request and are not ambient-authority browsers. Cookie
 sessions must present `X-CSRF-Token` on mutating methods.
 
-The token is derived, not stored: HMAC-SHA256(jwt_secret, "csrf:" + sub).
-No database, no rotation story beyond the JWT secret itself.
+The token is derived, not stored: HMAC-SHA256(jwt_secret, "csrf:<sub>:<cred_ver>").
+Mk20: binding the member's credential version means a password reset, role/scope
+change or TOTP set (which already supersede every JWT) also retires every CSRF
+token issued before it, instead of a token staying valid until the JWT secret rotates.
 """
 
 from __future__ import annotations
@@ -15,17 +17,17 @@ import hmac
 from typing import Any
 
 
-def csrf_token_for(sub: str, secret: str) -> str:
+def csrf_token_for(sub: str, secret: str, cred_ver: int = 0) -> str:
     return hmac.new(
-        secret.encode("utf-8"), f"csrf:{sub}".encode(), hashlib.sha256
+        secret.encode("utf-8"), f"csrf:{sub}:{int(cred_ver)}".encode(), hashlib.sha256
     ).hexdigest()
 
 
-def csrf_valid(token: str | None, sub: str, secret: str) -> bool:
+def csrf_valid(token: str | None, sub: str, secret: str, cred_ver: int = 0) -> bool:
     if not token or not sub or not secret:
         return False
     try:
-        return hmac.compare_digest(csrf_token_for(sub, secret), token)
+        return hmac.compare_digest(csrf_token_for(sub, secret, cred_ver), token)
     except Exception:  # noqa: BLE001
         return False
 

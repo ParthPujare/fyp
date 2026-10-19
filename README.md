@@ -358,6 +358,9 @@ Who must approve a gated item is decided in one place, `app/agent/routing.py`
   are never eligible (422). On a `head+admin` item the rule takes effect only once the
   admin step approves. Rules are listed/revoked under **Always allowed** (admin: all;
   head: own department) — `GET /api/allowlist`, `DELETE /api/allowlist/{member}/{action}/{args_hash}`.
+  A head's tick applies at once. An admin who ticks it **alone** (e.g. on an escalated item)
+  while another admin exists gets the action approved, but the standing rule waits under
+  **Approvals → Waiting for a second admin** until a different admin confirms it (Mk20).
 - **Useful heads** — a `{dept}_head` gets Chat + Account (own BYOK keys), the department
   queue, a **My department** tab (roster, add a member with the department's member role,
   deactivate / re-activate / reset password for own non-head members, the department's
@@ -530,7 +533,11 @@ The 2026-10-18 audit fixes, one line each:
 - **SSRF guard** — every outbound HTTP the agent makes passes `app/harness/url_policy.py`:
   public hosts are allowed for BYOK endpoints, but the local-model probe is
   loopback/private-only, and **your own service ports are always blocked** (the agent
-  cannot call the gateway back with an admin token).
+  cannot call the gateway back with an admin token). Since Mk20 a URL that resolves to
+  localhost or a private network may only use a local-model port
+  (`SECURITY__LOCAL_LLM_PORTS`, default 1234 / 11434 / 8080), so members cannot scan
+  internal ports or point a saved key at an internal API; an admin can widen this with
+  `SECURITY__ALLOW_ANY_PRIVATE_PORT=true`.
 - **Service-level authz** — the dept services (CRM/HR/DevOps/Finance, each with a
   published port) run the same Casbin policy as the gateway; direct-port traffic no
   longer skips policy. Policy rows live in `policy.csv`; on a shared database re-sync

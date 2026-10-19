@@ -117,6 +117,7 @@ async def _cookie_session(request: Request, call_next):
                         if k.lower() != b"authorization"
                     ] + [(b"authorization", f"Bearer {cookie}".encode("latin-1"))]
                     request.state.csrf_sub = str(claims.get("sub", ""))
+                    request.state.csrf_ver = int(claims.get("cred_ver", 0) or 0)
                 except Exception:  # noqa: BLE001
                     via = None
     request.state.auth_via = via or "none"
@@ -126,7 +127,8 @@ async def _cookie_session(request: Request, call_next):
         and not csrf_exempt_path(request.url.path)
     ):
         sub = getattr(request.state, "csrf_sub", "")
-        if not csrf_valid(headers.get("x-csrf-token"), sub, settings.jwt.secret):
+        ver = getattr(request.state, "csrf_ver", 0)
+        if not csrf_valid(headers.get("x-csrf-token"), sub, settings.jwt.secret, ver):
             return JSONResponse({"detail": "missing or invalid CSRF token"}, status_code=403)
     return await call_next(request)
 
@@ -466,13 +468,33 @@ def _verified_member(authorization: str | None) -> tuple[dict[str, Any], str]:
     return claims, token
 
 
+# Approval cards are seen only by the deciders (admins, the department head) and the
+# requester. Mk20: they must be able to read WHAT they approve — the recipient, subject
+# and a preview of the message — while account numbers and memos stay masked. The preview
+# is capped and has SSNs / card numbers masked.
+_APPROVER_MASKED_ARGS = ("memo", "from_account", "to_account")
+_APPROVER_PREVIEW_ARGS = ("body",)
+_PREVIEW_CHARS = 280
+_CARD_RE = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
+_SSN_PREVIEW_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+
+
+def _preview(value: Any) -> str:
+    text = str(value)
+    text = _CARD_RE.sub(MASK, _SSN_PREVIEW_RE.sub(MASK, text))
+    return text if len(text) <= _PREVIEW_CHARS else text[:_PREVIEW_CHARS] + "…"
+
+
 def _mask_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Mask sensitive tool args (e.g. finance transfer memo) in the UI list."""
+    """Approver view of a gated call's args: secrets masked, the rest readable."""
     if "args" in payload and isinstance(payload["args"], dict):
         args = dict(payload["args"])
-        for key in ("memo", "from_account", "to_account", "body", "subject", "to", "title"):
+        for key in _APPROVER_MASKED_ARGS:
             if key in args:
                 args[key] = MASK
+        for key in _APPROVER_PREVIEW_ARGS:
+            if key in args:
+                args[key] = _preview(args[key])
         payload = {**payload, "args": args}
     return payload
 
@@ -555,6 +577,43 @@ def logout(response: Response) -> dict:
     return {"logged_out": True}
 
 
+class SessionSwitchRequest(BaseModel):
+    label: str  # "admin" | "member"
+
+
+@app.post("/api/session/switch")
+def switch_session(req: SessionSwitchRequest, request: Request, response: Response) -> dict:
+    """Mk20: make the identity-switcher pill decide who the browser acts as.
+
+    After a reload the tokens live only in the httpOnly slot cookies, and the server
+    picks the slot named by `<cookie>_active`. Switching pills used to change only the
+    page, so requests kept going out as whoever signed in last. This flips the active
+    marker to a slot the browser already holds a valid session for — nothing else.
+    """
+    from app.harness.cookies import active_cookie, slot_cookie
+
+    label = (req.label or "").strip()
+    if label not in ("admin", "member"):
+        raise HTTPException(status_code=422, detail="label must be 'admin' or 'member'")
+    slot = request.cookies.get(slot_cookie(settings.jwt.cookie_name, label), "")
+    if not slot:
+        raise HTTPException(status_code=409, detail=f"no {label} session in this browser")
+    try:
+        claims = verify_token(slot, settings.jwt.secret, settings.jwt.algorithm)
+    except AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    response.set_cookie(
+        key=active_cookie(settings.jwt.cookie_name),
+        value=label,
+        httponly=False,
+        secure=settings.jwt.cookie_secure,
+        samesite=settings.jwt.cookie_samesite,  # type: ignore[arg-type]
+        path="/",
+        max_age=settings.jwt.expiry_minutes * 60,
+    )
+    return {"active": label, "sub": claims.get("sub")}
+
+
 @app.get("/api/csrf")
 def csrf_token(authorization: str | None = Header(default=None)) -> dict:
     """Mk18 Phase D: derived per-session CSRF token for cookie browsers.
@@ -565,7 +624,11 @@ def csrf_token(authorization: str | None = Header(default=None)) -> dict:
     from app.harness.csrf import csrf_token_for
 
     claims, _token = _verified_member(authorization)
-    return {"csrf_token": csrf_token_for(str(claims.get("sub", "")), settings.jwt.secret)}
+    return {
+        "csrf_token": csrf_token_for(
+            str(claims.get("sub", "")), settings.jwt.secret, int(claims.get("cred_ver", 0) or 0)
+        )
+    }
 
 
 @app.post("/api/chat")
@@ -1239,6 +1302,16 @@ def _apply_second_eyes(kind: str, payload: dict[str, Any], actor: str) -> dict[s
 
         clear_system_provider_cache()
         return {"configured": True, "cleared": bool(payload.get("clear", False)), "removed": removed}
+    if kind == "allowlist_rule":
+        rule = store.allowlist_add(
+            str(payload["member"]),
+            str(payload["action"]),
+            str(payload["args_hash"]),
+            dict(payload.get("args") or {}),
+            str(payload["dept"]),
+            actor=actor,
+        )
+        return {"allowlist_rule": rule}
     raise _ME(f"unknown second-eyes kind {kind!r}")
 
 
@@ -2739,6 +2812,10 @@ def integration_catalog_add(
     toolkit = (req.toolkit or "").strip().lower()
     if not toolkit:
         raise HTTPException(status_code=422, detail="toolkit is required (e.g. slack, notion)")
+    if not re.fullmatch(r"[a-z0-9_-]{1,64}", toolkit):  # Mk20: same rule as the store
+        raise HTTPException(
+            status_code=422, detail="toolkit name must be lowercase letters, digits, '_' or '-' (max 64)"
+        )
     store = get_store()
     admin_key_enc = store.get_composio_key(claims["sub"])
     admin_key = None

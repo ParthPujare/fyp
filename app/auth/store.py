@@ -39,6 +39,7 @@ from app.config import get_settings
 
 # Mk17: identity is email. `members.username` physically stores the email
 # (kept column name to avoid FK rewrites); `display_name` is UI-only.
+_TOOLKIT_RE = re.compile(r"[a-z0-9_-]{1,64}")
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 
@@ -1057,6 +1058,7 @@ class MemberStore:
         "llm_key_delete",
         "platform_key",
         "composio_key",
+        "allowlist_rule",  # Mk20: an admin-alone "always allow" waits for a second admin
     )
 
     def second_eyes_propose(self, kind: str, payload: dict[str, Any], proposer: str) -> dict[str, Any]:
@@ -1226,6 +1228,9 @@ class MemberStore:
                 " credentials_version = credentials_version + 1 WHERE username = ?",
                 (secret, _now(), username),
             )
+            # Mk20: like every credential bump, also bump members_version so cached
+            # credential versions (PgMemberStore) refresh on every laptop.
+            self._bump_version(conn)
             conn.commit()
         finally:
             conn.close()
@@ -1729,6 +1734,10 @@ class MemberStore:
         toolkit = (toolkit or "").strip().lower()
         if not toolkit:
             raise MemberError("toolkit is required")
+        # Mk20: toolkit names are rendered into the dashboard and used as Casbin objects;
+        # Composio slugs are plain identifiers, so allow nothing else.
+        if not _TOOLKIT_RE.fullmatch(toolkit):
+            raise MemberError("toolkit name must be lowercase letters, digits, '_' or '-' (max 64)")
         now = _now()
         conn = self._connect()
         try:

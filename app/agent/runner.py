@@ -414,6 +414,15 @@ def resume_agent(
     if entry["status"] not in ("approved", "rejected"):
         raise ValueError(f"approval {approval_id!r} has not been decided")
 
+    thread_id = entry["thread_id"]
+    if checkpointer is None:
+        checkpointer = make_checkpointer(settings)
+    # Mk17: deleted-chat resume is 409 (conflict), not 404 and not a replay from
+    # missing state. Mk20: checked BEFORE the claim, so a resume that cannot run
+    # never marks the approval as resumed (`resumed_by/at` stay truthful).
+    if not run_state_is_local(checkpointer, thread_id):
+        raise ValueError(f"approval {approval_id!r} chat was deleted")
+
     # Mk14 single-resume gate: exactly one process may resume a decided approval.
     # The claim lives here (not in the endpoints) so dashboard, gateway, dept and
     # direct `resume_agent` callers share one atomic gate; losers get ValueError.
@@ -426,18 +435,6 @@ def resume_agent(
     _spend_precheck(settings, entry.get("actor") or {})
 
     run_id = entry["run_id"]
-    thread_id = entry["thread_id"]
-    if checkpointer is None:
-        checkpointer = make_checkpointer(settings)
-    # Mk17: deleted-chat resume is 409 (conflict), not 404 and not a replay
-    # from missing state. SQLite has no cross-PC gate, so check here directly.
-    try:
-        if not run_state_is_local(checkpointer, thread_id):
-            raise ValueError(f"approval {approval_id!r} chat was deleted")
-    except ValueError:
-        raise
-    except Exception:  # noqa: BLE001, S110
-        pass
     if key_id is None:
         key_id = _saved_key_id(checkpointer, thread_id)
     deps = None

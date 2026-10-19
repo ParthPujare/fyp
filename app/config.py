@@ -138,6 +138,19 @@ class SystemLLMSettings(BaseModel):
     timeout_seconds: float = Field(default=15.0, gt=0)
 
 
+class SecuritySettings(BaseModel):
+    """Outbound URL policy knobs (Mk20, see app/harness/url_policy.py)."""
+
+    # A member-supplied URL that resolves to loopback / a private network may only use
+    # one of these ports (LM Studio 1234, Ollama 11434, llama.cpp 8080). Without this,
+    # any member could make the server connect to arbitrary internal hosts and ports
+    # (port scanning through the model-detection probe, chat POSTs to internal APIs).
+    local_llm_ports: list[int] = [1234, 11434, 8080]
+    # Admin escape hatch: allow any port on a private address (e.g. an internal LLM
+    # gateway on 443). Public addresses are not affected by either setting.
+    allow_any_private_port: bool = False
+
+
 class Settings(BaseSettings):
     app_name: str = "fyp-agent-harness"
     env: str = "dev"
@@ -165,6 +178,7 @@ class Settings(BaseSettings):
     approvals: ApprovalSettings = ApprovalSettings()
     composio: ComposioSettings = ComposioSettings()
     system: SystemLLMSettings = SystemLLMSettings()
+    security: SecuritySettings = SecuritySettings()
 
     # Mk19 Phase 4: explicit hatch to run with the repo-public dev secrets
     # (JWT__SECRET, LLM__FERNET_KEY). Applies ONLY when ENV=dev; see

@@ -10,16 +10,18 @@ from app.dashboard.app import app as dashboard_app
 
 
 @pytest.fixture(autouse=True)
-def _insecure_cookies():
-    """TestClient speaks plain http: Secure cookies would never be sent back."""
+def _insecure_cookies(monkeypatch):
+    """TestClient speaks plain http: Secure cookies would never be sent back.
+
+    Patch every settings object the apps hold: tests that clear the settings cache leave
+    the auth service / dashboard modules with their own (older) `settings` instance."""
+    import app.auth.service as auth_service
+    import app.dashboard.app as dash
     from app.config import get_settings
 
-    original = get_settings().jwt.cookie_secure
-    get_settings().jwt.cookie_secure = False
-    try:
-        yield
-    finally:
-        get_settings().jwt.cookie_secure = original
+    objs = (get_settings(), auth_service.settings, dash.settings)
+    for cfg in {id(o): o for o in objs}.values():
+        monkeypatch.setattr(cfg.jwt, "cookie_secure", False)
 
 
 def _login_cookies(username="admin@acme.com", password="admin123"):
@@ -96,7 +98,10 @@ def test_csrf_token_derived_and_validated(member_store):
     token = create_token(admin, settings.jwt.secret, settings.jwt.algorithm, settings.jwt.expiry_minutes)
     c = TestClient(dashboard_app)
     got = c.get("/api/csrf", headers={"Authorization": f"Bearer {token}"}).json()["csrf_token"]
-    assert got == csrf_token_for("admin@acme.com", settings.jwt.secret)
-    assert csrf_valid(got, "admin@acme.com", settings.jwt.secret)
-    assert not csrf_valid(got, "alice@acme.com", settings.jwt.secret)
-    assert not csrf_valid(None, "admin@acme.com", settings.jwt.secret)
+    ver = member_store.credentials_version("admin@acme.com")
+    assert got == csrf_token_for("admin@acme.com", settings.jwt.secret, ver)
+    assert csrf_valid(got, "admin@acme.com", settings.jwt.secret, ver)
+    assert not csrf_valid(got, "alice@acme.com", settings.jwt.secret, ver)
+    assert not csrf_valid(None, "admin@acme.com", settings.jwt.secret, ver)
+    # Mk20: a credential bump (password reset) retires the old CSRF token too.
+    assert not csrf_valid(got, "admin@acme.com", settings.jwt.secret, ver + 1)

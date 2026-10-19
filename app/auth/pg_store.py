@@ -155,6 +155,18 @@ class PgMemberStore(MemberStore):
         """Mk17: login-path read straight from the database (new members <1s visible)."""
         return MemberStore.get(self, username)
 
+    def credentials_version(self, username: str) -> int:
+        """Mk20: cached like the member list. `verify_token` asks for this on EVERY
+        token check (dashboard, gateway, each dept-service call), which was one Neon
+        round trip apiece. Every bump (password reset, role/dept/scope update, TOTP
+        set) also bumps `members_version`, so this process drops the value on its own
+        commit at once and on another laptop's change within `VERSION_TTL_S` (1 s)."""
+        return self._memo(
+            ("credver", username),
+            lambda: MemberStore.credentials_version(self, username),
+            self._member_ttl,
+        )
+
     def list(self) -> list[MemberRecord]:
         return self._memo(("list",), lambda: MemberStore.list(self), self._member_ttl)
 
