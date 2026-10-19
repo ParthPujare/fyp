@@ -3,85 +3,49 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Harness Demo — Admin & Members</title>
-<style>
-  :root { --bg:#0f172a; --panel:#1e293b; --line:#334155; --fg:#e2e8f0; --muted:#94a3b8;
-          --accent:#38bdf8; --ok:#4ade80; --bad:#f87171; }
-  * { box-sizing:border-box; }
-  body { margin:0; font:14px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
-  header { display:flex; align-items:center; gap:14px; padding:10px 20px; background:var(--panel);
-           border-bottom:1px solid var(--line); flex-wrap:wrap; }
-  header h1 { font-size:16px; margin:0; }
-  header nav { display:flex; gap:8px; margin-left:auto; flex-wrap:wrap; }
-  button { background:var(--accent); color:#062a3a; border:0; border-radius:6px; padding:6px 12px;
-           cursor:pointer; font-weight:600; }
-  button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); }
-  button.ok { background:var(--ok); } button.bad { background:var(--bad); }
-  button:disabled { opacity:.5; cursor:default; }
-  main { max-width:960px; margin:0 auto; padding:20px; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px;
-          margin-bottom:12px; }
-  .card h3 { margin:0 0 8px; font-size:14px; }
-  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-  .muted { color:var(--muted); } .pill { font-size:12px; border-radius:999px; padding:2px 10px;
-          background:#0b1220; border:1px solid var(--line); }
-  .pill.clickable { cursor:pointer; }
-  .pill.active { border:1px solid var(--accent); color:var(--accent); }
-  table { width:100%; border-collapse:collapse; } th,td { text-align:left; padding:6px 8px;
-          border-bottom:1px solid var(--line); vertical-align:top; }
-  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
-  code { background:#0b1220; border:1px solid var(--line); border-radius:4px; padding:1px 5px;
-         font-size:12px; }
-input[type=text], input[type=password], textarea { background:#0b1220; border:1px solid var(--line);
-          color:var(--fg); border-radius:6px; padding:7px 10px; }
-  #chat-msg { flex:1; resize:vertical; min-height:44px; max-height:160px; font:14px/1.5 system-ui, sans-serif; }
-   select { background:#0b1220; border:1px solid var(--line); color:var(--fg);
-            border-radius:6px; padding:7px 10px; }
-  .status { margin-top:8px; font-size:13px; }
-  .hidden { display:none; } .badge { font-size:11px; border-radius:999px; padding:2px 8px; }
-  .badge.pending { background:#fef08a33; color:#fef08a; }
-  .badge.approved { background:#4ade8033; color:#4ade80; }
-  .badge.rejected { background:#f8717133; color:#f87171; }
-  #chat-transcript { max-height:60vh; overflow-y:auto; display:flex; flex-direction:column; gap:10px;
-                     margin-bottom:12px; }
-  .chat-user { align-self:flex-end; background:var(--accent); color:#062a3a; border-radius:10px;
-               padding:8px 12px; max-width:75%; white-space:pre-wrap; word-break:break-word; }
-  .chat-assistant { align-self:flex-start; background:#0b1220; border:1px solid var(--line);
-                    border-radius:10px; padding:8px 12px; max-width:85%; }
-  #chat-layout { display: flex; gap: 16px; align-items: flex-start; }
-  #chat-sidebar { width: 220px; flex-shrink: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; max-height: 55vh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-  #chat-main { flex: 1; display: flex; flex-direction: column; }
-  .thread-item { padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; word-break: break-all; }
-  .thread-item:hover { background: var(--line); }
-  .thread-item.active { background: var(--accent); color: #062a3a; font-weight: 600; }
-  .thread-item { display: flex; align-items: center; gap: 6px; }
-  .thread-item .thread-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: normal; }
-  .thread-item .thread-del { background: transparent; color: inherit; border: 0; padding: 0 4px; font-size: 15px;
-                             line-height: 1; opacity: .5; cursor: pointer; flex-shrink: 0; }
-  .thread-item .thread-del:hover { opacity: 1; color: var(--bad); }
-  .thread-item.active .thread-del:hover { color: #7f1d1d; }
-  /* Mk20: narrow screens — stack the chat sidebar above the conversation, no sideways scroll. */
-  @media (max-width: 700px) {
-    main { padding: 12px; }
-    header { padding: 8px 12px; }
-    #chat-layout { flex-direction: column; }
-    #chat-sidebar { width: 100%; max-height: 30vh; }
-    #chat-main { width: 100%; min-width: 0; }
-    .chat-user, .chat-assistant { max-width: 100%; }
-    table { display: block; overflow-x: auto; }
-    pre, code { white-space: pre-wrap; word-break: break-word; }
-  }
-</style>
+<title>Harness — Zero-Trust Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="console.css">
 </head>
-<body>
-<header>
-  <h1>Harness Demo</h1>
-  <span class="muted" id="who"></span>
-  <span class="row" id="switcher"></span>
+<body class="logged-out">
+<div id="boot" aria-hidden="true"><pre id="boot-log"></pre></div>
+<div class="bg-grid" aria-hidden="true"></div>
+<div class="bg-glow" aria-hidden="true"></div>
+<div class="bg-scan" aria-hidden="true"></div>
+<div id="shell">
+<aside id="sidebar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+    </span>
+    <div><h1>HARNESS</h1><small>zero-trust console</small></div>
+  </div>
+  <div class="side-label">Navigation</div>
   <nav id="nav"></nav>
-</header>
+  <div class="side-foot">
+    <div class="side-label">Sessions</div>
+    <span class="row" id="switcher"></span>
+    <span class="muted" id="who"></span>
+  </div>
+</aside>
+<div id="stage">
+<div id="topbar">
+  <span id="crumb">harness <b>/</b> <span id="crumb-view">console</span></span>
+  <span class="sys" id="sys"><i class="dot"></i><span>checking…</span></span>
+  <span id="clock"></span>
+</div>
 <main>
   <section id="login-view" class="card">
+    <div class="login-hero">
+      <div class="shield" aria-hidden="true">
+        <span class="ring r3"></span><span class="ring r1"></span><span class="ring r2"></span>
+        <svg class="core" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+      </div>
+      <h2 class="hero-title">Zero-Trust <span class="grad">Agent Harness</span></h2>
+      <div class="typed" id="typed"></div>
+    </div>
     <h3 id="login-title">Sign in</h3>
     <div class="row">
       <input type="text" id="user" placeholder="user@acme.com" autocomplete="username">
@@ -218,7 +182,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
         <div id="team-skills"></div>
         <div id="team-skill-editor" class="hidden">
           <h3 id="team-skill-title">Edit skill</h3>
-          <textarea id="team-skill-content" rows="20" style="width:100%;background:#0b1220;color:var(--fg);border:1px solid var(--line);border-radius:6px;font:13px/1.5 ui-monospace,monospace;padding:10px"></textarea>
+          <textarea id="team-skill-content" class="code-editor" rows="20"></textarea>
           <div class="row" style="margin-top:8px">
             <button id="team-skill-save">Save</button>
             <button class="ghost" id="team-skill-cancel">Cancel</button>
@@ -303,7 +267,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
       <div id="skills"></div>
       <div id="skill-editor" class="hidden">
         <h3 id="skill-editor-title">Edit skill</h3>
-        <textarea id="skill-content" rows="24" style="width:100%;background:#0b1220;color:var(--fg);border:1px solid var(--line);border-radius:6px;font:13px/1.5 ui-monospace,monospace;padding:10px"></textarea>
+        <textarea id="skill-content" class="code-editor" rows="24"></textarea>
         <div class="row" style="margin-top:8px">
           <button id="save-skill">Save</button>
           <button class="ghost" id="cancel-skill">Cancel</button>
@@ -335,6 +299,8 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     </div>
   </section>
 </main>
+</div><!-- #stage -->
+</div><!-- #shell -->
 <script>
   const $ = (id) => document.getElementById(id);
   const TOKENS = { admin: "harness_admin_token", member: "harness_member_token" };
@@ -499,6 +465,7 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     const showLogin = !hasActive || loginMode !== null;
     $("login-view").classList.toggle("hidden", !showLogin);
     $("content-view").classList.toggle("hidden", !hasActive);
+    document.body.classList.toggle("logged-out", !hasActive);
     $("login-cancel").classList.toggle("hidden", !hasActive || loginMode === null);
     if (loginMode) $("login-title").textContent = "Sign in — add " + loginMode + " session";
     else $("login-title").textContent = "Sign in";
@@ -517,17 +484,42 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     if (!active || !identities[active]) return;
     let tabs = ["chat", "account"].concat(tabsForRole());
     tabs.forEach((t) => {
-      const b = document.createElement("button");
-      b.className = "ghost";
-      b.textContent = TAB_LABELS[t];
+      const b = navButton(t, TAB_LABELS[t]);
+      if (t === currentTab) b.classList.add("active");
       b.addEventListener("click", () => { currentTab = t; show(t); load(t); });
       nav.appendChild(b);
     });
-    const lo = document.createElement("button");
-    lo.className = "ghost";
-    lo.textContent = "Log out";
+    const lo = navButton("logout", "Log out");
+    lo.classList.add("logout");
     lo.addEventListener("click", logoutActive);
     nav.appendChild(lo);
+  }
+
+  // Static Lucide-style icon paths (never user data) for the sidebar.
+  const TAB_ICONS = {
+    chat: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    account: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/>',
+    approvals: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>',
+    "dept-approvals": '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 14 2 2 4-4"/>',
+    "dept-team": '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+    users: '<circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/>',
+    depts: '<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M9 22v-4h6v4"/><path d="M8 6h.01M12 6h.01M16 6h.01M8 10h.01M12 10h.01M16 10h.01M8 14h.01M12 14h.01M16 14h.01"/>',
+    allowlist: '<path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8M13 12h8M13 18h8"/>',
+    skills: '<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>',
+    memory: '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>',
+    ops: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+    logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
+  };
+
+  function navButton(tab, label) {
+    const b = document.createElement("button");
+    b.className = "nav-item";
+    b.dataset.tab = tab;
+    b.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TAB_ICONS[tab] || ""}</svg>`;
+    const span = document.createElement("span");
+    span.textContent = label;
+    b.appendChild(span);
+    return b;
   }
 
   function renderSwitcher() {
@@ -543,8 +535,18 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
     });
   }
 
+  let viewEnterTimer = null;
   function show(tab) {
     ALL_TABS.forEach((t) => $(t + "-view").classList.toggle("hidden", t !== tab));
+    document.querySelectorAll("#nav .nav-item").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+    $("crumb-view").textContent = (TAB_LABELS[tab] || tab).toLowerCase();
+    // Replay the entrance animation; cards that load in the next second animate too.
+    const view = $(tab + "-view");
+    view.classList.remove("view-enter");
+    void view.offsetWidth;
+    view.classList.add("view-enter");
+    clearTimeout(viewEnterTimer);
+    viewEnterTimer = setTimeout(() => view.classList.remove("view-enter"), 1200);
   }
 
   function load(tab) {
@@ -2130,11 +2132,12 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
 
   function eventCard(e) {
     return elm(`
-      <div class="card">
+      <div class="card event" data-source="${esc(e.source)}">
+        <i class="node" aria-hidden="true"></i>
         <div class="row">
           <span class="pill">#${e.seq}</span>
           <span class="pill">${esc(e.type)}</span>
-          <span class="pill">${esc(e.source)}</span>
+          <span class="pill src">${esc(e.source)}</span>
           <span class="muted">${esc((e.ts || "").slice(0, 19).replace("T", " "))}</span>
         </div>
         <pre style="white-space:pre-wrap;color:var(--muted);font-size:12px">${esc(JSON.stringify(e.payload, null, 2))}</pre>
@@ -2200,5 +2203,6 @@ input[type=text], input[type=password], textarea { background:#0b1220; border:1p
   if (active) { render(); loadCurrent(); }
   else render();
 </script>
+<script src="console.js"></script>
 </body>
 </html>
