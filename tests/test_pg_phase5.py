@@ -532,7 +532,7 @@ def test_member_admin_actions_are_audited_to_the_shared_chain(pg, tmp_path):
     pool, _admin, _schema = pg
     log = PgAuditLog(pool, hmac_key="")
     store = MemberStore(tmp_path / "members.sqlite", audit=log)
-    store.create("new@acme.com", "pw-123456789", "employee", "marketing", actor="admin@acme.com")
+    store.create("new@acme.com", "pw-123456789", "marketing_agent", "marketing", actor="admin@acme.com")  # Mk17: role must match dept
     (entry,) = log.entries(run_id="members")
     assert entry["reason"] == "admin:members:create" and entry["resource"] == {"type": "member", "id": "new@acme.com"}
 

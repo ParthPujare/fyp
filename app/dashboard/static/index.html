@@ -138,6 +138,10 @@
         <tbody id="int-apps"></tbody></table>
       <div class="status" id="int-status"></div>
       <div id="int-catalog-admin" class="hidden">
+        <h3>Admin — app catalog</h3>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">Disabling an app hides it from every member and blocks new connections. Re-enabling restores its policy rows.</div>
+        <table><thead><tr><th>App</th><th>State</th><th>Login setup</th><th></th></tr></thead>
+          <tbody id="int-catalog"></tbody></table>
         <h3>Admin — add app for everyone</h3>
         <div class="row">
           <input type="text" id="int-new-toolkit" placeholder="toolkit name, e.g. notion" autocomplete="off">
@@ -224,6 +228,23 @@
           <button class="ghost" id="member-cancel">Cancel</button>
         </div>
         <div class="status" id="member-status"></div>
+      </div>
+      <div id="member-keys" class="card hidden">
+        <div class="row" style="justify-content:space-between">
+          <h3 id="member-keys-title" style="margin:0">LLM keys</h3>
+          <button class="ghost" id="member-keys-close">Close</button>
+        </div>
+        <div class="muted" style="font-size:12px;margin:8px 0 10px">Keys are encrypted at rest and never shown back. With two or more active admins, adding or deleting another member's key waits for a second admin.</div>
+        <table><thead><tr><th>Provider</th><th>Model</th><th>Status</th><th>Created</th><th></th></tr></thead>
+          <tbody id="member-keys-list"></tbody></table>
+        <div class="row">
+          <select id="mk-provider" aria-label="Provider"></select>
+          <input type="text" id="mk-model" placeholder="Model string (e.g. gpt-4o-mini)" style="flex:1" autocomplete="off">
+          <input type="password" id="mk-key" placeholder="API key (never shown back)" autocomplete="new-password">
+          <input type="text" id="mk-base-url" placeholder="Base URL (custom / local only)" autocomplete="off">
+          <button id="mk-save">Add key</button>
+        </div>
+        <div class="status" id="member-keys-status"></div>
       </div>
       <table><thead><tr><th>Username</th><th>Role</th><th>Dept</th><th>Scopes</th><th>State</th><th></th></tr></thead>
         <tbody id="users"></tbody></table>
@@ -551,7 +572,7 @@
 
   function load(tab) {
     if (tab === "chat") loadChat();
-    if (tab === "account") { loadAccount(); loadIntegrations(); }
+    if (tab === "account") { loadAccount(); loadIntegrations(); loadCatalog(); }
     if (tab === "approvals") loadApprovals();
     if (tab === "dept-approvals") loadDeptApprovals();
     if (tab === "dept-team") loadTeam();
@@ -563,52 +584,89 @@
     if (tab === "ops") loadOps();
   }
 
+  // ---- LLM key table (shared: own keys in Account, a member's keys in Members) ----
+  // Rows carry data-* attributes and each tbody has ONE delegated listener (Mk20: no
+  // inline onclick with spliced values). `base` is the collection URL, e.g.
+  // /api/account/llm-keys or /api/members/<user>/llm-keys.
+  function renderKeyTable(tbody, keys, emptyText) {
+    tbody.innerHTML = "";
+    if (!keys.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="muted">${esc(emptyText)}</td></tr>`;
+      return;
+    }
+    keys.forEach((k) => {
+      const tr = document.createElement("tr");
+      tr.dataset.keyId = k.id;
+      tr.innerHTML = `
+        <td><code>${esc(k.provider)}</code></td>
+        <td>
+          <span class="model-display">${esc(k.model)}${k.base_url ? `<div class="muted" style="font-size:11px">${esc(k.base_url)}</div>` : ""}</span>
+          <span class="model-edit row hidden">
+            <input type="text" class="model-input" value="${esc(k.model)}" aria-label="Model id" style="flex:1;min-width:140px" autocomplete="off">
+            <button class="ghost" data-key-act="save">Save</button>
+            <button class="ghost" data-key-act="cancel">Cancel</button>
+          </span>
+        </td>
+        <td>${k.active ? '<span class="pill active">Active</span>' : '<span class="muted">Inactive</span>'}</td>
+        <td><span class="muted">${esc(fmtTs(k.created_at))}</span></td>
+        <td style="text-align:right;white-space:nowrap">
+          ${k.active ? "" : '<button class="ghost" data-key-act="activate">Activate</button>'}
+          <button class="ghost" data-key-act="edit">Edit</button>
+          <button class="bad" data-key-act="delete">Delete</button>
+        </td>`;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function wireKeyTable(tbody, getBase, reload, getStatus) {
+    tbody.addEventListener("click", async (ev) => {
+      const b = ev.target.closest("button[data-key-act]");
+      if (!b) return;
+      const tr = b.closest("tr"), act = b.dataset.keyAct;
+      const display = tr.querySelector(".model-display"), edit = tr.querySelector(".model-edit");
+      const input = tr.querySelector(".model-input");
+      const status = getStatus();
+      if (act === "edit") { display.classList.add("hidden"); edit.classList.remove("hidden"); input.focus(); return; }
+      if (act === "cancel") { input.value = input.defaultValue; edit.classList.add("hidden"); display.classList.remove("hidden"); return; }
+      const url = getBase() + "/" + encodeURIComponent(tr.dataset.keyId);
+      try {
+        if (act === "save") {
+          const model = input.value.trim();
+          if (!model) { status.textContent = "Model cannot be empty."; return; }
+          await api(url, { method: "PATCH", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ model }) });
+          status.textContent = "Model updated.";
+        } else if (act === "activate") {
+          await api(url + "/activate", { method: "POST" });
+          status.textContent = "Key activated.";
+        } else if (act === "delete") {
+          if (!confirm("Delete this API key configuration?")) return;
+          const out = await api(url, { method: "DELETE" });
+          status.textContent = out && out.needs_second_admin
+            ? "Delete sent to a second admin to confirm (Approvals → Waiting for a second admin)."
+            : "Key deleted.";
+        }
+        reload();
+      } catch (e) { status.textContent = "error: " + e.message; }
+    });
+    tbody.addEventListener("keydown", (ev) => {
+      if (!ev.target.matches(".model-input")) return;
+      const tr = ev.target.closest("tr");
+      if (ev.key === "Enter") { ev.preventDefault(); tr.querySelector('[data-key-act="save"]').click(); }
+      if (ev.key === "Escape") tr.querySelector('[data-key-act="cancel"]').click();
+    });
+  }
+
   // ---- Account LLM Keys (BYOK Plan Mk3) ----
   async function loadAccount() {
     const list = $("acc-keys");
     if (!list) return;
     try {
-      const keys = await api("/api/account/llm-keys");
-      list.innerHTML = "";
-      if (!keys.length) {
-        list.innerHTML = '<tr><td colspan="5" class="muted">No API keys configured (falling back to global provider or MockLLM).</td></tr>';
-        return;
-      }
-      keys.forEach((k) => {
-        const tr = document.createElement("tr");
-        tr.innerHTML = `
-          <td><code>${esc(k.provider)}</code></td>
-          <td>
-            ${k.active ? `
-              <span class="model-display" data-id="${k.id}" data-model="${esc(k.model)}">${esc(k.model)}${k.base_url ? `<div class="muted" style="font-size:11px">${esc(k.base_url)}</div>` : ""}</span>
-              <span class="model-edit hidden" data-id="${k.id}">
-                <input type="text" class="model-input" value="${esc(k.model)}" style="width:100%;padding:4px;font-size:12px">
-                <button class="ghost ml-2" onclick="saveModel('${k.id}')">Save</button>
-                <button class="ghost" onclick="cancelModel('${k.id}')">Cancel</button>
-              </span>
-            ` : `
-              <span class="model-display hidden" data-id="${k.id}" data-model="${esc(k.model)}">${esc(k.model)}${k.base_url ? `<div class="muted" style="font-size:11px">${esc(k.base_url)}</div>` : ""}</span>
-              <span class="model-edit" data-id="${k.id}">
-                <input type="text" class="model-input" value="${esc(k.model)}" style="width:100%;padding:4px;font-size:12px">
-                <button class="ghost ml-2" onclick="saveModel('${k.id}')">Save</button>
-                <button class="ghost" onclick="cancelModel('${k.id}')">Cancel</button>
-              </span>
-            `
-            }
-            }
-          </td>
-          <td>${k.active ? '<span class="pill active">Active</span>' : '<span class="muted">Inactive</span>'}</td>
-          <td><span class="muted">${esc((k.created_at || "").slice(0, 19).replace("T", " "))}</span></td>
-          <td style="text-align:right">
-            ${!k.active ? `<button class="ghost" onclick="activateAccountKey('${k.id}')">Activate</button>` : ""}
-            <button class="bad" onclick="deleteAccountKey('${k.id}')">Delete</button>
-            ${k.active ? `<button class="ghost" onclick="editModel('${k.id}')">Edit</button>` : ""}
-          </td>
-        `;
-        list.appendChild(tr);
-      });
+      renderKeyTable(list, await api("/api/account/llm-keys"),
+        "No API keys configured (falling back to global provider or MockLLM).");
     } catch (e) { list.innerHTML = `<tr><td colspan="5" style="color:var(--bad)">error: ${esc(e.message)}</td></tr>`; }
   }
+  wireKeyTable($("acc-keys"), () => "/api/account/llm-keys", loadAccount, () => $("acc-status"));
 
   // Custom endpoints and local servers take a base URL; hosted providers have a
   // fixed one. Local servers (LM Studio / Ollama / llama.cpp) need no API key.
@@ -688,75 +746,6 @@
     } catch (e) { status.textContent = "error: " + e.message; }
   }
 
-  // --- Inline model editing for saved keys ---
-
-  function editModel(keyId) {
-    const display = $(`#acc-keys span.model-display[data-id="${keyId}"]`);
-    const edit = $(`#acc-keys span.model-edit[data-id="${keyId}"]`);
-    if (display && edit) {
-      display.classList.add("hidden");
-      edit.classList.remove("hidden");
-      const input = edit.querySelector("input.model-input");
-      if (input) input.focus();
-    }
-  }
-
-  function saveModel(keyId) {
-    const input = $(`#acc-keys span.model-edit[data-id="${keyId}"] input.model-input`);
-    const buttonSave = $(`#acc-keys span.model-edit[data-id="${keyId}"] button:first-child`);
-    const buttonCancel = $(`#acc-keys span.model-edit[data-id="${keyId}"] button:last-child`);
-    if (!input || !buttonSave) return;
-    const newModel = input.value.trim();
-    if (!newModel) { alert("Model name cannot be empty"); cancelModel(keyId); return; }
-    // Send PATCH to update the model
-    api("/api/account/llm-keys/" + keyId, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: newModel })
-    }).then(() => {
-      loadAccount();
-      // Re-select the row to update display
-      const row = $(`#acc-keys tr`).filter((i, el) => el.dataset.id === keyId);
-      if (row) {
-        const display = row.querySelector("span.model-display");
-        const edit = row.querySelector("span.model-edit");
-        if (display) display.textContent = newModel;
-        if (edit) edit.querySelector("input.model-input").value = newModel;
-        display.classList.remove("hidden");
-        edit.classList.add("hidden");
-      }
-    }).catch(e => {
-      alert("Failed to save model: " + e.message);
-      cancelModel(keyId);
-    });
-  }
-
-  function cancelModel(keyId) {
-    const display = $(`#acc-keys span.model-display[data-id="${keyId}"]`);
-    const edit = $(`#acc-keys span.model-edit[data-id="${keyId}"]`);
-    if (display && edit) {
-      display.classList.remove("hidden");
-      edit.classList.add("hidden");
-      const input = edit.querySelector("input.model-input");
-      if (input) input.value = display.getAttribute("data-model") || "";
-    }
-  }
-
-  async function activateAccountKey(id) {
-    try {
-      await api(`/api/account/llm-keys/${id}/activate`, { method: "POST" });
-      loadAccount();
-    } catch (e) { alert(e.message); }
-  }
-
-  async function deleteAccountKey(id) {
-    if (!confirm("Delete this API key configuration?")) return;
-    try {
-      await api(`/api/account/llm-keys/${id}`, { method: "DELETE" });
-      loadAccount();
-    } catch (e) { alert(e.message); }
-  }
-
   $("acc-save")?.addEventListener("click", saveAccountKey);
   $("acc-detect")?.addEventListener("click", detectLocalModels);
 
@@ -788,8 +777,10 @@
           + `</td>`;
         list.appendChild(tr);
       });
+      // Only when the ACTIVE identity is an admin: the catalog calls are admin-only, and a
+      // 403 from them would sign the member out (api() treats 401/403 as a dead session).
       const adminBox = $("int-catalog-admin");
-      if (adminBox) adminBox.classList.toggle("hidden", !identities.admin);
+      if (adminBox) adminBox.classList.toggle("hidden", !isAdmin());
     } catch (e) {
       list.innerHTML = `<tr><td colspan="4" style="color:var(--bad)">error: ${esc(e.message)}</td></tr>`;
     }
@@ -827,8 +818,46 @@
       input.value = "";
       status.textContent = `${toolkit} enabled (${out.tools || 0} tools). Members can now connect it.`;
       loadIntegrations();
+      loadCatalog();
     } catch (e) { status.textContent = "error: " + e.message; }
   }
+
+  let catalogLoadSeq = 0;
+  async function loadCatalog() {
+    const list = $("int-catalog");
+    if (!list || !isAdmin()) return;
+    const seq = ++catalogLoadSeq;  // overlapping loads: only the newest may render
+    try {
+      const items = await api("/api/integrations/catalog");
+      if (seq !== catalogLoadSeq) return;
+      list.innerHTML = items.length ? "" : '<tr><td colspan="4" class="muted">No apps in the catalog yet — add one below.</td></tr>';
+      items.forEach((t) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td><code>${esc(t.toolkit)}</code></td>`
+          + `<td><span class="badge ${t.enabled ? "approved" : "rejected"}">${t.enabled ? "enabled" : "disabled"}</span></td>`
+          + `<td class="muted">${t.auth_config_id ? "ready" : "not set up"}</td>`
+          + `<td style="text-align:right"><button class="${t.enabled ? "bad" : "ok"}" data-cat="${esc(t.toolkit)}" data-enable="${t.enabled ? "0" : "1"}">${t.enabled ? "Disable" : "Enable"}</button></td>`;
+        list.appendChild(tr);
+      });
+    } catch (e) { list.innerHTML = `<tr><td colspan="4" style="color:var(--bad)">error: ${esc(e.message)}</td></tr>`; }
+  }
+
+  $("int-catalog")?.addEventListener("click", async (ev) => {
+    const b = ev.target.closest("button[data-cat]");
+    if (!b) return;
+    const toolkit = b.dataset.cat, enabled = b.dataset.enable === "1";
+    const status = $("int-catalog-status");
+    b.disabled = true;
+    try {
+      await api("/api/integrations/catalog/" + encodeURIComponent(toolkit), { method: "PATCH",
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
+      status.textContent = enabled
+        ? `${toolkit} enabled — members can connect it again.`
+        : `${toolkit} disabled — members can no longer connect it.`;
+      loadCatalog();
+      loadIntegrations();
+    } catch (e) { status.textContent = "error: " + e.message; b.disabled = false; }
+  });
 
   async function deleteIntegrationKey() {
     const status = $("int-status");
@@ -1371,9 +1400,15 @@
         <span class="pill">${esc(fmtTs(item.created_ts))}</span>
       </div>
       <div class="status muted">run_id <code>${esc(item.run_id || "")}</code></div>
+      ${item.impact ? `<div class="status"><span class="pill">impact</span> ${esc(item.impact)}</div>` : ""}
       ${banner}
       ${stepHistory(item)}
       <pre style="white-space:pre-wrap;color:var(--muted);font-size:12px">${esc(JSON.stringify(payload, null, 2))}</pre>
+      <div class="row" style="margin:-4px 0 10px">
+        <button class="ghost" data-reveal>Reveal full arguments</button>
+        <span class="muted" style="font-size:12px">Shows the unmasked request. Every reveal is written to the audit log.</span>
+      </div>
+      <pre class="unmasked hidden" data-full style="white-space:pre-wrap;font-size:12px"></pre>
       ${item.resumable_here === false
         ? `<div class="status" style="color:#fef08a">This run's saved chat state was not found (the chat was deleted?), so it can no longer be resumed.</div>`
         : `<div class="row" style="margin-bottom:8px">
@@ -1389,11 +1424,31 @@
         <span class="muted" style="font-size:12px">Unticked = approve once.</span>
       </div>`}
       <div class="status" data-status=""></div>`;
+    ctx.querySelector("[data-reveal]").addEventListener("click", (ev) => revealArgs(item.id, ctx, ev.currentTarget));
     if (item.resumable_here !== false) {
       ctx.querySelector("[data-act=approve]").addEventListener("click", () => decide(item.id, true, ctx, decideBase, reload));
       ctx.querySelector("[data-act=reject]").addEventListener("click", () => decide(item.id, false, ctx, decideBase, reload));
     }
     return ctx;
+  }
+
+  // Mk18 Phase B: the card shows masked args; the full payload is one audited call away
+  // (admins: any item; heads: their own department's).
+  async function revealArgs(id, card, btn) {
+    const pre = card.querySelector("[data-full]");
+    if (!pre.classList.contains("hidden")) {
+      pre.classList.add("hidden");
+      btn.textContent = "Reveal full arguments";
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const out = await api("/api/approvals/" + encodeURIComponent(id) + "/args");
+      pre.textContent = JSON.stringify(out.payload, null, 2);
+      pre.classList.remove("hidden");
+      btn.textContent = "Hide full arguments";
+    } catch (e) { card.querySelector("[data-status]").textContent = "error: " + e.message; }
+    btn.disabled = false;
   }
 
   async function decide(id, approve, card, decideBase, reload) {
@@ -1746,6 +1801,7 @@
           <td><span class="badge ${u.active ? "approved" : "rejected"}">${u.active ? "active" : "disabled"}</span></td>
           <td>
             <button class="ghost" data-edit="${esc(u.username)}">Edit</button>
+            <button class="ghost" data-keys="${esc(u.username)}">Keys</button>
             ${u.active
               ? `<button class="bad" data-deact="${esc(u.username)}">Deactivate</button>`
               : `<button class="ok" data-act="${esc(u.username)}">Re-activate</button>`}
@@ -1753,12 +1809,65 @@
         </tr>`).join("");
       $("users").querySelectorAll("[data-edit]").forEach((b) =>
         b.addEventListener("click", () => openMemberEditor(b.dataset.edit)));
+      $("users").querySelectorAll("[data-keys]").forEach((b) =>
+        b.addEventListener("click", () => openMemberKeys(b.dataset.keys)));
       $("users").querySelectorAll("[data-deact]").forEach((b) =>
         b.addEventListener("click", () => toggleActive(b.dataset.deact, false)));
       $("users").querySelectorAll("[data-act]").forEach((b) =>
         b.addEventListener("click", () => toggleActive(b.dataset.act, true)));
     } catch (e) { $("users").innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`; }
   }
+
+  // ---- A member's LLM keys, managed by an admin (Mk3 admin routes) ----
+  let keysMember = null;
+  function memberKeysBase() { return "/api/members/" + encodeURIComponent(keysMember) + "/llm-keys"; }
+
+  function openMemberKeys(username) {
+    keysMember = username;
+    $("member-keys").classList.remove("hidden");
+    $("member-keys-title").textContent = "LLM keys — " + username;
+    $("member-keys-status").textContent = "";
+    loadMemberKeys();
+    $("member-keys").scrollIntoView({ block: "nearest" });
+  }
+
+  async function loadMemberKeys() {
+    if (!keysMember) return;
+    const list = $("member-keys-list");
+    try {
+      renderKeyTable(list, await api(memberKeysBase()),
+        "No keys for this member — their chats use the global provider or MockLLM.");
+    } catch (e) { list.innerHTML = `<tr><td colspan="5" style="color:var(--bad)">error: ${esc(e.message)}</td></tr>`; }
+  }
+
+  async function addMemberKey() {
+    const status = $("member-keys-status");
+    const provider = $("mk-provider").value;
+    const model = $("mk-model").value.trim();
+    const apiKey = $("mk-key").value.trim();
+    const baseUrl = $("mk-base-url").value.trim();
+    if (!model || (!apiKey && !LOCAL_PROVIDERS.includes(provider))) {
+      status.textContent = "Model and API key are required.";
+      return;
+    }
+    try {
+      const out = await api(memberKeysBase(), { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider, model, api_key: apiKey, base_url: baseUrl }) });
+      $("mk-model").value = ""; $("mk-key").value = ""; $("mk-base-url").value = "";
+      status.textContent = out && out.needs_second_admin
+        ? "Sent to a second admin to confirm (Approvals → Waiting for a second admin)."
+        : "Key saved and set active for " + keysMember + ".";
+      loadMemberKeys();
+    } catch (e) { status.textContent = "error: " + e.message; }
+  }
+
+  $("mk-provider").innerHTML = $("acc-provider").innerHTML;  // one provider list, two forms
+  wireKeyTable($("member-keys-list"), memberKeysBase, loadMemberKeys, () => $("member-keys-status"));
+  $("mk-save").addEventListener("click", addMemberKey);
+  $("member-keys-close").addEventListener("click", () => {
+    keysMember = null;
+    $("member-keys").classList.add("hidden");
+  });
 
   // ---- Departments (plan_mk2 Phase 4) ----
 

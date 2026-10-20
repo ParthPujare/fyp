@@ -395,8 +395,11 @@ def recall_via_agent(team, claims, query, thread):
 
 
 def test_real_chats_are_recalled_by_the_same_department_and_never_by_another(team):
-    chat(team, BOB, "note: the zzcanaryhrchat reorganisation memo mentions layoffs in Q4", "user:bob@acme.com:c1")
-    chat(team, ALICE, "note: the zzcanarymktchat launch plan has budget 5000", "user:alice@acme.com:c1")
+    # Mk18 Phase G: only a turn that proposes TEAM facts ("our team ...") is a team moment
+    # whose transcript lands in dept/<own>; a plain 1:1 turn stays user-private.
+    chat(team, BOB, "our team uses the zzcanaryhrchat reorganisation memo that mentions layoffs in Q4", "user:bob@acme.com:c1")
+    chat(team, ALICE, "our team uses the zzcanarymktchat launch plan with budget 5000", "user:alice@acme.com:c1")
+    chat(team, ALICE, "note: my zzcanaryprivate draft has budget 7777", "user:alice@acme.com:c3")
 
     # another department asks for HR's chat: nothing of it comes back
     stolen = recall_via_agent(team, ALICE, "zzcanaryhrchat reorganisation", "user:alice@acme.com:c2")
@@ -409,17 +412,20 @@ def test_real_chats_are_recalled_by_the_same_department_and_never_by_another(tea
     # ...and the reverse direction is closed too: HR cannot read marketing's chat
     closed = recall_via_agent(team, BOB, "zzcanarymktchat launch", "user:bob@acme.com:c2")
     assert "budget 5000" not in closed["content"]
+    # ...and a private 1:1 turn is not team memory: a department peer cannot recall it
+    private = recall_via_agent(team, team.mia, "zzcanaryprivate draft", "user:mia@acme.com:c2")
+    assert "7777" not in private["content"]
 
 
 def test_recalled_transcripts_are_still_pii_masked(team):
-    chat(team, ALICE, "note: zzcanarypii employee ssn 123-45-6789 mail hr@acme.com", "user:alice@acme.com:pii")
+    chat(team, ALICE, "our team uses zzcanarypii employee ssn 123-45-6789 mail hr@acme.com", "user:alice@acme.com:pii")
     found = recall_via_agent(team, team.mia, "zzcanarypii employee", "user:mia@acme.com:pii")
     assert "123-45-6789" not in found["content"] and "***" in found["content"]  # marketing may not read SSNs
 
 
 def test_a_resumed_run_does_not_duplicate_its_transcript(team):
     """`reflect` runs again when a run resumes after an approval; recall must show ONE transcript."""
-    res = chat(team, ALICE, "note: zzcanaryonce appears once", "user:alice@acme.com:once")
+    res = chat(team, ALICE, "our team uses zzcanaryonce and it appears once", "user:alice@acme.com:once")
     team.episodic.append_transcript("dept/marketing", res.run_id, {"sub": "alice@acme.com"}, "a re-run of reflect")
     assert len(team.episodic.search("zzcanaryonce", ["dept/marketing"])) == 1
 

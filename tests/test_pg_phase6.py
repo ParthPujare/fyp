@@ -129,7 +129,9 @@ def test_database_enforcer_answers_exactly_like_the_file(pg):
     # the built Casbin instances (the version guard is covered by the propagation tests below)
     diffs = [q for q in questions if on_file._enforcer.enforce(*q) != on_db._enforcer.enforce(*q)]
     assert diffs == []
-    assert sum(on_db._enforcer.enforce(*q) for q in questions) > 100  # and it does grant things
+    # ...and it does grant things. Mk18 removed the admin wildcard (explicit admin rows only),
+    # which took the demo matrix from >100 grants down to 87; 50 still proves non-vacuity.
+    assert sum(on_db._enforcer.enforce(*q) for q in questions) > 50
 
 
 def test_seeded_rules_are_the_files_rules_in_order(pg):
