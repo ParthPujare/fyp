@@ -27,7 +27,7 @@ def login(page: Page, dash, who: tuple[str, str]) -> None:
     page.fill("#pass", who[1])
     page.click("#signin")
     expect(page.locator("body")).not_to_have_class(LOGGED_OUT)
-    page.wait_for_load_state("networkidle")  # the default tab's data has landed
+    expect(page.locator("#nav .nav-item").first).to_be_visible()
 
 
 def open_tab(page: Page, label: str) -> None:
@@ -260,7 +260,8 @@ def test_admin_disables_and_re_enables_a_catalog_app(page: Page, dash):
     expect(page.locator("#int-apps")).not_to_contain_text("notion")  # gone for members too
     assert [t["enabled"] for t in dash.members.list_toolkits(enabled_only=False) if t["toolkit"] == "notion"] == [False]
 
-    page.wait_for_load_state("networkidle")  # both re-renders done: never click a row mid-swap
+    # loadCatalog() drops stale responses, so the row on screen is the final one
+    expect(page.locator("#int-catalog tr", has_text="notion").get_by_role("button", name="Enable")).to_be_enabled()
     page.locator("#int-catalog tr", has_text="notion").get_by_role("button", name="Enable").click()
     expect(page.locator("#int-catalog-status")).to_contain_text("notion enabled")
     expect(page.locator("#int-apps")).to_contain_text("notion")

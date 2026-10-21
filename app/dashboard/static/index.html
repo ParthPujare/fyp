@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Harness — Zero-Trust Console</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -24,14 +25,10 @@
   </div>
   <div class="side-label">Navigation</div>
   <nav id="nav"></nav>
-  <div class="side-foot">
-    <div class="side-label">Sessions</div>
-    <span class="row" id="switcher"></span>
-    <span class="muted" id="who"></span>
-  </div>
 </aside>
 <div id="stage">
 <div id="topbar">
+  <button id="nav-toggle" class="ghost" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Collapse navigation" title="Collapse navigation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg></button>
   <span id="crumb">harness <b>/</b> <span id="crumb-view">console</span></span>
   <span class="sys" id="sys"><i class="dot"></i><span>checking…</span></span>
   <span id="clock"></span>
@@ -51,15 +48,13 @@
       <input type="text" id="user" placeholder="user@acme.com" autocomplete="username">
       <input type="password" id="pass" placeholder="password" autocomplete="current-password">
       <button id="signin">Sign in</button>
-      <button class="ghost hidden" id="login-cancel">Cancel</button>
     </div>
-    <div class="status muted" id="login-hint">Mock login for any active member, e.g. alice@acme.com / alice123 (marketing) or admin@acme.com / admin123.</div>
   </section>
 
   <section id="content-view" class="hidden">
     <div id="chat-view">
       <div class="row" style="margin-bottom:12px; justify-content:space-between;">
-        <h2>Chat <span class="muted" style="font-weight:normal;font-size:13px" id="chat-identity"></span></h2>
+        <h2>Chat</h2>
         <div class="row">
           <span class="muted" style="font-size:12px">Model:</span>
           <select id="chat-model-select">
@@ -74,16 +69,19 @@
         </div>
         <div id="chat-main">
           <div id="chat-transcript"></div>
+          <div id="chat-attachments" class="chips hidden" aria-label="Attached files"></div>
           <div class="row" style="align-items:flex-end">
-            <textarea id="chat-msg" placeholder="message… (Enter to send, Shift+Enter for newline)"></textarea>
-            <button id="chat-send">Send</button>
+            <button id="chat-attach" class="ghost" type="button" aria-label="Attach text files" title="Attach .txt, .md, .csv, .json or .log — up to 3 files, 200 KB each"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+            <input type="file" id="chat-file" multiple accept=".txt,.md,.csv,.json,.log" hidden>
+            <textarea id="chat-msg" placeholder="message…" aria-label="Message (Enter sends, Shift+Enter adds a line)"></textarea>
+            <button id="chat-send" aria-label="Send" title="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></button>
           </div>
           <div class="status muted" id="chat-status"></div>
         </div>
       </div>
     </div>
     <div id="account-view" class="hidden">
-      <h2>LLM API Keys (BYOK)</h2>
+      <h2>LLM API Keys</h2>
       <div class="card">
         <h3>Add or update LLM API key</h3>
         <div class="row">
@@ -108,23 +106,22 @@
           <input type="text" id="acc-base-url" placeholder="Base URL — e.g. http://localhost:1234/v1" style="flex:1" autocomplete="off">
           <button id="acc-detect" class="ghost hidden" type="button" title="List models loaded on the local server">Detect</button>
         </div>
-        <div class="muted" style="margin-top:6px;font-size:12px">Tip: pick a model from the dropdown or type any custom id — OpenAI: <code>gpt-4o-mini</code> | Gemini: <code>gemini-3.6-flash</code> / <code>gemini-3.5-flash-lite</code> | Groq: <code>llama-3.3-70b-versatile</code> | Anthropic: <code>claude-3-5-sonnet-20241022</code> | OpenRouter: <code>openai/gpt-4o-mini</code> | Zen free: <code>muse-spark-1.3-contributor-free</code> | Local: pick <code>LM Studio</code>, press <code>Detect</code>, no key needed</div>
         <div class="muted hidden" id="acc-zen-note" style="margin-top:6px;font-size:12px">Zen <code>contributor-free</code> models are free in exchange for letting Meta train on your prompts/completions.</div>
         <div class="status" id="acc-status"></div>
       </div>
       <h3>Your API Key Configurations</h3>
       <table><thead><tr><th>Provider</th><th>Model</th><th>Status</th><th>Created</th><th></th></tr></thead>
         <tbody id="acc-keys"></tbody></table>
-      <h2 style="margin-top:24px">Integrations (Composio)</h2>
+      <h2 style="margin-top:24px">Integrations</h2>
       <div class="row" style="margin-bottom:8px">
-        <a href="/static/composio-setup.html" target="_blank"><button class="ghost" type="button">Composio setup guide</button></a>
-        <span class="muted">New here? Open the guide, copy 3 values, paste below.</span>
+        <a href="/static/composio-setup.html" target="_blank"><button class="ghost" type="button">Setup guide</button></a>
+        <span class="muted">New here? Open the guide, then paste your key below.</span>
       </div>
       <div class="card">
-        <h3>Step 1 — Paste your Composio key (yours only, never shown back)</h3>
-        <div class="muted" style="font-size:12px">Get it: <a href="/static/composio-setup.html" target="_blank">setup guide</a> → app.composio.dev → API keys → copy → paste here.</div>
+        <h3>Step 1 — Paste your integration key</h3>
+        <div class="muted" style="font-size:12px">Get it: <a href="/static/composio-setup.html" target="_blank">setup guide</a> → your integration provider's API keys page → copy → paste here.</div>
         <div class="row" style="margin-top:8px">
-          <input type="password" id="int-key" placeholder="Composio API key" style="flex:1" autocomplete="off">
+          <input type="password" id="int-key" placeholder="Integration key" style="flex:1" autocomplete="off">
           <button id="int-key-save">Save & check key</button>
           <button class="bad" id="int-key-delete">Remove</button>
         </div>
@@ -196,7 +193,7 @@
       </div>
     </div>
     <div id="allowlist-view" class="hidden">
-      <h2>Always allowed <span class="muted" style="font-weight:normal;font-size:13px">(approve-once rules: one member, one action, one exact set of arguments)</span></h2>
+      <h2>Always allowed</h2>
       <div class="row" style="margin-bottom:12px">
         <input type="text" id="allow-member" placeholder="filter by member" autocomplete="off">
         <input type="text" id="allow-dept" placeholder="filter by department" autocomplete="off">
@@ -211,7 +208,6 @@
       <h2>Members</h2>
       <div class="row" style="margin-bottom:12px">
         <button id="add-member">+ Add member</button>
-        <span class="muted">Username is immutable; role/dept/scopes are editable. Passwords are hashed (scrypt) — only a reset is shown back.</span>
       </div>
       <div id="member-editor" class="hidden">
         <h3 id="member-editor-title">Edit member</h3>
@@ -219,9 +215,13 @@
           <input type="text" id="mem-username" placeholder="new@acme.com" autocomplete="off">
           <input type="password" id="mem-password" placeholder="password (add/reset only)" autocomplete="new-password">
           <button id="mem-gen" class="ghost">Generate</button>
-          <input type="text" id="mem-role" placeholder="role (e.g. marketing_agent)" autocomplete="off">
-          <select id="mem-dept"></select>
-          <input type="text" id="mem-scopes" placeholder="scopes — comma separated (crm:read, crm:create)" autocomplete="off">
+          <select id="mem-dept" aria-label="Department"></select>
+          <select id="mem-role" aria-label="Role"></select>
+          <div class="scope-picker">
+            <div class="chips" id="mem-scope-chips" aria-label="Selected scopes"></div>
+            <select id="mem-scope-add" aria-label="Add a scope"></select>
+            <input type="hidden" id="mem-scopes">
+          </div>
         </div>
         <div class="row" style="margin-top:8px">
           <button id="member-save">Save</button>
@@ -252,24 +252,30 @@
     <div id="depts-view" class="hidden">
       <h2>Departments</h2>
       <div class="row" style="margin-bottom:12px">
-        <button id="add-dept">+ Register department</button>
-        <span class="muted">Registration stores the dept record and adds the member + head policy rows (own resources, dept/user memory, recall) so the roles are immediately grantable.</span>
+        <button id="add-dept">+ Add department</button>
       </div>
       <div id="dept-editor" class="hidden">
-        <h3>Register department</h3>
-        <div class="row">
-          <input type="text" id="dept-name" placeholder="name (lowercase, e.g. legal)" autocomplete="off">
-          <input type="text" id="dept-service" placeholder="service label (e.g. legal)" autocomplete="off">
-          <input type="text" id="dept-url" placeholder="service URL, e.g. http://127.0.0.1:8007" autocomplete="off">
-          <input type="text" id="dept-resources" placeholder="resources — comma separated" autocomplete="off">
-          <input type="text" id="dept-role" placeholder="role (default: <name>_agent)" autocomplete="off">
-          <select id="dept-mode" title="Who approves this department's requests">
-            <option value="head-only">head-only</option>
-            <option value="head+admin">head + admin</option>
-          </select>
+        <h3>Add department</h3>
+        <div class="form-grid">
+          <div class="field"><label for="dept-name">Name</label>
+            <input type="text" id="dept-name" placeholder="e.g. legal" autocomplete="off"></div>
+          <div class="field"><label for="dept-service">Service label</label>
+            <input type="text" id="dept-service" placeholder="e.g. legal" autocomplete="off"></div>
+          <div class="field"><label for="dept-url">Service URL</label>
+            <input type="text" id="dept-url" placeholder="http://127.0.0.1:8007" autocomplete="off"></div>
+          <div class="field"><label for="dept-resources">Resources</label>
+            <input type="text" id="dept-resources" placeholder="comma separated" autocomplete="off"></div>
+          <div class="field"><label for="dept-role">Member role</label>
+            <input type="text" id="dept-role" placeholder="default: <name>_agent" autocomplete="off"></div>
+          <div class="field"><label for="dept-mode">Approvals</label>
+            <select id="dept-mode">
+              <option value="head-only">head-only</option>
+              <option value="head+admin">head + admin</option>
+            </select></div>
         </div>
-        <div class="row" style="margin-top:8px">
-          <button id="dept-save">Register</button>
+        <div class="muted" style="font-size:12px;margin-top:10px">Adding a department also adds the member and head policy rows (own resources, department and user memory, recall), so both roles can be granted straight away.</div>
+        <div class="row" style="margin-top:10px">
+          <button id="dept-save">Add</button>
           <button class="ghost" id="dept-cancel">Cancel</button>
         </div>
         <div class="status" id="dept-status"></div>
@@ -280,15 +286,34 @@
       <div class="status" id="depts-status"></div>
     </div>
     <div id="skills-view" class="hidden">
-      <h2>Skills <span class="muted" style="font-weight:normal;font-size:13px">(folder/markdown registry — edits hot-reload on the next run)</span></h2>
+      <h2>Skills</h2>
       <div class="row" style="margin-bottom:12px">
         <button id="new-skill">+ New skill</button>
-        <span class="muted">A skill needs a <code>skill_&lt;name&gt;</code> row in <code>policy.csv</code> to be usable by a role.</span>
+        <button class="ghost" id="gen-skill">Generate draft</button>
+      </div>
+      <div id="skill-gen" class="card hidden">
+        <h3>Generate a draft</h3>
+        <div class="form-grid">
+          <div class="field"><label for="gen-scope">Scope</label><select id="gen-scope"></select></div>
+        </div>
+        <div class="field" style="margin-top:10px"><label for="gen-brief">What should the skill do?</label>
+          <textarea id="gen-brief" rows="3" placeholder="e.g. find a customer, then create a campaign for them"></textarea></div>
+        <div class="grant-group">
+          <span class="field-label" id="gen-grant-label">Grant to</span>
+          <div class="chips" id="gen-grant" role="group" aria-labelledby="gen-grant-label"></div>
+          <span class="muted" style="font-size:12px">Admins can always use a skill. Tick a role to let it use this one.</span>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button id="gen-run">Generate</button>
+          <button class="ghost" id="gen-cancel">Cancel</button>
+        </div>
+        <div class="status" id="gen-status"></div>
       </div>
       <div id="skills"></div>
       <div id="skill-editor" class="hidden">
         <h3 id="skill-editor-title">Edit skill</h3>
         <textarea id="skill-content" class="code-editor" rows="24"></textarea>
+        <div class="status muted" id="skill-grant-note"></div>
         <div class="row" style="margin-top:8px">
           <button id="save-skill">Save</button>
           <button class="ghost" id="cancel-skill">Cancel</button>
@@ -300,10 +325,26 @@
     <div id="memory-view" class="hidden">
       <h2>Memory browser</h2>
       <div id="memory"></div>
+      <div class="row memory-filters">
+        <select id="memory-view-select" aria-label="Show memory for"></select>
+        <input type="search" id="memory-search" placeholder="Search facts…" aria-label="Search facts" autocomplete="off">
+        <span class="muted" id="memory-count"></span>
+      </div>
+      <div id="memory-scopes"></div>
     </div>
     <div id="ops-view" class="hidden">
       <div id="ops-runs-view">
-        <h2>Run trajectories <span class="muted" style="font-weight:normal;font-size:13px">(records everything the model saw — filtered by source)</span></h2>
+        <h2>Run trajectories</h2>
+        <div class="ops-summary" id="ops-summary" aria-live="polite"></div>
+        <div class="row ops-toolbar">
+          <input type="search" id="ops-search" placeholder="Search runs…" aria-label="Search runs" autocomplete="off">
+          <select id="ops-outcome" aria-label="Outcome"></select>
+          <select id="ops-actor" aria-label="Actor"></select>
+          <input type="date" id="ops-from" aria-label="From date">
+          <input type="date" id="ops-to" aria-label="To date">
+          <button class="ghost" id="ops-refresh" type="button">Refresh</button>
+        </div>
+        <div class="muted" id="ops-count"></div>
         <table><thead><tr><th>Run</th><th>Started</th><th>Actor</th><th>Events</th><th>Outcome</th><th></th></tr></thead>
           <tbody id="ops-runs"></tbody></table>
       </div>
@@ -324,45 +365,54 @@
 </div><!-- #shell -->
 <script>
   const $ = (id) => document.getElementById(id);
-  const TOKENS = { admin: "harness_admin_token", member: "harness_member_token" };
-  const CLAIMS = { admin: "harness_admin_claims", member: "harness_member_claims" };
+  // Mk21 Decision 1B: one identity at a time. Its claims (UI data only: the token is an httpOnly
+  // cookie since Mk18 Phase D) live under one key; the pre-Mk21 two-slot keys are migrated once.
+  const CLAIMS_KEY = "harness_claims";
+  const LEGACY_CLAIMS = { admin: "harness_admin_claims", member: "harness_member_claims" };
+  const LEGACY_KEYS = ["harness_admin_claims", "harness_member_claims", "harness_active",
+                       "harness_admin_token", "harness_member_token"];
   const TAB_LABELS = { chat: "Chat", account: "Account", approvals: "Approvals", "dept-approvals": "Dept approvals",
                        "dept-team": "My department", users: "Members", depts: "Departments", allowlist: "Always allowed",
                        skills: "Skills", memory: "Memory", ops: "Ops" };
   const ALL_TABS = Object.keys(TAB_LABELS);
   const ADMIN_TABS = ["approvals", "users", "depts", "allowlist", "skills", "memory", "ops"];
 
-  let identities = { admin: null, member: null };
-  let active = null;          // "admin" | "member" | null
+  let identity = null;        // { token, claims } | null; a new sign-in replaces it
   let currentTab = null;
-  let loginMode = null;       // null | "admin" | "member" (signing in a second identity)
 
   // ---- session state -----------------------------------------------------
 
-  function labelFor(claims) { return claims && claims.role === "admin" ? "admin" : "member"; }
-
-  function restoreSessions() {
-    // Mk18 Phase D: tokens live in httpOnly cookies (XSS-proof); localStorage
-    // keeps claims (UI data) only. Fresh loads rely on cookies until next login.
-    ["admin", "member"].forEach((label) => {
-      const raw = localStorage.getItem(CLAIMS[label]);
-      if (raw) { try { identities[label] = { token: null, claims: JSON.parse(raw) }; } catch { identities[label] = null; } }
-    });
-    const saved = localStorage.getItem("harness_active");
-    if (saved && identities[saved]) active = saved;
-    else if (identities.member) active = "member";
-    else if (identities.admin) active = "admin";
-    else active = null;
-    if (active) currentTab = defaultTabFor(identities[active].claims.role);
+  function readStore(key) { try { return localStorage.getItem(key); } catch { return null; } }
+  function writeStore(key, value) {
+    try { if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value); }
+    catch { /* storage blocked: the cookie session still works for this page */ }
+  }
+  function activeSlotCookie() {
+    const m = document.cookie.match(/(?:^|;\s*)harness_token_active=([^;]*)/);
+    return m ? decodeURIComponent(m[1]) : null;
   }
 
-  function setIdentity(label, claims, token) {
-    // Mk18 Phase D: token stays in memory for this page lifetime; the server
-    // also set the httpOnly cookie, which is what survives reloads.
-    identities[label] = { token: token || null, claims };
-    csrfToken = null;  // Mk20: CSRF tokens are per member — never reuse another identity's
-    localStorage.setItem(CLAIMS[label], JSON.stringify(claims));
-    localStorage.removeItem(TOKENS[label]);
+  function restoreSession() {
+    let raw = readStore(CLAIMS_KEY);
+    if (!raw) {
+      // Mk21 migration: keep a pre-Mk21 browser signed in. Take the slot the server will really
+      // use (the non-httpOnly active-slot cookie), else the old page marker.
+      const label = activeSlotCookie() || readStore("harness_active");
+      raw = (label && LEGACY_CLAIMS[label] && readStore(LEGACY_CLAIMS[label])) || null;
+      if (raw) writeStore(CLAIMS_KEY, raw);
+    }
+    LEGACY_KEYS.forEach((k) => writeStore(k, null));
+    try { identity = raw ? { token: null, claims: JSON.parse(raw) } : null; } catch { identity = null; }
+    if (identity && !(identity.claims && identity.claims.sub)) identity = null;
+    if (identity) currentTab = defaultTabFor(identity.claims.role);
+  }
+
+  function setIdentity(claims, token) {
+    // Mk18 Phase D: the token stays in memory for this page lifetime; the server also set the
+    // httpOnly cookie, which is what survives reloads.
+    identity = { token: token || null, claims };
+    csrfToken = null;  // Mk20: CSRF tokens are per member, never reuse another identity token
+    writeStore(CLAIMS_KEY, JSON.stringify(claims));
   }
 
   // Mk18 Phase D: CSRF token for cookie-session mutating requests.
@@ -378,52 +428,36 @@
     } catch { return null; }
   }
 
-  function invalidate(label) {
-    identities[label] = null;
-    localStorage.removeItem(TOKENS[label]);
-    localStorage.removeItem(CLAIMS[label]);
-    const staleCsrf = csrfToken;
-    csrfToken = null;
+  // /api/logout is deliberately NOT CSRF-exempt (Mk18 Phase D), so a page that never made a
+  // write (and so never fetched a token) used to send logout without one: 403, and the session
+  // cookies survived until expiry. Fetch a token first. Uses locals only, so a late answer can
+  // never leak an old identity's token into the next session.
+  let pendingLogout = null;
+  async function endServerSession(knownCsrf) {
     try {
+      let csrf = knownCsrf;
+      if (!csrf) {
+        const r = await fetch("/api/csrf", { credentials: "same-origin" });
+        if (r.ok) csrf = (await r.json()).csrf_token || null;
+      }
       const h = {};
-      if (staleCsrf) h["X-CSRF-Token"] = staleCsrf;
-      fetch("/api/logout", { method: "POST", credentials: "same-origin", headers: h });
-    } catch { /* best-effort */ }
-    if (active === label) {
-      active = identities.member ? "member" : identities.admin ? "admin" : null;
-      localStorage.setItem("harness_active", active || "");
-    }
-    loginMode = null;
-    resetChatState();
-    render();
-    if (active) { currentTab = defaultTabFor(identities[active].claims.role); loadCurrent(); }
+      if (csrf) h["X-CSRF-Token"] = csrf;
+      await fetch("/api/logout", { method: "POST", credentials: "same-origin", headers: h });
+    } catch { /* best-effort: a dead session has nothing left to clear */ }
   }
 
-  async function switchTo(label) {
-    if (!identities[label]) return;
-    // Mk20: tell the server which cookie slot is active (after a reload the tokens live
-    // only in httpOnly cookies, so without this requests keep going out as whoever
-    // signed in last). Sent with the CURRENT slot's CSRF token, before it is dropped.
-    try {
-      const headers = { "content-type": "application/json" };
-      const csrf = await ensureCsrf();
-      if (csrf) headers["X-CSRF-Token"] = csrf;
-      // Plain fetch, not api(): a failed switch must not sign the CURRENT identity out.
-      await fetch("/api/session/switch", { method: "POST", headers, credentials: "same-origin",
-        body: JSON.stringify({ label }) });
-    } catch (e) { /* in-memory Bearer tokens (same page lifetime) still work without it */ }
-    active = label;
-    csrfToken = null;  // Mk20: the other slot is a different member with its own CSRF token
-    localStorage.setItem("harness_active", label);
-    loginMode = null;
+  // Clear the identity, end the server session (all three cookies), back to the login gate.
+  function invalidate() {
+    identity = null;
+    writeStore(CLAIMS_KEY, null);
+    pendingLogout = endServerSession(csrfToken);
+    csrfToken = null;
+    currentTab = null;
     resetChatState();
-    currentTab = defaultTabFor(identities[active].claims.role);
     render();
-    loadCurrent();
   }
 
-  function logoutActive() { invalidate(active); }
-  function openLogin(label) { loginMode = label; render(); setTimeout(() => $("user").focus(), 0); }
+  function logout() { invalidate(); }
 
   // ---- api ----------------------------------------------------------------
 
@@ -439,8 +473,7 @@
 
   async function api(path, opts = {}, csrfRetried = false) {
     const headers = Object.assign({}, opts.headers || {});
-    const id = identities[active];
-    if (id && id.token) headers["Authorization"] = "Bearer " + id.token;
+    if (identity && identity.token) headers["Authorization"] = "Bearer " + identity.token;
     const method = (opts.method || "GET").toUpperCase();
     if (method !== "GET" && method !== "HEAD") {
       const csrf = await ensureCsrf();
@@ -453,7 +486,7 @@
       const detail = await resp.clone().text().catch(() => "");
       if (detail.includes("CSRF")) { csrfToken = null; return api(path, opts, true); }
     }
-    if (resp.status === 401 || resp.status === 403) { invalidate(active); throw new Error("unauthorized"); }
+    if (resp.status === 401 || resp.status === 403) { invalidate(); throw new Error("unauthorized"); }
     if (!resp.ok) { throw new Error(await errorMessage(resp)); }
     return resp.json();
   }
@@ -469,8 +502,8 @@
   }
 
   function tabsForRole() {
-    if (!active || !identities[active]) return [];
-    const role = identities[active].claims.role;
+    if (!identity) return [];
+    const role = identity.claims.role;
     if (role === "admin") return ADMIN_TABS;
     // Mk12: dept heads get their own approvals queue, separate from the admin queue.
     // Mk15: plus their department (roster, scoped member management, always-allowed
@@ -482,27 +515,18 @@
   }
 
   function render() {
-    const hasActive = active !== null && identities[active] !== null;
-    const showLogin = !hasActive || loginMode !== null;
-    $("login-view").classList.toggle("hidden", !showLogin);
-    $("content-view").classList.toggle("hidden", !hasActive);
-    document.body.classList.toggle("logged-out", !hasActive);
-    $("login-cancel").classList.toggle("hidden", !hasActive || loginMode === null);
-    if (loginMode) $("login-title").textContent = "Sign in — add " + loginMode + " session";
-    else $("login-title").textContent = "Sign in";
-    $("who").textContent = hasActive
-      ? `active: ${identities[active].claims.sub} · ${identities[active].claims.role} (${identities[active].claims.dept})`
-      : "";
-    $("chat-identity").textContent = hasActive ? `(chats as ${identities[active].claims.sub})` : "";
+    const signedIn = identity !== null;
+    $("login-view").classList.toggle("hidden", signedIn);
+    $("content-view").classList.toggle("hidden", !signedIn);
+    document.body.classList.toggle("logged-out", !signedIn);
     renderNav();
-    renderSwitcher();
-    if (hasActive) { show(currentTab || "chat"); }
+    if (signedIn) { show(currentTab || "chat"); }
   }
 
   function renderNav() {
     const nav = $("nav");
     nav.innerHTML = "";
-    if (!active || !identities[active]) return;
+    if (!identity) return;
     let tabs = ["chat", "account"].concat(tabsForRole());
     tabs.forEach((t) => {
       const b = navButton(t, TAB_LABELS[t]);
@@ -512,7 +536,7 @@
     });
     const lo = navButton("logout", "Log out");
     lo.classList.add("logout");
-    lo.addEventListener("click", logoutActive);
+    lo.addEventListener("click", logout);
     nav.appendChild(lo);
   }
 
@@ -536,24 +560,12 @@
     const b = document.createElement("button");
     b.className = "nav-item";
     b.dataset.tab = tab;
+    b.title = label;  // Mk21: the only label left visible when the rail is collapsed
     b.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TAB_ICONS[tab] || ""}</svg>`;
     const span = document.createElement("span");
     span.textContent = label;
     b.appendChild(span);
     return b;
-  }
-
-  function renderSwitcher() {
-    const host = $("switcher");
-    host.innerHTML = "";
-    ["admin", "member"].forEach((label) => {
-      const id = identities[label];
-      const chip = document.createElement("span");
-      chip.className = "pill clickable" + (active === label ? " active" : "");
-      chip.textContent = label + (id ? ": " + id.claims.sub : " (+ add)");
-      chip.addEventListener("click", () => (id ? switchTo(label) : openLogin(label)));
-      host.appendChild(chip);
-    });
   }
 
   let viewEnterTimer = null;
@@ -657,7 +669,7 @@
     });
   }
 
-  // ---- Account LLM Keys (BYOK Plan Mk3) ----
+  // ---- Account LLM keys: each member brings their own (Plan Mk3) ----
   async function loadAccount() {
     const list = $("acc-keys");
     if (!list) return;
@@ -756,7 +768,7 @@
     try {
       const out = await api("/api/integrations/status");
       const keyStatus = $("int-key-status");
-      if (keyStatus) keyStatus.textContent = out.has_key ? "Step 1 done — key saved. Now connect apps below." : "Step 1: paste your Composio key above, then connect apps.";
+      if (keyStatus) keyStatus.textContent = out.has_key ? "Step 1 done — key saved. Now connect apps below." : "Step 1: paste your integration key above, then connect apps.";
       const q = ($("int-search")?.value || "").trim().toLowerCase();
       list.innerHTML = "";
       (out.apps || [])
@@ -789,7 +801,7 @@
   async function saveIntegrationKey() {
     const key = $("int-key").value.trim();
     const status = $("int-status");
-    if (!key) { status.textContent = "Paste your Composio API key first (see setup guide)."; return; }
+    if (!key) { status.textContent = "Paste your integration key first (see setup guide)."; return; }
     status.textContent = "Checking key…";
     try {
       const out = await api("/api/integrations/key", {
@@ -863,7 +875,7 @@
     const status = $("int-status");
     try {
       await api("/api/integrations/key", { method: "DELETE" });
-      status.textContent = "Composio key removed.";
+      status.textContent = "Integration key removed.";
       loadIntegrations();
     } catch (e) { status.textContent = "error: " + e.message; }
   }
@@ -977,7 +989,7 @@
   syncModelList();
   syncBaseUrlField();
 
-  function loadCurrent() { if (active) load(currentTab); }
+  function loadCurrent() { if (identity) load(currentTab); }
 
   function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
 
@@ -985,18 +997,17 @@
 
   async function doLogin() {
     try {
+      // A logout still in flight must land BEFORE this login, or it would clear the new cookies.
+      if (pendingLogout) { await pendingLogout; pendingLogout = null; }
       const resp = await fetch("/api/login", { method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ username: $("user").value, password: $("pass").value }),
         credentials: "same-origin" });
       if (!resp.ok) throw new Error("invalid credentials");
       const body = await resp.json();
-      const label = labelFor(body.claims);
-      setIdentity(label, body.claims, body.access_token);
-      active = label;
-      localStorage.setItem("harness_active", label);
-      loginMode = null;
+      setIdentity(body.claims, body.access_token);  // replaces any previous identity
       $("user").value = ""; $("pass").value = "";
+      resetChatState();
       currentTab = defaultTabFor(body.claims.role);
       render();
       loadCurrent();
@@ -1009,7 +1020,7 @@
   // Mk20: remember the open chat per identity so a reload reopens it (UI convenience only;
   // storage can be unavailable — then the newest chat opens instead).
   function lastThreadKey() {
-    const sub = identities[active] && identities[active].claims && identities[active].claims.sub;
+    const sub = identity && identity.claims && identity.claims.sub;
     return sub ? "harness_last_thread:" + sub : null;
   }
   function lastThreadFor() {
@@ -1046,6 +1057,8 @@
     currentThreadId = null;
     pendingNewThread = null;
     stopSuspendWatch();
+    chatAttachments = [];  // Mk21: unsent files never carry over to the next identity
+    renderAttachments();
     const transcript = $("chat-transcript");
     if (transcript) transcript.innerHTML = "";
     const status = $("chat-status");
@@ -1166,8 +1179,8 @@
         // 1. Owner-side resume: a decision made on another PC shows up here first.
         try {
           const items = await api("/api/approvals/by-thread/" + encodeURIComponent(threadId));
-          const own = (items || []).filter((a) => a && a.actor && identities[active]
-            && a.actor.sub === identities[active].claims.sub);
+          const own = (items || []).filter((a) => a && a.actor && identity
+            && a.actor.sub === identity.claims.sub);
           // Mk15 two-step chain: keep polling the same approval through step 1 -> step 2;
           // it only becomes resumable once the last step is decided.
           const waiting = own.find((a) => a.status === "pending");
@@ -1249,7 +1262,7 @@
   $("new-thread")?.addEventListener("click", () => {
     // Client-generated id so the row appears immediately; the server persists
     // it on the first send by echoing the same thread_id back.
-    const sub = identities[active]?.claims?.sub || "user";
+    const sub = identity?.claims?.sub || "user";
     const nid = "user:" + sub + ":" + Math.random().toString(36).substring(2, 8);
     pendingNewThread = nid;
     currentThreadId = nid;
@@ -1261,10 +1274,80 @@
     $("chat-msg").focus();
   });
 
+  // ---- Mk21 Decisions 3A/3B: text attachments, appended to the message as fenced blocks.
+  // No new endpoint, storage or approval gate: the content goes through POST /api/chat like any
+  // typed text, so the guardrails, the PII sanitizer and the sanitised PROMPT trace all see it.
+  const ATTACH_EXT = [".txt", ".md", ".csv", ".json", ".log"];
+  const ATTACH_MAX_BYTES = 200 * 1024;
+  const ATTACH_MAX_FILES = 3;
+  let chatAttachments = [];   // [{name, size, text}] for the message being written
+
+  function fmtSize(n) { return n < 1024 ? n + " B" : (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB"; }
+
+  function renderAttachments() {
+    const host = $("chat-attachments");
+    host.innerHTML = "";
+    chatAttachments.forEach((f, i) => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.appendChild(document.createTextNode(`${f.name} · ${fmtSize(f.size)}`));
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "chip-x";
+      x.dataset.removeAttachment = String(i);
+      x.setAttribute("aria-label", "Remove " + f.name);
+      x.textContent = "✕";
+      chip.appendChild(x);
+      host.appendChild(chip);
+    });
+    host.classList.toggle("hidden", !chatAttachments.length);
+  }
+
+  async function addAttachments(files) {
+    const problems = [];
+    for (const file of files) {
+      const name = file.name || "file";
+      const dot = name.lastIndexOf(".");
+      const ext = dot >= 0 ? name.slice(dot).toLowerCase() : "";
+      // `accept` is only a hint to the picker: check everything here.
+      if (!ATTACH_EXT.includes(ext)) { problems.push(`${name}: only ${ATTACH_EXT.join(" ")} files`); continue; }
+      if (file.size > ATTACH_MAX_BYTES) { problems.push(`${name}: larger than 200 KB`); continue; }
+      if (chatAttachments.length >= ATTACH_MAX_FILES) { problems.push(`${name}: at most ${ATTACH_MAX_FILES} files per message`); continue; }
+      if (chatAttachments.some((f) => f.name === name)) { problems.push(`${name}: already attached`); continue; }
+      let text;
+      try { text = await file.text(); } catch { problems.push(`${name}: could not be read`); continue; }
+      if (text.includes("\u0000")) { problems.push(`${name}: not a text file`); continue; }
+      chatAttachments.push({ name, size: file.size, text });
+    }
+    renderAttachments();
+    $("chat-status").textContent = problems.length ? "Not attached: " + problems.join("; ") : "";
+  }
+
+  // The fence is longer than any backtick run inside the file, so a file can never close it early.
+  function fencedBlock(name, text) {
+    const runs = (text.match(/`+/g) || []).map((r) => r.length);
+    const fence = "`".repeat(Math.max(2, ...runs) + 1);
+    return `${fence}${name.replace(/[\r\n`]/g, "_")}\n${text.replace(/\s+$/, "")}\n${fence}`;
+  }
+
+  $("chat-attach").addEventListener("click", () => $("chat-file").click());
+  $("chat-file").addEventListener("change", async (ev) => {
+    await addAttachments([...ev.target.files]);
+    ev.target.value = "";  // choosing the same file again still fires "change"
+  });
+  $("chat-attachments").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-remove-attachment]");
+    if (!b) return;
+    chatAttachments.splice(Number(b.dataset.removeAttachment), 1);
+    renderAttachments();
+  });
+
   async function sendChat() {
-    const msg = $("chat-msg").value.trim();
-    const id = identities[active];
-    if (!msg || !id) return;
+    const typed = $("chat-msg").value.trim();
+    const id = identity;
+    if ((!typed && !chatAttachments.length) || !id) return;
+    const files = chatAttachments.slice();
+    const msg = [typed].concat(files.map((f) => fencedBlock(f.name, f.text))).filter(Boolean).join("\n\n");
     // Belt-and-braces: never send into another identity's thread (e.g. a stale
     // id kept across account switches) — fall back to this account's default.
     const ownPrefix = "user:" + id.claims.sub;
@@ -1272,7 +1355,10 @@
       currentThreadId = null;
     }
     $("chat-status").textContent = "";
-    pushTranscript("user", esc(msg));
+    // The bubble shows what was typed plus the file names; the full text goes to the agent.
+    pushTranscript("user", esc(typed) + (files.length
+      ? `<div class="chips chat-files">${files.map((f) => `<span class="chip">${esc(f.name)}</span>`).join("")}</div>`
+      : ""));
     $("chat-status").textContent = "working…";
     const keyId = $("chat-model-select")?.value || null;
     try {
@@ -1283,9 +1369,11 @@
         currentThreadId = out.thread_id;
         rememberThread(out.thread_id);
         if (!threadTitles[out.thread_id] || threadTitles[out.thread_id] === "New chat") {
-          threadTitles[out.thread_id] = msg.replace(/\s+/g, " ").slice(0, 40);
+          threadTitles[out.thread_id] = (typed || files.map((f) => f.name).join(", ")).replace(/\s+/g, " ").slice(0, 40);
         }
       }
+      chatAttachments = [];  // only a successful send clears the chips
+      renderAttachments();
       pushTranscript("assistant", renderChatTurn(out));
       $("chat-status").textContent = "";
       if (out.interrupted && out.approval_id && out.thread_id) watchSuspended(out.thread_id);
@@ -1317,9 +1405,7 @@
         ? "your department head must approve it."
         : (out.approval_tier === "dept" && !route)
         ? "your department head (or an admin, if the department has none) must approve it."
-        : (identities.admin
-          ? "switch to the admin session and open Approvals to approve it."
-          : "an admin must approve it (Approvals tab).");
+        : "an admin must approve it (Approvals tab).";
       html += `<div class="status" style="color:#fef08a">&#9209; run suspended (approval <code>${esc(out.approval_id)}</code>) — ${esc(hint)} This chat updates by itself once it is decided.`
         + ` <button class="ghost" data-resume="${esc(out.approval_id)}" data-thread="${esc(out.thread_id || "")}">Resume now</button></div>`;
     }
@@ -1478,7 +1564,7 @@
   const SECOND_EYES_LABELS = {
     allowlist_rule: "Always-allow rule", policy_rows: "Policy rows", skill_save: "Save skill",
     skill_delete: "Delete skill", llm_key_write: "Save a member's LLM key", llm_key_delete: "Delete a member's LLM key",
-    platform_key: "Platform extractor key", composio_key: "Composio key",
+    platform_key: "Platform extractor key", composio_key: "Integration key",
   };
   async function loadSecondEyes() {
     const host = $("second-eyes");
@@ -1487,7 +1573,7 @@
       const items = await api("/api/second-eyes/pending");
       host.innerHTML = "";
       if (!items.length) { host.innerHTML = '<p class="muted">Nothing waiting.</p>'; return; }
-      const me = identities[active] && identities[active].claims.sub;
+      const me = identity && identity.claims.sub;
       items.forEach((p) => {
         const own = p.proposed_by === me;
         const card = elm(`<div class="card">
@@ -1583,7 +1669,7 @@
   let teamSkill = null;
 
   function loadTeam() {
-    const claims = identities[active].claims;
+    const claims = identity.claims;
     $("team-dept").textContent = "(" + claims.dept + ")";
     loadTeamMembers();
     loadTeamAllowlist();
@@ -1592,7 +1678,7 @@
 
   async function loadTeamMembers() {
     const host = $("team-members");
-    const me = identities[active].claims.sub;
+    const me = identity.claims.sub;
     try {
       const members = await api("/api/dept/members");
       host.innerHTML = members.map((m) => {
@@ -1706,22 +1792,98 @@
     return out;
   }
 
-  async function fillDeptSelect() {
-    const sel = $("mem-dept");
-    sel.innerHTML = "";
-    const depts = await api("/api/departments");
-    depts.forEach((d) => {
-      const o = document.createElement("option");
-      o.value = d.name; o.textContent = d.name;
-      sel.appendChild(o);
+  // Mk21 Decision 5A: both pickers derive from GET /api/departments + GET /api/users (no new
+  // endpoint). The selection is serialised back to the comma string PUT /api/members expects.
+  let memberDepts = [];    // department rows
+  let memberUsers = [];    // member rows: existing scopes seed department-specific actions
+  let memberScopes = [];   // the scopes currently selected (chips)
+  const FIXED_OBJECT = /^(memory_|pii_|skill_)/;  // policy objects offered as-is
+  const BASE_ACTIONS = ["read", "create", "delete"];
+
+  function defaultRoleFor(dept) {
+    if (dept === "admin") return "admin";
+    const d = memberDepts.find((x) => x.name === dept);
+    return (d && d.role) || dept + "_agent";
+  }
+
+  function roleOptions(current) {
+    const roles = ["admin"];
+    memberDepts.filter((d) => d.name !== "admin").forEach((d) => roles.push(d.role || d.name + "_agent", d.name + "_head"));
+    if (current && !roles.includes(current)) roles.push(current);  // a grandfathered row stays editable
+    return [...new Set(roles)];
+  }
+
+  // Only this department's resources: a marketing member is never offered finance:transfer.
+  function scopeCandidates(dept) {
+    const d = memberDepts.find((x) => x.name === dept);
+    const resources = (d && d.resources) || [];
+    const out = new Set(dept === "admin" ? ["*"] : []);
+    resources.forEach((r) => {
+      if (FIXED_OBJECT.test(r)) out.add(r);
+      else BASE_ACTIONS.forEach((a) => out.add(r + ":" + a));
     });
-    sel.addEventListener("change", () => {
-      if (memberAdd || !$("mem-role").value) $("mem-role").value = sel.value + "_agent";
-      else if (editingMember) { /* keep admin-typed role */ }
+    memberUsers.filter((u) => u.dept === dept).forEach((u) => (u.scopes || []).forEach((sc) => {
+      if (sc === "*" || resources.includes(sc.split(":")[0])) out.add(sc);
+    }));
+    return [...out].sort();
+  }
+
+  function fillSelect(sel, values, placeholder) {
+    sel.innerHTML = "";
+    if (placeholder) {
+      const o = document.createElement("option");
+      o.value = ""; o.textContent = placeholder;
+      sel.appendChild(o);
+    }
+    values.forEach((v) => {
+      const o = document.createElement("option");
+      o.value = v; o.textContent = v;
+      sel.appendChild(o);
     });
   }
 
-  function openMemberEditor(username) {
+  function renderScopePicker() {
+    const chips = $("mem-scope-chips");
+    chips.innerHTML = "";
+    memberScopes.forEach((sc) => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.dataset.scope = sc;
+      chip.appendChild(document.createTextNode(sc));
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "chip-x";
+      x.dataset.removeScope = sc;
+      x.setAttribute("aria-label", "Remove " + sc);
+      x.textContent = "✕";
+      chip.appendChild(x);
+      chips.appendChild(chip);
+    });
+    if (!memberScopes.length) chips.innerHTML = '<span class="muted">No scopes selected</span>';
+    fillSelect($("mem-scope-add"), scopeCandidates($("mem-dept").value).filter((sc) => !memberScopes.includes(sc)), "+ Add scope…");
+    $("mem-scopes").value = memberScopes.join(", ");
+  }
+
+  $("mem-scope-chips").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-remove-scope]");
+    if (!b) return;
+    memberScopes = memberScopes.filter((sc) => sc !== b.dataset.removeScope);
+    renderScopePicker();
+  });
+  $("mem-scope-add").addEventListener("change", (ev) => {
+    const v = ev.target.value;
+    if (v && !memberScopes.includes(v)) memberScopes.push(v);
+    renderScopePicker();
+  });
+  $("mem-dept").addEventListener("change", () => {
+    const dept = $("mem-dept").value;
+    if (memberAdd) $("mem-role").value = defaultRoleFor(dept);  // suggest <dept>_agent
+    const allowed = new Set(scopeCandidates(dept));
+    memberScopes = memberScopes.filter((sc) => allowed.has(sc));  // no cross-department leftovers
+    renderScopePicker();
+  });
+
+  async function openMemberEditor(username) {
     editingMember = username || null;
     memberAdd = !username;
     $("member-editor").classList.remove("hidden");
@@ -1730,21 +1892,25 @@
     $("mem-username").value = username || "";
     $("mem-password").value = "";
     $("mem-password").placeholder = username ? "leave blank to keep current password" : "password (min 6 chars)";
-    $("mem-scopes").value = "";
     $("member-status").textContent = "";
-    fillDeptSelect().then(() => {
-      if (username) return;
-      $("mem-role").value = "";
-    });
-    if (username) {
-      api("/api/users").then((users) => {
-        const u = users.find((x) => x.username === username);
-        if (!u) return;
-        $("mem-role").value = u.role;
-        $("mem-dept").value = u.dept;
-        $("mem-scopes").value = u.scopes.join(", ");
-      }).catch((e) => { $("member-status").textContent = "error: " + e.message; });
+    memberScopes = [];
+    try {
+      // Both lists BEFORE filling the form: a <select> drops a value whose option does not exist yet.
+      [memberDepts, memberUsers] = await Promise.all([api("/api/departments"), api("/api/users")]);
+    } catch (e) { $("member-status").textContent = "error: " + e.message; return; }
+    const u = username ? memberUsers.find((x) => x.username === username) : null;
+    fillSelect($("mem-dept"), memberDepts.map((d) => d.name));
+    fillSelect($("mem-role"), roleOptions(u && u.role));
+    if (u) {
+      $("mem-dept").value = u.dept;
+      $("mem-role").value = u.role;
+      memberScopes = [...(u.scopes || [])];
+    } else {
+      const first = memberDepts.find((d) => d.name !== "admin") || memberDepts[0];
+      if (first) $("mem-dept").value = first.name;
+      $("mem-role").value = defaultRoleFor($("mem-dept").value);
     }
+    renderScopePicker();
   }
 
   async function saveMember() {
@@ -1797,7 +1963,7 @@
           <td>${esc(u.username)}</td>
           <td>${esc(u.role)}</td>
           <td>${esc(u.dept)}</td>
-          <td>${esc(u.scopes.join(", "))}</td>
+          <td><span class="chips">${u.scopes.map((sc) => `<span class="chip">${esc(sc)}</span>`).join("")}</span></td>
           <td><span class="badge ${u.active ? "approved" : "rejected"}">${u.active ? "active" : "disabled"}</span></td>
           <td>
             <button class="ghost" data-edit="${esc(u.username)}">Edit</button>
@@ -1871,6 +2037,29 @@
 
   // ---- Departments (plan_mk2 Phase 4) ----
 
+  // Mk21 Decision 6A: at most three tags per cell, then a "+N" button for the inline detail row.
+  const DEPT_CHIP_LIMIT = 3;
+  function chipsFor(items, deptForMore) {
+    if (!items.length) return '<span class="muted">—</span>';
+    const shown = deptForMore ? items.slice(0, DEPT_CHIP_LIMIT) : items;
+    const more = deptForMore && items.length > DEPT_CHIP_LIMIT
+      ? `<button type="button" class="chip more" data-more="${esc(deptForMore)}" aria-expanded="false"`
+        + ` title="Show all ${items.length}">+${items.length - DEPT_CHIP_LIMIT}</button>`
+      : "";
+    return `<span class="chips">${shown.map((x) => `<span class="chip">${esc(x)}</span>`).join("")}${more}</span>`;
+  }
+
+  $("depts").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-more]");
+    if (!b) return;
+    const row = [...$("depts").querySelectorAll("tr[data-detail]")].find((r) => r.dataset.detail === b.dataset.more);
+    if (!row) return;
+    const open = row.classList.toggle("hidden") === false;
+    $("depts").querySelectorAll("button[data-more]").forEach((x) => {
+      if (x.dataset.more === b.dataset.more) x.setAttribute("aria-expanded", String(open));
+    });
+  });
+
   async function loadDepts() {
     try {
       const depts = await api("/api/departments");
@@ -1886,9 +2075,18 @@
         const heads = d.name === "admin" ? `<span class="muted">—</span>`
           : (d.head_count > 0 ? String(d.head_count)
             : `<span class="badge pending" title="No active head: this department's requests escalate to admins">0 · escalates</span>`);
+        const extra = Math.max(d.resources.length, d.members.length) > DEPT_CHIP_LIMIT;
+        // Mk21 Decision 6A: an inline detail row (never a floating layer, so nothing can overflow).
+        // It never repeats the department name as text: row lookups by name stay unambiguous.
+        const detail = extra
+          ? `<tr class="dept-detail hidden" data-detail="${esc(d.name)}"><td colspan="8">
+               <div class="detail-block"><span class="detail-label">Resources</span>${chipsFor(d.resources)}</div>
+               <div class="detail-block"><span class="detail-label">Members</span>${chipsFor(d.members)}</div>
+             </td></tr>`
+          : "";
         return `<tr><td>${esc(d.name)}</td><td>${esc(d.service)}</td><td><code>${esc(d.service_url)}</code></td>
-         <td>${esc(d.resources.join(", "))}</td><td>${esc(d.members.join(", "))}</td><td>${esc(d.role || "")}</td>
-         <td>${heads}</td><td>${mode}</td></tr>`;
+         <td>${chipsFor(d.resources, d.name)}</td><td>${chipsFor(d.members, d.name)}</td><td>${esc(d.role || "")}</td>
+         <td>${heads}</td><td>${mode}</td></tr>${detail}`;
       }).join("");
       $("depts").querySelectorAll("[data-mode]").forEach((sel) =>
         sel.addEventListener("change", () => setDeptMode(sel.dataset.mode, sel.value)));
@@ -1918,7 +2116,7 @@
     try {
       await api("/api/departments", { method: "POST",
         headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
-      $("dept-status").textContent = "registered " + payload.name;
+      $("dept-status").textContent = "added " + payload.name;
       $("dept-editor").classList.add("hidden");
       loadDepts();
     } catch (e) { $("dept-status").textContent = "error: " + e.message; }
@@ -1952,19 +2150,32 @@
         $("skills").appendChild(elm('<p class="status" style="color:var(--bad)">Registry errors: ' + esc(out.errors.join("; ")) + "</p>"));
       }
       out.skills.forEach((s) => {
-        const card = elm(`<div class="card">
+        // Mk21 Decision 7B: who may use it, in words (was a "POLICY ROW" badge).
+        const roles = s.granted_roles || [];
+        const granted = roles.length
+          ? roles.map((r) => `<span class="chip">granted to ${esc(r)}</span>`).join("")
+          : '<span class="chip chip-off">not granted to any role yet</span>';
+        // Mk21 Decision 7A: the markdown narrative by default; the executable JSON on demand.
+        const card = elm(`<div class="card skill-card">
           <div class="row">
             <b>${esc(s.name)}</b>
             <span class="pill">${esc(s.scope)}</span>
             <span class="pill">v${esc(s.version)}</span>
-            ${s.policy_row ? '<span class="badge approved">policy row</span>' : '<span class="badge rejected">no policy row</span>'}
-            <span class="muted">${esc(s.owner_role || "")}</span>
+            <span class="chips">${granted}</span>
           </div>
           <div class="status muted">${esc(s.trigger)}</div>
-          <pre style="white-space:pre-wrap;color:var(--muted);font-size:12px">${esc(JSON.stringify(s.tool_calls, null, 2))}</pre>
-          <button data-edit="${esc(s.name)}">Edit</button>
+          <div class="skill-body">${renderMarkdown(s.body)}</div>
+          <pre class="hidden" data-json style="white-space:pre-wrap;color:var(--muted);font-size:12px">${esc(JSON.stringify(s.tool_calls, null, 2))}</pre>
+          <div class="row" style="margin-top:8px">
+            <button class="ghost" data-toggle-json aria-expanded="false">Tool calls</button>
+            <button data-edit="${esc(s.name)}">Edit</button>
+          </div>
         </div>`);
         card.querySelector("[data-edit]").addEventListener("click", () => openSkillEditor(s.name));
+        card.querySelector("[data-toggle-json]").addEventListener("click", (ev) => {
+          const open = card.querySelector("[data-json]").classList.toggle("hidden") === false;
+          ev.currentTarget.setAttribute("aria-expanded", String(open));
+        });
         $("skills").appendChild(card);
       });
       if (!out.skills.length) $("skills").innerHTML = '<p class="muted">No skills found in the registry.</p>';
@@ -1977,9 +2188,123 @@
     return d.firstElementChild;
   }
 
+  // Escape-first, minimal markdown for skill bodies: headings, lists, **bold**, `code`, paragraphs.
+  // Everything is HTML-escaped BEFORE any tag is added, so a skill file can never inject markup.
+  function renderMarkdown(md) {
+    const inline = (t) => t.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+    let html = "", list = null, para = [];
+    const flush = () => { if (para.length) { html += `<p>${inline(para.join(" "))}</p>`; para = []; } };
+    const close = () => { if (list) { html += `</${list}>`; list = null; } };
+    esc(md || "").split(/\r?\n/).forEach((raw) => {
+      const line = raw.trimEnd();
+      let m;
+      if (!line.trim()) { flush(); close(); return; }
+      if ((m = line.match(/^#{1,6}\s+(.*)$/))) { flush(); close(); html += `<h4 class="md-h">${inline(m[1])}</h4>`; return; }
+      if ((m = line.match(/^\s*[-*]\s+(.*)$/))) {
+        flush(); if (list !== "ul") { close(); html += "<ul>"; list = "ul"; }
+        html += `<li>${inline(m[1])}</li>`; return;
+      }
+      if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+        flush(); if (list !== "ol") { close(); html += "<ol>"; list = "ol"; }
+        html += `<li>${inline(m[1])}</li>`; return;
+      }
+      close(); para.push(line.trim());
+    });
+    flush(); close();
+    return html || '<p class="muted">No description yet.</p>';
+  }
+
+  // ---- Mk21 Decisions 7C/7D/7E: generate a DRAFT; nothing is written until a human saves ----
+  let pendingGrant = null;   // roles ticked in the generation form, sent once with the save
+  let genDepts = [];
+
+  function scopeOwnRole(scope) {
+    const d = scope.startsWith("dept/") ? genDepts.find((x) => "dept/" + x.name === scope) : null;
+    return d ? (d.role || d.name + "_agent") : null;
+  }
+
+  function renderGrantChoices() {
+    const own = scopeOwnRole($("gen-scope").value);
+    const roles = [];
+    genDepts.forEach((d) => roles.push(d.role || d.name + "_agent", d.name + "_head"));
+    const host = $("gen-grant");
+    host.innerHTML = "";
+    [...new Set(roles)].forEach((r) => {
+      const label = document.createElement("label");
+      label.className = "chip check";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = r;
+      box.checked = r === own;  // default: the scope's own role; widening needs an explicit tick
+      label.appendChild(box);
+      label.appendChild(document.createTextNode(" " + r));
+      host.appendChild(label);
+    });
+  }
+
+  async function openSkillGen() {
+    $("skill-gen").classList.remove("hidden");
+    $("gen-status").textContent = "";
+    try {
+      genDepts = (await api("/api/departments")).filter((d) => d.registered && d.name !== "admin");
+    } catch (e) { $("gen-status").textContent = "error: " + e.message; return; }
+    const sel = $("gen-scope");
+    sel.innerHTML = "";
+    [["central", "Central (every department)"]].concat(genDepts.map((d) => ["dept/" + d.name, "Department: " + d.name]))
+      .forEach(([value, label]) => {
+        const o = document.createElement("option");
+        o.value = value; o.textContent = label;
+        sel.appendChild(o);
+      });
+    if (genDepts.length) sel.value = "dept/" + genDepts[0].name;
+    renderGrantChoices();
+    $("gen-brief").focus();
+  }
+
+  async function runSkillGen() {
+    const status = $("gen-status");
+    const brief = $("gen-brief").value.trim();
+    if (!brief) { status.textContent = "Describe what the skill should do."; return; }
+    const grants = [...$("gen-grant").querySelectorAll("input:checked")].map((i) => i.value);
+    status.textContent = "Generating a draft… the free model can take a few seconds.";
+    $("gen-run").disabled = true;
+    try {
+      const out = await api("/api/skills/generate", { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scope: $("gen-scope").value, brief }) });
+      $("skill-gen").classList.add("hidden");
+      status.textContent = "";
+      openSkillDraft(out, grants);
+    } catch (e) { status.textContent = "error: " + e.message; }
+    $("gen-run").disabled = false;
+  }
+
+  function openSkillDraft(out, grants) {
+    editingNew = true;
+    editingSkill = null;
+    pendingGrant = grants;
+    $("skill-editor-title").textContent = "New skill — draft, not saved yet";
+    $("skill-content").value = out.draft;
+    $("skill-status").classList.remove("muted");
+    $("skill-status").textContent = !out.valid
+      ? "This draft needs fixing before it can be saved: " + out.error
+      : out.exists ? `A skill named ${out.name} already exists — rename it before saving.` : "";
+    $("skill-grant-note").textContent = grants.length
+      ? "Saving grants it to: " + grants.join(", ") + " (admins can always use it)."
+      : "Saving grants it to admins only.";
+    $("skills").classList.add("hidden");
+    $("skill-editor").classList.remove("hidden");
+  }
+
+  $("gen-skill").addEventListener("click", openSkillGen);
+  $("gen-scope").addEventListener("change", renderGrantChoices);
+  $("gen-run").addEventListener("click", runSkillGen);
+  $("gen-cancel").addEventListener("click", () => $("skill-gen").classList.add("hidden"));
+
   async function openSkillEditor(name) {
     editingNew = !name;
     editingSkill = name || null;
+    pendingGrant = null;
+    $("skill-grant-note").textContent = "";
     let content = "";
     if (name) {
       const out = await api("/api/skills/" + encodeURIComponent(name));
@@ -1998,9 +2323,14 @@
     try {
       const url = editingNew ? "/api/skills" : "/api/skills/" + encodeURIComponent(editingSkill);
       const method = editingNew ? "POST" : "PUT";
+      const body = { content };
+      if (pendingGrant) body.grant_to = pendingGrant;  // only a generated draft carries grants
       const out = await api(url, { method, headers: { "content-type": "application/json" },
-        body: JSON.stringify({ content }) });
-      $("skill-status").textContent = "saved → will hot-reload on the next run (" + out.name + ")";
+        body: JSON.stringify(body) });
+      pendingGrant = null;
+      $("skill-status").textContent = out.needs_second_admin
+        ? "Sent to a second admin to confirm (Approvals → Waiting for a second admin)."
+        : "saved → will hot-reload on the next run (" + out.name + ")";
       $("skill-status").classList.add("muted");
       setTimeout(() => { $("skill-editor").classList.add("hidden"); $("skills").classList.remove("hidden"); loadSkills(); }, 800);
     } catch (e) { $("skill-status").textContent = "error: " + e.message; }
@@ -2017,7 +2347,7 @@
   }
 
   // ---- Memory (Mk8: admin CRUD, member read-only via /api/memory/me) ----
-  function isAdmin() { return active && identities[active] && identities[active].claims.role === "admin"; }
+  function isAdmin() { return !!identity && identity.claims.role === "admin"; }
 
   async function loadMemory() {
     $("memory").textContent = "loading...";
@@ -2038,13 +2368,67 @@
       // Mk16 follow-up: admins manage the shared platform key/model (DB-backed,
       // used by every instance on this database) right here; members see nothing.
       if (isAdmin()) { await loadPlatformCard($("memory")); }
-      if (!scopes.length) { $("memory").innerHTML += '<p class="muted">No readable memory scopes for this identity.</p>'; return; }
-      // Mk15: a head manages their own department's scope; everything else stays read-only.
-      const claims = identities[active].claims;
-      const ownDept = isHeadRole(claims.role) ? "dept/" + claims.dept : null;
-      scopes.forEach((s) => $("memory").appendChild(memoryScope(s, isAdmin() || s.scope === ownDept)));
+      memoryData = scopes;
+      // Admin: every department (GET /api/departments is admin-only). Others: their own, from claims.
+      memoryDepts = isAdmin() ? await api("/api/departments") : [{ name: identity.claims.dept, members: null }];
+      fillMemoryViewSelect();
+      renderMemoryScopes();
     } catch (e) { $("memory").textContent = "error: " + e.message; }
   }
+
+  // ---- Mk21 Decision 8A: one department (its scope + its members' scopes) or Central at a time,
+  // filtered in the browser. Central stays: the Memory browser is the only admin write surface for it.
+  const MEMORY_CENTRAL = "__central";
+  let memoryData = [];    // [{scope, items}] from GET /api/memory (admin) or /api/memory/me
+  let memoryDepts = [];   // [{name, members}] the dropdown offers
+  let memoryView = null;  // the selected option, kept across reloads of this tab
+
+  function fillMemoryViewSelect() {
+    const sel = $("memory-view-select");
+    const options = memoryDepts.map((d) => [d.name, "Department: " + d.name]).concat([[MEMORY_CENTRAL, "Central"]]);
+    sel.innerHTML = "";
+    options.forEach(([value, label]) => {
+      const o = document.createElement("option");
+      o.value = value; o.textContent = label;
+      sel.appendChild(o);
+    });
+    const values = options.map((o) => o[0]);
+    if (!values.includes(memoryView)) memoryView = values.includes(identity.claims.dept) ? identity.claims.dept : values[0];
+    sel.value = memoryView;
+  }
+
+  function visibleMemoryScopes() {
+    if (memoryView === MEMORY_CENTRAL) return memoryData.filter((x) => x.scope === "central");
+    const dept = memoryDepts.find((d) => d.name === memoryView);
+    const wanted = ["dept/" + memoryView];
+    if (dept && Array.isArray(dept.members)) dept.members.forEach((m) => wanted.push("user/" + m));
+    // Without a roster (heads, members) the server already limited /api/memory/me to what they may read.
+    const inView = (x) => wanted.includes(x.scope) || (!(dept && Array.isArray(dept.members)) && x.scope.startsWith("user/"));
+    return memoryData.filter(inView).sort((a, b) => wanted.indexOf(a.scope) - wanted.indexOf(b.scope));
+  }
+
+  function renderMemoryScopes() {
+    const host = $("memory-scopes");
+    host.innerHTML = "";
+    const q = ($("memory-search").value || "").trim().toLowerCase();
+    // Mk15: a head manages their own department's scope; everything else stays read-only.
+    const claims = identity.claims;
+    const ownDept = isHeadRole(claims.role) ? "dept/" + claims.dept : null;
+    let facts = 0;
+    visibleMemoryScopes().forEach((sc) => {
+      const items = q ? sc.items.filter((it) => (it.text || "").toLowerCase().includes(q)) : sc.items;
+      if (q && !items.length) return;
+      facts += items.length;
+      host.appendChild(memoryScope({ scope: sc.scope, items }, isAdmin() || sc.scope === ownDept));
+    });
+    if (!host.children.length) {
+      host.appendChild(elm(`<p class="muted">${q ? "No facts match your search here." : "No memory saved here yet."}</p>`));
+    }
+    $("memory-count").textContent = facts + (facts === 1 ? " fact" : " facts");
+  }
+
+  $("memory-view-select").addEventListener("change", (ev) => { memoryView = ev.target.value; renderMemoryScopes(); });
+  $("memory-search").addEventListener("input", renderMemoryScopes);
 
   // ---- Platform extractor config (Mk16 follow-up: admin-only shared key/model) ----
   async function loadPlatformCard(host) {
@@ -2052,12 +2436,8 @@
     try {
       cfg = await api("/api/system-memory/config");
     } catch (e) { host.appendChild(elm('<div class="card"><p class="muted">Platform extractor: unavailable (' + esc(e.message) + ').</p></div>')); return; }
-    const state = cfg.configured
-      ? `saved in shared DB${cfg.source === "env" ? " (using per-machine env key — nothing stored yet)" : ""}${cfg.model ? ", model <code>" + esc(cfg.model) + "</code>" : ""}${cfg.updated_by ? ", by " + esc(cfg.updated_by) : ""}`
-      : "not configured — extraction uses on-device heuristics";
     const card = elm(`<div class="card">
       <h3>Platform extractor <span class="pill">${cfg.configured ? esc(cfg.source) : "off"}</span></h3>
-      <p class="muted">${state}. One key in this database serves every instance on it; the key itself is never shown.</p>
       <div class="row" style="margin:6px 0">
         <input type="password" id="plat-key" placeholder="${cfg.configured && cfg.source === "db" ? "key saved •••• (leave blank to keep)" : "paste OpenRouter key..."}" style="flex:1">
       </div>
@@ -2168,6 +2548,7 @@
   $("new-skill").addEventListener("click", () => openSkillEditor(null));
   $("save-skill").addEventListener("click", saveSkill);
   $("cancel-skill").addEventListener("click", () => {
+    pendingGrant = null;  // a discarded draft grants nothing
     $("skill-editor").classList.add("hidden");
     $("skills").classList.remove("hidden");
   });
@@ -2178,17 +2559,104 @@
   let opsRunId = null;
   let opsSourceFilter = new Set();
 
+  // Mk21 Decisions 9A/9B: GET /api/ops/runs is unchanged (both trace backends); search, filters
+  // and the summary run in the browser. A 15 s poll re-renders ONLY when the data changed: the
+  // rows are never swapped under the user's pointer while nothing is new.
+  const OPS_POLL_MS = Number(window.__OPS_POLL_MS) || 15000;  // overridable by tests only
+  let opsRuns = [];           // the last GET /api/ops/runs answer
+  let opsSignature = null;    // what the rendered rows were built from
+  let opsUpdatedAt = null;
+  let opsPollTimer = null;
+
   async function loadOps() {
     opsRunId = null; opsSourceFilter.clear();
     $("ops-runs-view").classList.remove("hidden");
     $("ops-run-view").classList.add("hidden");
-    $("ops-runs").innerHTML = "";
+    opsSignature = null;  // a fresh visit always renders
+    await refreshOps();
+    if (!opsPollTimer) opsPollTimer = setInterval(pollOps, OPS_POLL_MS);
+  }
+
+  function pollOps() {
+    // Only while the run list is on screen and someone is signed in.
+    if (!identity || document.hidden || opsRunId || $("ops-view").classList.contains("hidden")) return;
+    refreshOps();
+  }
+
+  async function refreshOps() {
     try {
       const runs = await api("/api/ops/runs");
-      if (!runs.length) { $("ops-runs").innerHTML = '<tr><td colspan="6" class="muted">No runs traced yet.</td></tr>'; return; }
-      runs.forEach((r) => appendRunRow(r));
-    } catch (e) { $("ops-runs").innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`; }
+      opsUpdatedAt = new Date();
+      const signature = JSON.stringify(runs.map((r) => [r.run_id, r.outcome, r.event_count]));
+      if (signature !== opsSignature) {  // the no-op guard
+        opsRuns = runs;
+        opsSignature = signature;
+        fillOpsFilterOptions();
+        renderOpsRuns();
+      }
+      renderOpsSummary();  // only the timestamp and counts, never the rows
+    } catch (e) {
+      opsSignature = null;
+      $("ops-runs").innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`;
+    }
   }
+
+  function fillOpsFilterOptions() {
+    const keep = (sel, values, allLabel) => {
+      const current = sel.value;
+      sel.innerHTML = "";
+      [["", allLabel]].concat(values.map((v) => [v, v])).forEach(([value, label]) => {
+        const o = document.createElement("option");
+        o.value = value; o.textContent = label;
+        sel.appendChild(o);
+      });
+      sel.value = values.includes(current) ? current : "";
+    };
+    keep($("ops-outcome"), [...new Set(opsRuns.map((r) => r.outcome))].sort(), "All outcomes");
+    keep($("ops-actor"), [...new Set(opsRuns.map((r) => (r.actor || {}).sub || ""))].filter(Boolean).sort(), "All actors");
+  }
+
+  function filteredOpsRuns() {
+    const q = ($("ops-search").value || "").trim().toLowerCase();
+    const outcome = $("ops-outcome").value, actor = $("ops-actor").value;
+    const from = $("ops-from").value, to = $("ops-to").value;  // YYYY-MM-DD, inclusive
+    return opsRuns.filter((r) => {
+      const a = r.actor || {};
+      const day = (r.started_ts || "").slice(0, 10);
+      if (outcome && r.outcome !== outcome) return false;
+      if (actor && a.sub !== actor) return false;
+      if (from && day < from) return false;
+      if (to && day > to) return false;
+      if (q && ![r.run_id, a.sub, a.role, r.outcome].some((v) => String(v || "").toLowerCase().includes(q))) return false;
+      return true;
+    });
+  }
+
+  function renderOpsRuns() {
+    $("ops-runs").innerHTML = "";
+    const shown = filteredOpsRuns();
+    if (!opsRuns.length) $("ops-runs").innerHTML = '<tr><td colspan="6" class="muted">No runs traced yet.</td></tr>';
+    else if (!shown.length) $("ops-runs").innerHTML = '<tr><td colspan="6" class="muted">No runs match these filters.</td></tr>';
+    shown.forEach((r) => appendRunRow(r));
+    $("ops-count").textContent = `Showing ${shown.length} of ${opsRuns.length} runs`;
+  }
+
+  function renderOpsSummary() {
+    const byOutcome = {};
+    opsRuns.forEach((r) => { byOutcome[r.outcome] = (byOutcome[r.outcome] || 0) + 1; });
+    const dayAgo = Date.now() - 24 * 3600 * 1000;
+    const recent = opsRuns.filter((r) => Date.parse(r.started_ts || "") >= dayAgo).length;
+    const parts = [`<span class="pill">${opsRuns.length} runs</span>`]
+      .concat(Object.keys(byOutcome).sort().map((o) =>
+        `<span class="badge ${o === "completed" ? "approved" : "pending"}" data-outcome="${esc(o)}">${esc(o)} ${byOutcome[o]}</span>`))
+      .concat([`<span class="pill" data-recent>last 24 h: ${recent}</span>`,
+               `<span class="muted" id="ops-updated">Last updated ${opsUpdatedAt ? opsUpdatedAt.toLocaleTimeString() : "—"}</span>`]);
+    $("ops-summary").innerHTML = parts.join("");
+  }
+
+  ["ops-search", "ops-from", "ops-to"].forEach((id) => $(id).addEventListener("input", renderOpsRuns));
+  ["ops-outcome", "ops-actor"].forEach((id) => $(id).addEventListener("change", renderOpsRuns));
+  $("ops-refresh").addEventListener("click", refreshOps);
 
   function appendRunRow(r) {
     const actor = r.actor || {};
@@ -2283,7 +2751,6 @@
   // ---- events + boot ----
   $("signin").addEventListener("click", doLogin);
   $("pass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
-  $("login-cancel").addEventListener("click", () => { loginMode = null; render(); });
   $("chat-send").addEventListener("click", sendChat);
   // Mk20: data-* attributes + delegated listeners instead of inline onclick="f('${value}')".
   // An HTML-escaped quote inside an attribute is decoded back to a quote before the inline
@@ -2308,9 +2775,9 @@
   });
   $("chat-msg").addEventListener("input", () => { $("chat-status").textContent = ""; });
 
-  restoreSessions();
-  if (active) { render(); loadCurrent(); }
-  else render();
+  restoreSession();
+  render();
+  loadCurrent();
 </script>
 <script src="console.js"></script>
 </body>

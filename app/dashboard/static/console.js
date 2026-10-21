@@ -28,6 +28,25 @@
   ping();
   setInterval(ping, 30000);
 
+  // ---- Mk21: collapsible navigation rail (desktop; CSS ignores the class on phones) ----
+  const NAV_KEY = "harness_nav_collapsed";
+  const toggle = $("nav-toggle");
+  function setCollapsed(collapsed) {
+    document.body.classList.toggle("nav-collapsed", collapsed);
+    const label = collapsed ? "Expand navigation" : "Collapse navigation";
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.setAttribute("aria-label", label);
+    toggle.title = label;
+  }
+  let startCollapsed = false;
+  try { startCollapsed = localStorage.getItem(NAV_KEY) === "1"; } catch { /* storage blocked */ }
+  setCollapsed(startCollapsed);
+  toggle.addEventListener("click", () => {
+    const collapsed = !document.body.classList.contains("nav-collapsed");
+    setCollapsed(collapsed);
+    try { localStorage.setItem(NAV_KEY, collapsed ? "1" : "0"); } catch { /* per-viewer nicety only */ }
+  });
+
   // ---- spotlight: cards glow where the pointer is ----
   document.addEventListener("pointermove", (e) => {
     const card = e.target instanceof Element ? e.target.closest(".card") : null;

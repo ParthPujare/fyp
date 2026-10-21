@@ -1,47 +1,66 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" translate="no">
 <head>
 <meta charset="utf-8">
-<title>Connect your apps (3 clicks)</title>
-<style>body{font-family:system-ui,sans-serif;max-width:720px;margin:32px auto;padding:0 16px;line-height:1.6}code{background:#eee;padding:2px 6px;border-radius:4px}.step{background:#f6f8fa;border:1px solid #e1e4e8;border-radius:8px;padding:16px;margin:12px 0}</style>
+<meta name="google" content="notranslate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup guide — connect your apps</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="console.css">
+<style>
+  .guide { position: relative; z-index: 1; max-width: 760px; }
+  .guide h3 { display: flex; align-items: center; gap: 10px; }
+  .guide ol, .guide ul { margin: 0; padding-left: 20px; }
+  .guide li { margin: 6px 0; }
+</style>
 </head>
 <body>
-<h1>Connect your apps (3 clicks, no tech needed)</h1>
+<div class="bg-grid" aria-hidden="true"></div>
+<div class="bg-glow" aria-hidden="true"></div>
+<main class="guide">
+  <h2>Connect your apps</h2>
+  <p class="muted">Three steps. No technical knowledge needed.</p>
 
-<div class="step">
-<h2>Click 1 — Paste your key</h2>
-<ol>
-<li>Open <a href="https://app.composio.dev" target="_blank">app.composio.dev</a> → copy your <b>API key</b>.</li>
-<li>Here: <b>Account → Integrations → Step 1</b> → paste → <b>Save &amp; check key</b>.</li>
-<li>It tells you right away if the key works. Nothing else to copy — app logins are handled for you.</li>
-</ol>
-</div>
+  <section class="card">
+    <h3><span class="pill active">Step 1</span> Paste your key</h3>
+    <ol>
+      <li>Open your integration provider's dashboard at <a href="https://app.composio.dev" target="_blank" rel="noopener">app.composio.dev</a> and copy your <b>API key</b>.</li>
+      <li>In the dashboard go to <b>Account → Integrations → Step 1</b>, paste it, and press <b>Save &amp; check key</b>.</li>
+      <li>It tells you straight away whether the key works. App logins are handled for you.</li>
+    </ol>
+  </section>
 
-<div class="step">
-<h2>Click 2 — Connect</h2>
-<ol>
-<li>Under <b>Step 2</b> find your app (Gmail, GitHub, Slack…) — use search if needed.</li>
-<li>Press <b>Connect</b> → a login popup opens → log in with that app.</li>
-<li>Want an app that is not listed? Ask your admin to add it (Admin → Integrations → add toolkit name). No code changes.</li>
-</ol>
-</div>
+  <section class="card">
+    <h3><span class="pill active">Step 2</span> Connect</h3>
+    <ol>
+      <li>Under <b>Step 2</b>, find your app (Gmail, GitHub, Slack…). Use the search box if needed.</li>
+      <li>Press <b>Connect</b>. A login window opens. Sign in to that app.</li>
+      <li>App not listed? Ask an admin to add it under <b>Admin — add app for everyone</b>.</li>
+    </ol>
+  </section>
 
-<div class="step">
-<h2>Click 3 — Refresh, then chat</h2>
-<ol>
-<li>Back here press <b>Refresh</b> next to the app → it turns <b>active</b>.</li>
-<li>Go to <b>Chat</b> and ask, e.g. <code>check my mail</code>.</li>
-<li>If the agent needs something not connected, it shows a <b>Connect</b> button right in chat — press it, Refresh, re-send.</li>
-</ol>
-</div>
+  <section class="card">
+    <h3><span class="pill active">Step 3</span> Refresh, then chat</h3>
+    <ol>
+      <li>Back in the dashboard, press <b>Refresh</b> next to the app. It turns <span class="badge approved">active</span>.</li>
+      <li>Open <b>Chat</b> and ask, for example, <code>check my mail</code>.</li>
+      <li>If the assistant needs an app you have not connected, it shows a <b>Connect</b> button in the chat. Press it, Refresh, then send again.</li>
+    </ol>
+  </section>
 
-<h2>If something looks wrong</h2>
-<ul>
-<li><b>Key rejected:</b> copy it again from Composio — extra spaces break it.</li>
-<li><b>Still pending:</b> finish the popup login fully, then Refresh once more.</li>
-<li><b>App missing:</b> admin adds it once under Integrations → Catalog; everyone gets it.</li>
-<li><b>Sending/making changes asks approval:</b> normal — an admin approves it in Approvals.</li>
-</ul>
-<p><a href="/static/index.html">← Back to dashboard</a></p>
+  <section class="card">
+    <h3>If something looks wrong</h3>
+    <ul>
+      <li><b>Key rejected:</b> copy it again from the provider's dashboard. Extra spaces break it.</li>
+      <li><b>Still pending:</b> finish the login window completely, then press Refresh again.</li>
+      <li><b>App missing:</b> an admin adds it once in the app catalog, and everyone gets it.</li>
+      <li><b>Sending or changing something asks for approval:</b> that is normal. An approver decides it in Approvals.</li>
+    </ul>
+  </section>
+
+  <p><a href="/static/index.html">← Back to dashboard</a></p>
+</main>
 </body>
 </html>

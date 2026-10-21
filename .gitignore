@@ -8,18 +8,43 @@ venv/
 # Project runtime data (sqlite dbs, audit logs)
 data/
 
-# Env / secrets
+# Env / secrets (keep the template)
 .env
+.env.*
+!.env.example
+
+# Stray local databases / logs / audit side files (tests use temp dirs; dev runs use data/)
+*.sqlite
+*.sqlite3
+*.db
+*.log
+*.jsonl.head
+*.jsonl.lock
 
 # Tool caches
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
-# OS
+# Playwright output (pytest-playwright --screenshot/--video/--tracing)
+test-results/
+playwright-report/
+
+# Local bundles made for sharing (zip the demo folder, not the repo)
+*.zip
+
+# Editors / OS
+.vscode/
+.idea/
 .DS_Store
+Thumbs.db
+desktop.ini
 
 
 ref_docs/test_run_2026-10-10/screenshots/  
 ref_docs/test_run_2026-10-10/harness/  
+ref_docs/demo_2026-10-21/*
 
 .claude/

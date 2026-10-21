@@ -90,6 +90,16 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.middleware("http")
+async def _content_language(request: Request, call_next):
+    """Mk21 Phase 1: declare the dashboard's language so browsers stop offering to translate
+    it (the page also carries `translate="no"` and `<meta name="google" content="notranslate">`)."""
+    response = await call_next(request)
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers.setdefault("Content-Language", "en")
+    return response
+
+
+@app.middleware("http")
 async def _cookie_session(request: Request, call_next):
     """Mk18 Phase D: cookie sessions + CSRF gate.
 
@@ -518,6 +528,14 @@ class DecideRequest(BaseModel):
 
 class SkillWriteRequest(BaseModel):
     content: str  # raw skill.md document (frontmatter + body)
+    # Mk21 Decision 7E: roles that may USE the skill (`p, <role>, <dept>, skill_<name>, use`).
+    # Empty = unchanged behaviour (admin row only). Nothing widens a role's reach silently.
+    grant_to: list[str] = []
+
+
+class SkillGenerateRequest(BaseModel):
+    scope: str  # "central" | "dept/<registered department>"
+    brief: str  # what the skill should do, in plain words
 
 
 class MemoryFactRequest(BaseModel):
@@ -575,43 +593,6 @@ def logout(response: Response) -> dict:
     ):
         response.delete_cookie(key=name, path="/")
     return {"logged_out": True}
-
-
-class SessionSwitchRequest(BaseModel):
-    label: str  # "admin" | "member"
-
-
-@app.post("/api/session/switch")
-def switch_session(req: SessionSwitchRequest, request: Request, response: Response) -> dict:
-    """Mk20: make the identity-switcher pill decide who the browser acts as.
-
-    After a reload the tokens live only in the httpOnly slot cookies, and the server
-    picks the slot named by `<cookie>_active`. Switching pills used to change only the
-    page, so requests kept going out as whoever signed in last. This flips the active
-    marker to a slot the browser already holds a valid session for — nothing else.
-    """
-    from app.harness.cookies import active_cookie, slot_cookie
-
-    label = (req.label or "").strip()
-    if label not in ("admin", "member"):
-        raise HTTPException(status_code=422, detail="label must be 'admin' or 'member'")
-    slot = request.cookies.get(slot_cookie(settings.jwt.cookie_name, label), "")
-    if not slot:
-        raise HTTPException(status_code=409, detail=f"no {label} session in this browser")
-    try:
-        claims = verify_token(slot, settings.jwt.secret, settings.jwt.algorithm)
-    except AuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
-    response.set_cookie(
-        key=active_cookie(settings.jwt.cookie_name),
-        value=label,
-        httponly=False,
-        secure=settings.jwt.cookie_secure,
-        samesite=settings.jwt.cookie_samesite,  # type: ignore[arg-type]
-        path="/",
-        max_age=settings.jwt.expiry_minutes * 60,
-    )
-    return {"active": label, "sub": claims.get("sub")}
 
 
 @app.get("/api/csrf")
@@ -1260,9 +1241,10 @@ def _apply_second_eyes(kind: str, payload: dict[str, Any], actor: str) -> dict[s
         return {"rows_added": len(rows)}
     if kind == "skill_save":
         skill = parse_skill_document(payload.get("content", ""))
+        grants = _skill_grant_rows(skill.policy_obj, list(payload.get("grant_to") or []))  # re-checked at confirm
         path = _get_components()["skills"].save(skill, actor=actor)
-        _policy_store().add_rows([("p", "admin", "admin", skill.policy_obj, "use")], actor)
-        return {"name": skill.name, "path": str(path), "saved": True}
+        _policy_store().add_rows([("p", "admin", "admin", skill.policy_obj, "use"), *grants], actor)
+        return {"name": skill.name, "path": str(path), "saved": True, "granted": [r[1] for r in grants]}
     if kind == "skill_delete":
         name = str(payload.get("name", ""))
         if not _get_components()["skills"].delete(name):
@@ -1601,7 +1583,7 @@ def _skill_registry() -> SkillRegistry:
     return _get_components()["skills"]
 
 
-def _skill_summary(skill: Any, granted: set[str]) -> dict[str, Any]:
+def _skill_summary(skill: Any, granted: set[str], roles: dict[str, set[str]] | None = None) -> dict[str, Any]:
     return {
         "name": skill.name,
         "scope": skill.scope,
@@ -1611,18 +1593,52 @@ def _skill_summary(skill: Any, granted: set[str]) -> dict[str, Any]:
         "steps": skill.steps,
         "tool_calls": skill.tool_calls,
         "path": skill.path,
+        "body": skill.body,  # Mk21 Decision 7A: the card shows the markdown narrative by default
         "policy_row": f"skill_{skill.name}" in granted,
+        # Mk21 Decision 7B: who may use it (admin list only; the head view passes no roles)
+        "granted_roles": sorted((roles or {}).get(f"skill_{skill.name}", ())),
     }
+
+
+def _skill_grant_map() -> dict[str, set[str]]:
+    """`skill_<name>` -> the non-admin roles with a `p, role, dom, skill_<name>, use` row
+    (read once per request: on the shared database each read is a round trip)."""
+    grants: dict[str, set[str]] = {}
+    for sub, _dom, obj, _act in _policy_store().rules().get("p", []):
+        if sub != "admin" and obj.startswith("skill_"):
+            grants.setdefault(obj, set()).add(sub)
+    return grants
 
 
 def _granted_skill_objs() -> set[str]:
-    """`skill_<name>` objects with a non-admin `p, role, dom, skill_<name>, use` row
-    (read once per request: on the shared database each read is a round trip)."""
-    return {
-        obj
-        for sub, _dom, obj, _act in _policy_store().rules().get("p", [])
-        if sub != "admin" and obj.startswith("skill_")
-    }
+    """`skill_<name>` objects with a non-admin `p, role, dom, skill_<name>, use` row."""
+    return set(_skill_grant_map())
+
+
+def _role_domain(role: str) -> str | None:
+    """The policy domain a grantable role lives in, or None when no such role exists.
+
+    `admin` -> `admin`; otherwise the role must be a registered department's member role
+    (`<dept>_agent` or the department's own `role`) or its head role (`<dept>_head`)."""
+    if role == "admin":
+        return "admin"
+    for dept in get_store().list_departments():
+        if dept.name == "admin":
+            continue
+        if role in {dept.role or f"{dept.name}_agent", f"{dept.name}_agent", f"{dept.name}_head"}:
+            return dept.name
+    return None
+
+
+def _skill_grant_rows(policy_obj: str, roles: list[str]) -> list[tuple[str, str, str, str, str]]:
+    """Mk21 Decision 7E: explicit visibility rows for the ticked roles; unknown roles are a 422."""
+    rows = []
+    for role in dict.fromkeys(r.strip() for r in roles if r and r.strip()):
+        domain = _role_domain(role)
+        if domain is None:
+            raise HTTPException(status_code=422, detail=f"cannot grant to unknown role {role!r}")
+        rows.append(("p", role, domain, policy_obj, "use"))
+    return rows
 
 
 @app.get("/api/skills")
@@ -1632,8 +1648,8 @@ def list_skills(
     """List all skills (the skills/ folder, or the shared database; hot-reloaded)."""
     _verify_admin(authorization)
     skills, errors = _get_components()["skills"].load_with_errors()
-    granted = _granted_skill_objs()
-    return {"skills": [_skill_summary(s, granted) for s in skills], "errors": errors}
+    roles = _skill_grant_map()  # one policy read serves both fields
+    return {"skills": [_skill_summary(s, set(roles), roles) for s in skills], "errors": errors}
 
 
 @app.get("/api/skills/{name}")
@@ -1646,6 +1662,118 @@ def get_skill(
     if skill is None:
         raise HTTPException(status_code=404, detail=f"skill {name!r} not found")
     return {"content": render_skill(skill)}
+
+
+_SKILL_DRAFT_PROMPT = """You write skill files for a zero-trust enterprise assistant.
+Return ONLY one skill.md document and nothing else: YAML frontmatter between two `---` lines,
+then a short markdown body.
+
+Frontmatter keys:
+- name: lowercase_snake_case (letters, digits, underscores only)
+- trigger: one sentence saying when the skill should be used
+- scope: {scope}
+- owner_role: {owner_role}
+- version: 1
+- args_schema: a map of argument name -> {{type: string|number|integer|boolean, description: ...}}
+- steps: a list of short human-readable steps
+- tool_calls: a list of {{tool: <name>, args: {{...}}}}; args may use {{{{arg_name}}}} placeholders
+
+Use only these tools (name: what it does):
+{tools}
+
+The markdown body is a heading plus one to three plain sentences for a human reviewer."""
+
+
+def _strip_code_fence(text: str) -> str:
+    """Models often wrap the document in ```markdown fences; the parser wants the bare file."""
+    t = (text or "").strip()
+    m = re.match(r"^```[A-Za-z]*\s*\n(.*?)\n```\s*$", t, re.DOTALL)
+    return m.group(1).strip() if m else t
+
+
+@app.post("/api/skills/generate")
+def generate_skill_draft(
+    req: SkillGenerateRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Mk21 Decisions 7C/7D: draft a skill.md with the platform extractor model.
+
+    A DRAFT only: nothing is written to disk and no policy row is added. The admin reviews it
+    in the editor and saves through `POST /api/skills`, where the explicit `grant_to` applies.
+    The model is the shared platform one (`GET /api/system-memory/config`), so it is always a
+    `:free` id and generation inherits free-tier quality (accepted in the plan)."""
+    from dataclasses import replace as _replace
+
+    from app.agent.tools import TOOL_REGISTRY
+    from app.llm.base import classify_llm_error
+    from app.llm.system import get_system_provider
+
+    claims = _verify_admin(authorization)
+    scope = (req.scope or "").strip()
+    brief = (req.brief or "").strip()
+    if not brief:
+        raise HTTPException(status_code=422, detail="describe what the skill should do")
+    if len(brief) > 2000:
+        raise HTTPException(status_code=422, detail="keep the description under 2000 characters")
+    if scope == SCOPE_CENTRAL:
+        owner_role, default_grant = "admin", []  # admin's row is always added on save
+    elif scope.startswith("dept/"):
+        dept = get_store().get_department(scope.split("/", 1)[1])
+        if dept is None or dept.name == "admin":
+            raise HTTPException(status_code=422, detail=f"unknown department scope {scope!r}")
+        owner_role = dept.role or f"{dept.name}_agent"
+        default_grant = [owner_role]
+    else:
+        raise HTTPException(status_code=422, detail="scope must be 'central' or 'dept/<name>'")
+
+    try:
+        provider = get_system_provider()
+    except ValueError as exc:  # a non-:free model can never be used
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if provider is None:
+        raise HTTPException(
+            status_code=503,
+            detail="no platform model is configured: add its key under Memory → Platform extractor",
+        )
+    tools = "\n".join(f"- {t.name}: {t.description}" for t in TOOL_REGISTRY.values())
+    prompt = _SKILL_DRAFT_PROMPT.format(scope=scope, owner_role=owner_role, tools=tools)
+    try:
+        resp = provider.chat(
+            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": brief}],
+            temperature=0.2,
+            max_tokens=1500,
+        )
+    except Exception as exc:  # surfaced as a sanitized 502, never a 500
+        raise HTTPException(status_code=502, detail=classify_llm_error(exc)) from exc
+
+    draft = _strip_code_fence(resp.text or resp.content or "")
+    valid, error, name, exists = True, None, None, False
+    try:
+        skill = parse_skill_document(draft)
+        # The requested scope and owner win over whatever the model wrote.
+        skill = _replace(skill, scope=scope, owner_role=owner_role, version=1)
+        draft = render_skill(skill)
+        name = skill.name
+        exists = _get_components()["skills"].get(name) is not None
+    except SkillValidationError as exc:
+        valid, error = False, str(exc)  # still returned: the admin can fix it in the editor
+    _get_components()["audit"].log(
+        decision="ALLOW",
+        resource={"type": "skill-draft", "id": name or "invalid"},
+        actor={"sub": claims["sub"], "role": claims["role"], "dept": claims["dept"]},
+        run_id="dashboard",
+        reason="skill:generate_draft",
+    )
+    return {
+        "draft": draft,
+        "valid": valid,
+        "error": error,
+        "name": name,
+        "exists": exists,
+        "scope": scope,
+        "default_grant": default_grant,
+        "model": str(getattr(resp, "model", "") or ""),
+    }
 
 
 @app.post("/api/skills")
@@ -1661,10 +1789,11 @@ def create_skill(
     registry = _get_components()["skills"]
     if registry.get(skill.name) is not None:
         raise HTTPException(status_code=409, detail=f"skill {skill.name!r} already exists")
+    grants = _skill_grant_rows(skill.policy_obj, req.grant_to)  # validate before anything is staged
     # Mk18 Phase E: new executable procedure — second admin confirms when one exists.
     if _second_eyes_required(claims):
         proposal = get_store().second_eyes_propose(
-            "skill_save", {"content": req.content}, str(claims.get("sub", ""))
+            "skill_save", {"content": req.content, "grant_to": [r[1] for r in grants]}, str(claims.get("sub", ""))
         )
         return JSONResponse(
             status_code=202,
@@ -1676,8 +1805,8 @@ def create_skill(
         # Mk17: traversal guard is defense-in-depth; invalid scope/name is 422, never 500.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     # Mk18: the admin wildcard is gone — every new skill needs its own admin
-    # visibility row (idempotent; dept roles are granted by admins explicitly).
-    _policy_store().add_rows([("p", "admin", "admin", skill.policy_obj, "use")], claims["sub"])
+    # visibility row (idempotent). Mk21: plus exactly the roles the admin ticked.
+    _policy_store().add_rows([("p", "admin", "admin", skill.policy_obj, "use"), *grants], claims["sub"])
     _get_components()["audit"].log(
         decision="ALLOW",
         resource={"type": "skill", "id": skill.name},
@@ -1685,7 +1814,7 @@ def create_skill(
         run_id="dashboard",
         reason="admin",
     )
-    return {"name": skill.name, "path": str(path), "saved": True}
+    return {"name": skill.name, "path": str(path), "saved": True, "granted": [r[1] for r in grants]}
 
 
 @app.put("/api/skills/{name}")
@@ -1705,10 +1834,11 @@ def update_skill(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if skill.name != name:
         raise HTTPException(status_code=409, detail="skill name in frontmatter must match the url")
+    grants = _skill_grant_rows(skill.policy_obj, req.grant_to)
     # Mk18 Phase E: edited procedure — second admin confirms when one exists.
     if _second_eyes_required(claims):
         proposal = get_store().second_eyes_propose(
-            "skill_save", {"content": req.content}, str(claims.get("sub", ""))
+            "skill_save", {"content": req.content, "grant_to": [r[1] for r in grants]}, str(claims.get("sub", ""))
         )
         return JSONResponse(
             status_code=202,
@@ -1718,8 +1848,8 @@ def update_skill(
         path = registry.save(skill, actor=claims["sub"])
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    # Mk18: keep the admin visibility row present (wildcard is gone).
-    _policy_store().add_rows([("p", "admin", "admin", skill.policy_obj, "use")], claims["sub"])
+    # Mk18: keep the admin visibility row present (wildcard is gone). Mk21: plus ticked roles.
+    _policy_store().add_rows([("p", "admin", "admin", skill.policy_obj, "use"), *grants], claims["sub"])
     _get_components()["audit"].log(
         decision="ALLOW",
         resource={"type": "skill", "id": skill.name},
@@ -1727,7 +1857,7 @@ def update_skill(
         run_id="dashboard",
         reason="admin",
     )
-    return {"name": skill.name, "path": str(path), "saved": True}
+    return {"name": skill.name, "path": str(path), "saved": True, "granted": [r[1] for r in grants]}
 
 
 @app.delete("/api/skills/{name}")
@@ -2590,7 +2720,7 @@ def set_own_composio_key(
     claims, _token = _verified_member(authorization)
     api_key = (req.api_key or "").strip()
     if not api_key:
-        raise HTTPException(status_code=422, detail="paste your Composio API key first")
+        raise HTTPException(status_code=422, detail="paste your integration key first")
     from app.integrations.client import build_client
 
     client = build_client(api_key, settings.composio.base_url, settings.composio.timeout_seconds)
@@ -2659,7 +2789,7 @@ def integration_connect(
     if not api_key:
         raise HTTPException(
             status_code=422,
-            detail="save your Composio API key in Account → Integrations first",
+            detail="save your integration key in Account → Integrations first",
         )
     auth_config = _auth_config_for(app_name)
     if not auth_config:
@@ -2679,7 +2809,7 @@ def integration_connect(
         raise HTTPException(
             status_code=502,
             detail=(
-                f"the saved login setup for {app_name!r} does not exist in this Composio project. "
+                f"the saved login setup for {app_name!r} does not exist in this integration project. "
                 "It was likely copied from a different project, deleted, or is not the Auth Config ID. "
                 "Ask an admin to re-add it under Integrations → Catalog (auto-creates a fresh one)."
             ),
@@ -2707,7 +2837,7 @@ def integration_refresh(
 
     api_key = get_composio_key(claims["sub"], settings.composio.api_key)
     if not api_key:
-        raise HTTPException(status_code=422, detail="save your Composio API key first")
+        raise HTTPException(status_code=422, detail="save your integration key first")
     client = build_client(api_key, settings.composio.base_url, settings.composio.timeout_seconds)
     if hasattr(client, "list_for_user"):
         try:
@@ -2829,7 +2959,7 @@ def integration_catalog_add(
     if not admin_key:
         raise HTTPException(
             status_code=422,
-            detail="save your Composio key first (Account → Integrations), then add the toolkit",
+            detail="save your integration key first (Account → Integrations), then add the toolkit",
         )
     from app.integrations.client import build_client
 

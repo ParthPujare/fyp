@@ -116,10 +116,6 @@ a { color: var(--accent-2); }
 #nav .nav-item.logout { margin-top: auto; }
 #nav .nav-item.logout:hover { color: var(--bad); background: rgba(255, 77, 109, .08); }
 
-.side-foot { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
-#switcher { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
-#switcher .pill { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#who { font: 10.5px/1.45 var(--mono); color: var(--muted); word-break: break-all; padding: 0 2px; }
 
 #stage { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 #topbar {
@@ -146,7 +142,6 @@ body.logged-out #login-view { padding: 34px 30px 28px; animation: rise .8s var(-
 #login-view .row { flex-direction: column; align-items: stretch; }
 #login-view input { width: 100%; padding: 11px 12px; }
 #signin { padding: 12px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
-#login-hint { font: 11px/1.6 var(--mono); }
 .login-hero { display: none; text-align: center; margin-bottom: 24px; }
 body.logged-out .login-hero { display: block; }
 .shield { width: 96px; height: 96px; margin: 4px auto 18px; position: relative; display: grid; place-items: center; }
@@ -219,7 +214,7 @@ button.bad { background: rgba(255, 77, 109, .04); color: var(--bad); border-colo
 button.bad:hover { background: rgba(255, 77, 109, .12); box-shadow: 0 0 20px rgba(255, 77, 109, .3); }
 button:disabled { opacity: .45; cursor: not-allowed; transform: none; box-shadow: none; }
 
-input[type=text], input[type=password], textarea, select {
+input[type=text], input[type=password], input[type=search], textarea, select {
   background: var(--input); border: 1px solid var(--line); color: var(--fg);
   border-radius: 8px; padding: 9px 11px; font: 13.5px/1.4 var(--font);
   transition: border-color .2s, box-shadow .2s;
@@ -243,6 +238,11 @@ table {
 .card table { background: transparent; border-color: rgba(0, 240, 200, .08); -webkit-backdrop-filter: none; backdrop-filter: none; }
 th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid rgba(0, 240, 200, .07); vertical-align: top; overflow-wrap: anywhere; }
 td code { overflow-wrap: anywhere; }
+/* Mk21: short identifier columns never break mid-word (`admin`, `marketing_agent`): they wrap at
+   spaces only, so the column is at least as wide as its longest word. Departments: Name, Service,
+   Role, Heads. Members: Role, Dept. */
+#depts td:nth-child(1), #depts td:nth-child(2), #depts td:nth-child(6), #depts td:nth-child(7),
+#users td:nth-child(2), #users td:nth-child(3) { overflow-wrap: normal; word-break: normal; min-width: 8ch; }
 th { font: 600 10.5px/1.3 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--accent-2); background: rgba(0, 240, 200, .04); }
 tbody tr { transition: background .2s; }
 tbody tr:hover { background: rgba(0, 240, 200, .05); }
@@ -277,27 +277,37 @@ pre {
 .badge.rejected { color: var(--bad);  background: rgba(255, 77, 109, .1);  border-color: rgba(255, 77, 109, .45); }
 
 /* ---- chat ---- */
-#chat-layout { display: flex; gap: 18px; align-items: stretch; }
+/* Mk21 Decision 10: chat spans the screen HEIGHT (width stays inside main's 1240px). The layout
+   gets a definite height so the transcript can flex-fill it instead of stopping at 60vh. */
+#chat-layout { display: flex; gap: 18px; align-items: stretch; height: calc(100vh - 168px); min-height: 420px; }
 #chat-sidebar {
-  width: 240px; flex-shrink: 0; max-height: 70vh; overflow-y: auto; padding: 12px;
+  width: 240px; flex-shrink: 0; overflow-y: auto; padding: 12px;
   display: flex; flex-direction: column; gap: 6px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
   -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
 }
 #threads-list { display: flex; flex-direction: column; gap: 3px; }
 #chat-main {
-  flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 16px;
+  flex: 1; min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; padding: 16px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
   -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
 }
-#chat-transcript { min-height: 44vh; max-height: 60vh; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; margin-bottom: 14px; padding: 2px 4px 2px 0; }
+#chat-transcript { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; margin-bottom: 14px; padding: 2px 4px 2px 0; }
 #chat-transcript:empty { justify-content: center; align-items: center; }
 #chat-transcript:empty::before {
   content: "> secure channel open — every tool call is policy-checked before it runs";
   font: 12px/1.6 var(--mono); color: var(--muted); text-align: center; max-width: 40ch;
 }
 #chat-msg { flex: 1; resize: vertical; min-height: 48px; max-height: 160px; font: 14px/1.5 var(--font); }
-#chat-send { align-self: stretch; padding: 0 20px; }
+/* Mk21: circular icon send button, fixed size so it never stretches with the textarea. */
+#chat-send { flex: 0 0 auto; width: 46px; height: 46px; padding: 0; border-radius: 50%; display: grid; place-items: center; }
+#chat-send svg { width: 20px; height: 20px; }
+/* Mk21 Phase 10: paperclip beside the composer + the attachment chips above it */
+#chat-attach { flex: 0 0 auto; width: 46px; height: 46px; padding: 0; border-radius: 50%; display: grid; place-items: center; }
+#chat-attach svg { width: 19px; height: 19px; }
+#chat-attachments { margin-bottom: 8px; max-height: 76px; overflow-y: auto; }
+.chat-user .chat-files { margin-top: 6px; }
+#chat-model-select { max-width: min(320px, 46vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-user {
   align-self: flex-end; max-width: 75%; padding: 10px 14px; white-space: pre-wrap; word-break: break-word;
   color: var(--fg); border: 1px solid rgba(0, 240, 200, .45); border-radius: 14px 14px 4px 14px;
@@ -383,6 +393,82 @@ pre {
 @keyframes row-in { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
 @keyframes msg-in { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
 
+/* ---- Mk21 Phase 5/6: tag chips + the member scope picker. Chips wrap and the picker scrolls
+   inside itself, so a long scope list never pushes the page sideways (375 px assertion). ---- */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 2px 8px; border-radius: 6px;
+  font: 500 11.5px/1.45 var(--mono); color: #bff6ff; overflow-wrap: anywhere;
+  background: rgba(34, 211, 238, .08); border: 1px solid rgba(34, 211, 238, .3);
+}
+button.chip { cursor: pointer; }
+button.chip:hover { border-color: var(--accent); color: var(--accent); transform: none; box-shadow: none; }
+.chip-x { background: none; border: 0; padding: 0 2px; color: inherit; opacity: .6; font-size: 11px; line-height: 1; box-shadow: none; }
+.chip-x:hover { opacity: 1; color: var(--bad); transform: none; box-shadow: none; }
+.scope-picker { display: flex; flex-direction: column; gap: 6px; flex: 1 1 260px; min-width: 0; max-width: 100%; }
+.scope-picker .chips {
+  max-height: 96px; overflow-y: auto; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--input);
+}
+
+/* ---- Mk21 Phase 6: department detail rows + labelled forms ---- */
+.chip.more { background: rgba(0, 240, 200, .1); border-color: var(--line-hi); color: var(--accent); }
+tr.dept-detail > td { background: rgba(0, 240, 200, .035); }
+.detail-block { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 4px 0; min-width: 0; }
+.detail-label, .field label { font: 600 10.5px/1.4 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.detail-label { min-width: 9ch; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 10px 12px; }
+.field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.field input, .field select { width: 100%; }
+
+/* ---- Mk21 Phase 7: memory department view ---- */
+.memory-filters { margin: 4px 0 12px; }
+.memory-filters select { min-width: 0; max-width: 100%; }
+.memory-filters input[type=search] { flex: 1 1 200px; min-width: 0; }
+#memory-scopes { max-height: 62vh; overflow-y: auto; padding-right: 4px; }
+
+/* ---- Mk21 Phase 8: skill cards (markdown first) + the generation form ---- */
+.skill-body { margin: 8px 0 2px; line-height: 1.55; }
+.skill-body .md-h { margin: 6px 0 4px; font: 600 14px/1.3 var(--font); color: var(--fg); }
+.skill-body p { margin: 4px 0; }
+.skill-body ul, .skill-body ol { margin: 4px 0; padding-left: 20px; }
+.chip-off { color: var(--muted); background: rgba(132, 164, 158, .08); border-color: rgba(132, 164, 158, .3); }
+.field-label { font: 600 10.5px/1.4 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.grant-group { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; min-width: 0; }
+.chip.check { cursor: pointer; gap: 6px; }
+.chip.check input { margin: 0; }
+#gen-brief { width: 100%; resize: vertical; }
+
+/* ---- Mk21 Phase 9: ops summary strip + toolbar (wraps; never pushes the page sideways) ---- */
+.ops-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
+.ops-summary #ops-updated { font: 11.5px var(--mono); margin-left: auto; }
+.ops-toolbar { margin-bottom: 8px; }
+.ops-toolbar input[type=search] { flex: 1 1 200px; min-width: 0; }
+.ops-toolbar select, .ops-toolbar input[type=date] { min-width: 0; max-width: 100%; }
+input[type=date] {
+  background: var(--input); border: 1px solid var(--line); color: var(--fg); border-radius: 8px;
+  padding: 8px 10px; font: 13px/1.4 var(--font); color-scheme: dark;
+}
+#ops-count { font-size: 12px; margin-bottom: 8px; }
+
+/* ---- Mk21 Phase 3: collapsible icon rail, DESKTOP ONLY (phones keep the full-width top bar).
+   Labels are clipped + faded, never display:none / visibility:hidden: they keep a box, so
+   innerText (and the e2e nav-label checks) still see every item. ---- */
+#nav-toggle { flex: 0 0 auto; width: 32px; height: 32px; padding: 0; display: grid; place-items: center; border-radius: 8px; }
+#nav-toggle svg { width: 18px; height: 18px; transition: transform .25s var(--ease); }
+#nav .nav-item span, .brand h1, .brand small { white-space: nowrap; }
+@media (min-width: 861px) {
+  #sidebar { transition: width .25s var(--ease), padding .25s var(--ease); }
+  body.nav-collapsed { --side: 68px; }
+  body.nav-collapsed #sidebar { overflow: hidden; padding-left: 10px; padding-right: 10px; }
+  body.nav-collapsed #nav .nav-item { overflow: hidden; padding: 9px 14px; }
+  body.nav-collapsed #nav .nav-item span,
+  body.nav-collapsed .brand > div,
+  body.nav-collapsed .side-label { opacity: 0; transition: opacity .15s; }
+  body.nav-collapsed .brand { padding-left: 5px; padding-right: 0; }
+  body.nav-collapsed #nav-toggle svg { transform: scaleX(-1); }
+}
+
 /* ---- narrow screens: sidebar becomes a top bar, no sideways page scroll (Mk20) ---- */
 @media (max-width: 860px) {
   #shell { flex-direction: column; }
@@ -393,14 +479,15 @@ pre {
   #nav .nav-item { width: auto; flex-shrink: 0; padding: 8px 12px; }
   #nav .nav-item.active::before { display: none; }
   #nav .nav-item.logout { margin-top: 0; }
-  .side-foot { flex-direction: row; flex-wrap: wrap; align-items: center; padding-top: 10px; }
-  #switcher { flex-direction: row; flex-wrap: wrap; }
   #topbar { position: relative; padding: 10px 16px; }
+  #nav-toggle { display: none; }
   #crumb { display: none; }
   .sys { margin-left: 0; }
   main { padding: 16px; }
   #chat-layout { flex-direction: column; }
+  #chat-layout { height: auto; }
   #chat-sidebar { width: 100%; max-height: 30vh; }
+  #chat-main { height: 70vh; }
   .chat-user, .chat-assistant { max-width: 100%; }
   table { display: block; overflow-x: auto; }
   pre, code { white-space: pre-wrap; word-break: break-word; }

@@ -1,4 +1,4 @@
-.PHONY: test-e2e db-check db-migrate db-status db-prune db-sync-config test-db-up test-db-down test-pg test-pg-full install test lint run demo demo-memory demo-sanitize demo-skills demo-evals demo-attacks demo-chat-web demo-external auth gateway dashboard crm hr devops finance
+.PHONY: validate validate-quick test-e2e db-check db-migrate db-status db-prune db-sync-config test-db-up test-db-down test-pg test-pg-full install test lint run demo demo-memory demo-sanitize demo-skills demo-evals demo-attacks demo-chat-web demo-external auth gateway dashboard crm hr devops finance
 
 install:
 	uv sync
@@ -72,6 +72,12 @@ db-prune:           ## free space: keep only each chat's latest checkpoint (add 
 
 db-sync-config:      ## copy policy.csv / skills/ changes into the shared DB (ARGS="--dry-run", "--prune", "--overwrite-skills")
 	uv run python -m app.db sync-config $(ARGS)
+
+validate:            ## regression check across phases/plans: deps, lint, js, plans, ui-contract, tests, e2e
+	uv run python scripts/validate.py
+
+validate-quick:      ## same without the browser tests
+	uv run python scripts/validate.py --quick
 
 test-e2e:            ## browser tests only (Playwright; uses installed Chrome — E2E_BROWSER_CHANNEL=msedge|bundled to change)
 	uv run pytest tests/e2e

@@ -200,7 +200,7 @@ def test_toolkit_names_are_validated(member_store):
     assert resp.status_code == 422
 
 
-# ---------------------------------------------------------------- identity switch
+# ---------------------------------------------------------------- identity switch (retired in Mk21)
 
 
 @pytest.fixture
@@ -214,32 +214,47 @@ def _insecure_cookies(monkeypatch):
         monkeypatch.setattr(cfg.jwt, "cookie_secure", False)
 
 
-def test_session_switch_flips_the_active_cookie_slot(member_store, _insecure_cookies):
+def test_session_switch_endpoint_is_retired_but_slot_cookies_still_apply(member_store, _insecure_cookies):
+    """Mk21 Decision 1B retired `POST /api/session/switch` (Mk20 finding 13): the dashboard holds one
+    identity at a time and every login rewrites the active slot. What Mk20 protected still holds:
+    the active-slot cookie picks the session, unknown labels / missing slots authenticate nobody,
+    cookie writes still need CSRF, and logout clears every slot."""
     from app.harness.csrf import csrf_token_for
 
     s = get_settings()
     c = TestClient(dashboard_app)
-    # Plant the cookies the way a browser holds them after login (host-only, path /),
-    # so the server's Set-Cookie on switch REPLACES the active marker instead of adding
-    # a second cookie of the same name.
-    host = "testserver.local"
+    host = "testserver.local"  # host-only, path / — the way a browser holds them after login
     c.cookies.set("harness_token_admin", _token("admin@acme.com"), domain=host, path="/")
     c.cookies.set("harness_token_member", _token("alice@acme.com"), domain=host, path="/")
     c.cookies.set("harness_token_active", "admin", domain=host, path="/")
 
     def me():
-        scopes = [x["scope"] for x in c.get("/api/memory/me").json()]
-        return next(x for x in scopes if x.startswith("user/"))
+        resp = c.get("/api/memory/me")
+        if resp.status_code != 200:
+            return resp.status_code
+        return next(x["scope"] for x in resp.json() if x["scope"].startswith("user/"))
 
     assert me() == "user/admin@acme.com"
     csrf = csrf_token_for("admin@acme.com", s.jwt.secret, member_store.credentials_version("admin@acme.com"))
-    r = c.post("/api/session/switch", json={"label": "member"}, headers={"X-CSRF-Token": csrf})
-    assert r.status_code == 200 and r.json() == {"active": "member", "sub": "alice@acme.com"}
+    # the endpoint is gone: a valid cookie session with a valid CSRF token gets 404 ...
+    assert c.post("/api/session/switch", json={"label": "member"}, headers={"X-CSRF-Token": csrf}).status_code == 404
+    # ... and the CSRF gate still runs first for cookie-session writes
+    assert c.post("/api/session/switch", json={"label": "member"}).status_code == 403
+    assert me() == "user/admin@acme.com"  # nothing switched
+
+    # slot selection by the active marker still works (a fresh login rewrites it)
+    c.cookies.set("harness_token_active", "member", domain=host, path="/")
     assert me() == "user/alice@acme.com"
-    # needs CSRF like any cookie-session write; bad label / missing slot are rejected
-    assert c.post("/api/session/switch", json={"label": "admin"}).status_code == 403
-    csrf_a = csrf_token_for("alice@acme.com", s.jwt.secret, member_store.credentials_version("alice@acme.com"))
-    assert c.post("/api/session/switch", json={"label": "root"}, headers={"X-CSRF-Token": csrf_a}).status_code == 422
+    # an unknown label or a missing slot authenticates nobody
+    c.cookies.set("harness_token_active", "root", domain=host, path="/")
+    assert me() == 401
+    c.cookies.set("harness_token_active", "admin", domain=host, path="/")
     c.cookies.delete("harness_token_admin", domain=host, path="/")
-    assert c.post("/api/session/switch", json={"label": "admin"}, headers={"X-CSRF-Token": csrf_a}).status_code == 409
+    assert me() == 401
+
+    # logout clears all three cookies
+    out = c.post("/api/logout")
+    cleared = " ".join(out.headers.get_list("set-cookie"))
+    for name in ("harness_token_admin", "harness_token_member", "harness_token_active"):
+        assert f"{name}=" in cleared
 

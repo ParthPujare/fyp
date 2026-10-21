@@ -83,6 +83,7 @@ class Dash:
     trace: Any
     audit_path: Path
     policy_path: Path
+    memory: Any = None  # MemoryEditor over the temp store (seed facts with .apply)
 
 
 @pytest.fixture
@@ -140,6 +141,7 @@ def dash(servers, tmp_path, member_store) -> Dash:
         trace=components["trace"],
         audit_path=audit_path,
         policy_path=policy,
+        memory=components["memory_editor"],
     )
     d._components = saved_components
     for svc, auth_url, gateway_url, policy_path in saved:

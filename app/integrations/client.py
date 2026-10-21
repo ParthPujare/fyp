@@ -134,7 +134,7 @@ class ComposioClient:
 
     def get_connect_url(self, app: str, user_id: str, auth_config_id: str | None = None) -> str:
         if not self.api_key:
-            raise RuntimeError("save your Composio API key in Account → Integrations first")
+            raise RuntimeError("save your integration API key in Account → Integrations first")
         sdk = self._get_sdk()
         if sdk is None:
             raise RuntimeError("server is missing the Composio package — run `uv pip install composio` and restart")
@@ -222,7 +222,7 @@ class ComposioClient:
     def validate_key(self) -> tuple[bool, str]:
         """Health check for the key wizard — never raises, never leaks the key."""
         if not self.api_key:
-            return False, "paste your Composio API key first"
+            return False, "paste your integration API key first"
         sdk = self._get_sdk()
         if sdk is None:
             return False, "server is missing the Composio package — run `uv pip install composio` and restart (`make run`)"

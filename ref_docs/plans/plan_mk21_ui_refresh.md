@@ -2,7 +2,7 @@
 
 ## Metadata
 - Date: 2026-10-20
-- Status: **PLANNED 2026-10-20** — decisions locked, no code written
+- Status: **BUILT 2026-10-21 (session 037)** — Phases 1–11 implemented; offline + browser suites green (see History). Manual checks left to the owner: Chrome translate bubble, a live chat with a real model, one live skill generation with the platform key.
 - Follows: Mk20 (review fixes), Mk19 (security remediation), Mk18 (zero-trust closure)
 - Source: the 2026-10-20 UI walkthrough (10 screenshots + written issues), reviewed against the live test suite before any decision was locked
 
@@ -389,3 +389,44 @@ No behaviour, no layout. One commit, then `uv run pytest` to prove the copy real
 - Rewriting any closed plan document.
 - Server-side memory filtering.
 - Removing the dual-slot cookie scheme. Decision 1B removes only the switch endpoint, because four tests in `tests/test_cookies.py` and the auth service both depend on the slot cookies.
+
+---
+
+## History
+
+### 2026-10-21 — built (session 037)
+
+- **Mk20 finding 13 is retired** (Decision 1B). `POST /api/session/switch` and `SessionSwitchRequest`
+  are deleted; `tests/test_mk20_review_fixes.py` now asserts the route is a 404 (with a valid CSRF
+  token) while the protections finding 13 relied on still hold: the active-slot cookie selects the
+  session, unknown labels and missing slots authenticate nobody, cookie writes still need CSRF, and
+  logout clears all three cookies. The Mk20 document is not edited (INDEX rule 2).
+- **Found and fixed while building Phase 4: logout did not log out.** `/api/logout` is deliberately not
+  CSRF-exempt (Mk18 Phase D), but the page only fetched a CSRF token on its first write, so a session
+  that never wrote sent logout without one: 403, cookies kept until expiry. The page now fetches a
+  token before logout, and a login waits for a logout still in flight. The Phase 4 correctness
+  argument above ("logout clears all three cookies") only holds with this fix.
+- **Phase 8 needed one backend addition the plan did not list.** The existing save path added only the
+  admin visibility row, so Decision 7E's `Grant to` had nothing to write through. `POST`/`PUT
+  /api/skills` accept an optional `grant_to: [role]`; each role is validated against registered
+  departments (`admin`, `<dept>_agent` or the department's own role, `<dept>_head`), written as
+  `p, <role>, <dept>, skill_<name>, use`, and carried inside the second-admin proposal. Omitted =
+  the old behaviour. `GET /api/skills` also returns `body` and `granted_roles`.
+- **Acceptance "no screen shows Composio" reached the API's own messages.** The page prints API errors
+  as `error: <detail>`, so the five dashboard prompts ("paste/save your … key") and two in the
+  integration client were reworded. Messages that name what to act on keep the provider (unreachable
+  service, package to install, where to re-copy a rejected key, where to create an auth config), in
+  line with Decision 2A. Remaining `BYOK` mentions are code comments and prose docs only.
+- **Interpretations, recorded so a reviewer can disagree:** the Ops no-op guard compares run id +
+  outcome + event count (a still-running run changes without a new id); the scope picker offers
+  `read`/`create`/`delete` per service resource plus actions real members of that department already
+  hold, and the fixed objects as-is; a head's memory view has no member roster (`GET
+  /api/departments` is admin-only), so it shows their department plus the user scopes the server
+  already returns to them.
+- **Coverage gap closed.** Chat (Phases 2 and 10) is now exercised in the browser with the
+  `/api/chat*` calls stubbed in Playwright, so the page's composer, keyboard, bubbles, transcript
+  height and attachments are automated; the server-side chat path stays covered by
+  `tests/test_chat_web.py`.
+- **Validation.** `scripts/validate.py` (`make validate`, `make validate-quick`) runs deps/imports,
+  ruff, a JS syntax check of every dashboard script, the plan registry, a UI-contract check of the
+  anchors in the Gate table, the offline suite and the browser suite, each with `DATABASE_URL=""`.
