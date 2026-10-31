@@ -61,8 +61,11 @@ def login(req: LoginRequest, response: Response) -> dict:
     if getattr(member, "totp_secret", ""):
         from app.auth.store import verify_totp
 
+        # A wrong code counts toward the same 10-attempt lock as a wrong password.
         if not verify_totp(member.totp_secret, req.totp or ""):
+            store._record_failed_login(req.username)
             raise HTTPException(status_code=401, detail="invalid second factor")
+        store._clear_failed_login(req.username)
     claims = member.claims()
     token = create_token(
         member,

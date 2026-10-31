@@ -422,6 +422,9 @@ def resume_agent(
     # never marks the approval as resumed (`resumed_by/at` stay truthful).
     if not run_state_is_local(checkpointer, thread_id):
         raise ValueError(f"approval {approval_id!r} chat was deleted")
+    # Spend cap is checked before the claim for the same reason: an over-cap 429 must
+    # leave the approval claimable once the cap resets, not stuck behind a spent claim.
+    _spend_precheck(settings, entry.get("actor") or {})
 
     # Mk14 single-resume gate: exactly one process may resume a decided approval.
     # The claim lives here (not in the endpoints) so dashboard, gateway, dept and
@@ -429,16 +432,17 @@ def resume_agent(
     actor = entry.get("actor") or {}
     owner = str(actor.get("sub", ""))
     claim = getattr(approvals, "claim_resume", None)
-    if callable(claim) and owner:
+    claimed = callable(claim) and bool(owner)
+    if claimed:
         claim(approval_id, owner)
         entry = approvals.get(approval_id) or entry
-    _spend_precheck(settings, entry.get("actor") or {})
 
     run_id = entry["run_id"]
-    if key_id is None:
-        key_id = _saved_key_id(checkpointer, thread_id)
     deps = None
+    invoked = False
     try:
+        if key_id is None:
+            key_id = _saved_key_id(checkpointer, thread_id)
         deps, checkpointer = _build_deps(
             entry["actor"],
             settings=settings,
@@ -460,6 +464,7 @@ def resume_agent(
         graph = build_agent_graph(deps, checkpointer=checkpointer)
         from langgraph.types import Command
 
+        invoked = True
         try:
             final_state = graph.invoke(
                 Command(resume=entry["status"] == "approved"),
@@ -502,6 +507,16 @@ def resume_agent(
             approval_level=level if interrupted else None,
             approval_route=route if interrupted else None,
         )
+    except Exception:
+        # Nothing ran yet (deps/graph build failed): give the claim back so a retry can
+        # resume. After invoke the claim stays — the approved action may have executed.
+        release = getattr(approvals, "release_resume", None)
+        if claimed and not invoked and callable(release):
+            try:
+                release(approval_id, owner)
+            except Exception:  # noqa: BLE001, S110
+                pass
+        raise
     finally:
         if deps is not None:
             _flush_trace(deps.trace, run_id)

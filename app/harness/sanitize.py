@@ -83,7 +83,11 @@ def sanitize_response(
     enforcer: PolicyEnforcer,
 ) -> Any:
     """Recursively mask sensitive fields in a structured tool response (in place
-    on lists/dicts; scalars are returned as-is)."""
+    on dicts; lists are rebuilt, so callers must use the return value).
+
+    String values are also pattern-masked (as ``sanitize_text``): an SSN inside a
+    free-text field such as a CRM note must not survive just because its key is
+    not named ``ssn``."""
     if isinstance(data, dict):
         for key, value in data.items():
             if _mask_value(str(key), enforcer, claims):
@@ -93,6 +97,8 @@ def sanitize_response(
         return data
     if isinstance(data, list):
         return [sanitize_response(item, claims, enforcer) for item in data]
+    if isinstance(data, str):
+        return sanitize_text(data, claims, enforcer)
     return data
 
 
@@ -140,7 +146,7 @@ def sanitize_tool_result(
     the value). Otherwise the free text is masked by regex patterns.
     """
     if result.data is not None:
-        sanitize_response(result.data, claims, enforcer)
+        result.data = sanitize_response(result.data, claims, enforcer)
         result.content = json.dumps(result.data, sort_keys=True, default=str)
     elif result.content:
         result.content = sanitize_text(result.content, claims, enforcer)

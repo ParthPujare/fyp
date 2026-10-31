@@ -1161,22 +1161,20 @@ class MemberStore:
 
     def _record_failed_login(self, username: str) -> None:
         # NOTE: no _bump_version — login noise must not rebuild the enforcer.
+        # The increment happens in SQL (not read-then-write), so concurrent failures
+        # cannot overwrite each other's count and slip under the lock threshold.
         conn = self._connect()
         try:
             try:
-                attempts, _ = self._throttle_state(username)
-                attempts += 1
-                if attempts >= _LOCK_AFTER_ATTEMPTS:
-                    locked = (datetime.now(UTC) + timedelta(minutes=_LOCK_MINUTES)).isoformat()
-                    conn.execute(
-                        "UPDATE members SET login_attempts = ?, locked_until = ? WHERE username = ?",
-                        (attempts, locked, username),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE members SET login_attempts = ? WHERE username = ?",
-                        (attempts, username),
-                    )
+                locked = (datetime.now(UTC) + timedelta(minutes=_LOCK_MINUTES)).isoformat()
+                conn.execute(
+                    "UPDATE members SET login_attempts = COALESCE(login_attempts, 0) + 1 WHERE username = ?",
+                    (username,),
+                )
+                conn.execute(
+                    "UPDATE members SET locked_until = ? WHERE username = ? AND login_attempts >= ?",
+                    (locked, username, _LOCK_AFTER_ATTEMPTS),
+                )
                 conn.commit()
             except Exception:  # noqa: BLE001, S110
                 pass
@@ -1208,7 +1206,10 @@ class MemberStore:
         if not verify_password(password, member.password_hash):
             self._record_failed_login(username)
             return False
-        self._clear_failed_login(username)
+        # With a second factor set, the counter resets only once the TOTP code also
+        # passes (auth service login); else a known password would re-arm unlimited guesses.
+        if not member.totp_secret:
+            self._clear_failed_login(username)
         return member.active
 
     def set_totp_secret(self, username: str, secret_b32: str, actor: str = "admin") -> MemberRecord:
@@ -1771,6 +1772,23 @@ class MemberStore:
         finally:
             conn.close()
         self._audit_entry(actor, f"toolkit:{'enable' if enabled else 'disable'}:{toolkit}", "toolkit", toolkit)
+
+    def fill_toolkit_auth_config(self, toolkit: str, auth_config_id: str) -> bool:
+        """Record a working auth config ID on an existing catalog row that has none.
+
+        The narrow write a member's Connect may make: never inserts a row and never
+        touches the admin-owned label or enabled flag. True if a row was filled."""
+        conn = self._connect()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "UPDATE toolkit_catalog SET auth_config_id = ?, updated_at = ?"
+                    " WHERE toolkit = ? AND COALESCE(auth_config_id, '') = ''",
+                    (auth_config_id, _now(), toolkit),
+                )
+                return cur.rowcount > 0
+        finally:
+            conn.close()
 
     def cache_toolkit_tools(self, toolkit: str, tools: list[dict[str, Any]]) -> int:
         from app.integrations.adapter import risk_for_slug

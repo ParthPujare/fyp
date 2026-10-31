@@ -94,26 +94,27 @@ deletes it. The "GET /health" lines in the logs are Docker's own healthcheck —
 
 ### What is (and is not) shared today
 
-Docker gives every teammate the **same app**, not the **same data**: each machine's container has
-its own private volume (its own members, chats, approvals). Everyone starts from the same seeded
-demo accounts and diverges from there. A single shared database for the whole team is the next
-part of Mk13 (Neon Postgres, Phases 1–6 of the plan) and is **not built yet**.
+Docker on its own gives every teammate the **same app**, not the **same data**: without
+`DATABASE_URL`, each machine's container has its own private volume (its own members, chats,
+approvals), starting from the same seeded demo accounts and diverging from there. Set
+`DATABASE_URL` to the team's Neon database (next section) and the data is shared too.
 
-## Shared database (Neon Postgres) — Mk13, in progress
+## Shared database (Neon Postgres) — Mk13
 
 Goal: every teammate's app reads and writes **one** cloud database instead of private files.
-**Status: Phase 5 of 6.** With `DATABASE_URL` set (see below) these are now **shared by everyone**:
+**Status: all 6 phases built.** With `DATABASE_URL` set (see below) these are **shared by everyone**:
 
-| Shared now | Still per-machine (moves in a later phase) |
-|---|---|
-| members, passwords, roles, departments | policy rules and skills (Phase 6) |
-| each member's LLM keys, Composio key, connected apps, toolkit catalog | |
-| approvals queue — **decide from any machine** | |
-| memory facts (central / department / personal) | |
-| chat history and threads, paused runs | |
-| run traces / trajectory viewer | |
-| episodic recall — "remember what we discussed" (scope-isolated, see below) | |
-| audit log — one tamper-evident hash chain written by every laptop | |
+| Shared |
+|---|
+| members, passwords, roles, departments |
+| each member's LLM keys, Composio key, connected apps, toolkit catalog |
+| approvals queue — **decide from any machine** |
+| memory facts (central / department / personal) |
+| chat history and threads, paused runs |
+| run traces / trajectory viewer |
+| episodic recall — "remember what we discussed" (scope-isolated, see below) |
+| audit log — one tamper-evident hash chain written by every laptop |
+| policy rules and skills — the database is the source of truth after first start (see `sync-config` below) |
 
 Without `DATABASE_URL` nothing changes: everything stays in local SQLite files.
 Plan and design notes: `ref_docs/plans/plan_mk13_docker_cloud_db.md`.

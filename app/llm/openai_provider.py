@@ -219,7 +219,14 @@ class OpenAIProvider(LLMProvider):
         tool_calls = []
         if getattr(message, "tool_calls", None):
             for tc in message.tool_calls:
-                args = json.loads(tc.function.arguments or "{}")
+                # Small local models often emit truncated/invalid JSON args; same
+                # fallback as ZenProvider (the tool's own validation then reports it).
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    args = {}
+                if not isinstance(args, dict):
+                    args = {}
                 tool_calls.append(ToolCall(name=tc.function.name, args=args))
 
         usage_dict = None

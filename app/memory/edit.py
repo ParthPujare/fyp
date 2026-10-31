@@ -70,7 +70,8 @@ class MemoryEditor:
             return self.remove(fact.scope, fact.match or fact.text)
         prov = getattr(fact, "provenance", None) or {}
         if prov:
-            return self._add_with_provenance(fact.scope, fact.text, dict(prov))
+            # Extracted facts carry provenance; the Mk17 empty/length rules apply to them too.
+            return self._add_with_provenance(fact.scope, self._check_text(fact.text), dict(prov))
         return self.add(fact.scope, fact.text)
 
     def add(self, scope: str, text: str) -> EditOutcome:

@@ -2814,10 +2814,12 @@ def integration_connect(
                 "Ask an admin to re-add it under Integrations → Catalog (auto-creates a fresh one)."
             ),
         ) from exc
-    # Remember the working ID in the catalog so the next Connect skips the fallback.
+    # Remember a working .env fallback ID on the catalog row so the next Connect skips
+    # the fallback. Only fills an empty ID: label/enabled are admin-owned (Mk18 Phase F),
+    # so a member call must never rewrite them (or re-enable a toolkit mid-disable).
     if auth_config:
         try:
-            get_store().upsert_toolkit(app_name, enabled=True, auth_config_id=auth_config, actor=claims["sub"])
+            get_store().fill_toolkit_auth_config(app_name, auth_config)
         except Exception:  # noqa: BLE001, S110 - cache sync is best-effort
             pass
     get_store().set_connected_account(claims["sub"], app_name, account_id="", status="pending")

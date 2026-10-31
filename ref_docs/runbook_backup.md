@@ -25,7 +25,7 @@ Verify after every prune: `python -m app.db verify-audit` must print `chain inta
   reseeds demo accounts — confirm twice, never on a machine holding the only
   copy of local (non-Neon) chats.
 - **Restore check:** after restore, `docker compose up -d --build`,
-  `python -m app.db check` (0001..0014, no ahead/behind warning),
+  `python -m app.db check` (0001..0015, no ahead/behind warning),
   `python -m app.db verify-audit`.
 
 ## 3. HMAC rotation (audit + trace, 24h dual window)
@@ -36,7 +36,7 @@ key, so rotation never rewrites history.
 1. Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"` → `NEW`.
 2. Set `SERVICES__AUDIT_HMAC_KEY=NEW`, append the old value to
    `SERVICES__AUDIT_HMAC_KEY_PREV` (comma-separated if several).
-   Same for `TRACE__HMAC_KEY` / `TRACE__HMAC_KEY_PREV` if trace HMAC is on.
+   Same for `SERVICES__TRACE_HMAC_KEY` / `SERVICES__TRACE_HMAC_KEY_PREV` if trace HMAC is on.
 3. Restart/rebuild every PC (`docker compose up -d --build`) within 24h.
 4. Verify on each PC: `python -m app.db verify-audit` → `chain intact`;
    trace spot-check passes.

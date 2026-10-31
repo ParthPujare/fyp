@@ -36,11 +36,16 @@ _UNTRUSTED_RE = re.compile(
     r'<untrusted source="[^"]*">(.*?)</untrusted>', re.DOTALL | re.IGNORECASE
 )
 
+# Any open/close tag inside the wrapped text (`</untrusted>`, `< /UNTRUSTED`, a nested
+# `<untrusted source=...>`) is defanged to `&lt;...` so it cannot end the span early.
+_TAG_RE = re.compile(r"<(\s*/?\s*untrusted)", re.IGNORECASE)
+
 
 def wrap(source: str, text: str) -> str:
-    """Wrap untrusted text with its provenance source."""
+    """Wrap untrusted text with its provenance source; tags inside it are neutralized."""
     safe_source = re.sub(r'[^A-Za-z0-9_:./-]', "_", str(source or "unknown"))[:64]
-    return f"{WRAP_OPEN_TMPL.format(source=safe_source)}{text or ''}{WRAP_CLOSE}"
+    inner = _TAG_RE.sub(r"&lt;\1", text or "")
+    return f"{WRAP_OPEN_TMPL.format(source=safe_source)}{inner}{WRAP_CLOSE}"
 
 
 def contains_instruction(text: str) -> bool:

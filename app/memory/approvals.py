@@ -261,6 +261,20 @@ class ApprovalStore:
             raise ValueError(f"approval {approval_id!r} already resumed by {row['resumed_by']}")
         return self.get(approval_id)  # type: ignore[return-value]
 
+    def release_resume(self, approval_id: str, owner: str) -> None:
+        """Undo `owner`'s claim when the resume failed before the graph ran.
+
+        Only for failures where nothing executed (deps/graph build); once the graph
+        is invoked the claim stays, since the approved action may already have run.
+        """
+        with self._write_lock:
+            with self._conn:
+                self._conn.execute(
+                    "UPDATE approvals SET resumed_by = NULL, resumed_at = NULL "
+                    "WHERE id = ? AND resumed_by = ?",
+                    (approval_id, owner),
+                )
+
     def decide(
         self, approval_id: str, approve: bool, admin: str, comment: str | None = None
     ) -> dict[str, Any]:

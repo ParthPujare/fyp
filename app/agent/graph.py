@@ -51,7 +51,7 @@ from app.harness.sanitize import MASK, sanitize_text, sanitize_tool_result
 from app.harness.untrusted import UNTRUSTED_DATA_RULE, sanitize_untrusted
 from app.llm.base import LLMProvider
 from app.memory.approvals import ApprovalStore
-from app.memory.edit import MemoryEditor, MemoryMatchError
+from app.memory.edit import MemoryEditor, MemoryMatchError, MemoryValidationError
 from app.memory.episodic import EpisodicStore
 from app.memory.extract import extract_facts
 from app.memory.recall import RecallService
@@ -884,7 +884,17 @@ def build_agent_graph(deps: AgentDeps, checkpointer: Any = None):
                 )
                 steps = _audit_steps(deps, approval_id, resource)
                 if approved:
-                    editor.apply(fact)
+                    try:
+                        editor.apply(fact)
+                    except MemoryValidationError as exc:  # approved but empty/too long: skip, never sink
+                        deps.trace.add_event(
+                            deps.run_id,
+                            TraceEventType.MEMORY_WRITE,
+                            actor,
+                            {"scope": fact.scope, "op": fact.op, "decision": "skipped",
+                             "reason": exc.code, "approval_id": approval_id},
+                        )
+                        continue
                     deps.audit.log(decision="APPROVED", resource=resource, actor=actor, run_id=deps.run_id, reason=reason)
                     deps.trace.add_event(
                         deps.run_id,
